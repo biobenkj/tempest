@@ -97,7 +97,7 @@ plot_annotations(annotations, output='results.pdf')
 
 ## Architecture
 
-Tempest follows a clean, modular architecture:
+Tempest code/file architecture:
 
 ```
 tempest/
