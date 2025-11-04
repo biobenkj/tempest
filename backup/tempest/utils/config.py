@@ -190,50 +190,6 @@ class InferenceConfig:
 
 
 @dataclass
-class HybridTrainingConfig:
-    """Configuration for hybrid robustness training."""
-    # Enable hybrid training
-    enabled: bool = False
-    
-    # Training phases (epochs for each)
-    warmup_epochs: int = 5
-    discriminator_epochs: int = 10
-    pseudolabel_epochs: int = 10
-    
-    # Invalid read generation parameters
-    invalid_ratio: float = 0.1
-    segment_loss_prob: float = 0.3
-    segment_dup_prob: float = 0.3
-    truncation_prob: float = 0.2
-    chimeric_prob: float = 0.1
-    scrambled_prob: float = 0.1
-    
-    # Loss weights
-    invalid_weight_initial: float = 0.1
-    invalid_weight_max: float = 0.3
-    adversarial_weight: float = 0.1
-    
-    # Pseudo-labeling parameters
-    confidence_threshold: float = 0.9
-    confidence_decay: float = 0.95
-    pseudo_weight: float = 0.5
-    max_pseudo_examples: int = 1000
-    
-    # Discriminator settings
-    discriminator_lr_factor: float = 0.1
-    discriminator_hidden_dim: int = 64
-    
-    # Validation
-    validate_architecture: bool = True
-    min_unique_segments: int = 3
-    max_segment_repetition: int = 2
-    
-    @classmethod
-    def from_dict(cls, config: dict):
-        return cls(**{k: v for k, v in config.items() if k in cls.__annotations__})
-
-
-@dataclass
 class TempestConfig:
     """Master configuration for Tempest."""
     model: ModelConfig
@@ -242,7 +198,6 @@ class TempestConfig:
     ensemble: Optional[EnsembleConfig] = None
     inference: Optional[InferenceConfig] = None
     pwm: Optional[PWMConfig] = None
-    hybrid: Optional[HybridTrainingConfig] = None
     
     @classmethod
     def from_yaml(cls, yaml_path: str):
@@ -283,18 +238,13 @@ class TempestConfig:
         if 'pwm' in config:
             pwm_config = PWMConfig.from_dict(config['pwm'])
         
-        hybrid_config = None
-        if 'hybrid' in config:
-            hybrid_config = HybridTrainingConfig.from_dict(config['hybrid'])
-        
         return cls(
             model=model_config,
             simulation=simulation_config,
             training=training_config,
             ensemble=ensemble_config,
             inference=inference_config,
-            pwm=pwm_config,
-            hybrid=hybrid_config
+            pwm=pwm_config
         )
     
     def to_yaml(self, output_path: str):

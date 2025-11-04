@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 """
-Main training script for Tempest.
+Main training script for Tempest with hybrid training support.
 
-This script demonstrates the complete pipeline:
-1. Load configuration from YAML
-2. Simulate training data with ACC PWM
-3. Build model architecture
-4. Train model
-5. Evaluate and save results
+Supports both standard and hybrid robustness training modes.
 """
 
 import os
@@ -19,13 +14,17 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 
-# Add tempest to path
+# Add to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from tempest.utils import load_config, ensure_dir
-from tempest.data import SequenceSimulator, reads_to_arrays
-from tempest.core.models import build_model_from_config, print_model_summary
+# Import from root-level modules (not tempest.* until refactored)
+from config import load_config
+from simulator import SequenceSimulator, reads_to_arrays
+from models import build_model_from_config, print_model_summary
+from io import ensure_dir
 
+# Import hybrid training components
+from hybrid_trainer import HybridTrainer
 
 # Configure logging
 logging.basicConfig(
@@ -42,10 +41,9 @@ def setup_gpu():
     if gpus:
         logger.info(f"Found {len(gpus)} GPU(s)")
         try:
-            # Enable memory growth to avoid allocating all GPU memory
             for gpu in gpus:
                 tf.config.experimental.set_memory_growth(gpu, True)
-            logger.info("✓ Configured GPU memory growth")
+            logger.info("Configured GPU memory growth")
         except RuntimeError as e:
             logger.warning(f"GPU configuration error: {e}")
     else:
@@ -53,28 +51,16 @@ def setup_gpu():
 
 
 def pad_sequences(sequences: np.ndarray, labels: np.ndarray, max_length: int) -> tuple:
-    """
-    Pad sequences to max_length.
-    
-    Args:
-        sequences: Array of shape (num_sequences, seq_length)
-        labels: Array of shape (num_sequences, seq_length)
-        max_length: Target length
-        
-    Returns:
-        Tuple of (padded_sequences, padded_labels)
-    """
+    """Pad sequences to max_length."""
     num_sequences = sequences.shape[0]
     current_length = sequences.shape[1]
     
     if current_length == max_length:
         return sequences, labels
     
-    # Create padded arrays
     padded_sequences = np.zeros((num_sequences, max_length), dtype=sequences.dtype)
     padded_labels = np.zeros((num_sequences, max_length), dtype=labels.dtype)
     
-    # Copy data
     copy_length = min(current_length, max_length)
     padded_sequences[:, :copy_length] = sequences[:, :copy_length]
     padded_labels[:, :copy_length] = labels[:, :copy_length]
@@ -83,16 +69,7 @@ def pad_sequences(sequences: np.ndarray, labels: np.ndarray, max_length: int) ->
 
 
 def convert_labels_to_categorical(labels: np.ndarray, num_classes: int) -> np.ndarray:
-    """
-    Convert integer labels to one-hot encoding.
-    
-    Args:
-        labels: Array of shape (num_samples, seq_length) with integer labels
-        num_classes: Number of classes
-        
-    Returns:
-        One-hot encoded array of shape (num_samples, seq_length, num_classes)
-    """
+    """Convert integer labels to one-hot encoding."""
     num_samples, seq_length = labels.shape
     categorical = np.zeros((num_samples, seq_length, num_classes), dtype=np.float32)
     
@@ -104,16 +81,7 @@ def convert_labels_to_categorical(labels: np.ndarray, num_classes: int) -> np.nd
 
 
 def prepare_data(config, pwm_file=None):
-    """
-    Simulate and prepare training data.
-    
-    Args:
-        config: TempestConfig object
-        pwm_file: Optional path to PWM file
-        
-    Returns:
-        Tuple of (X_train, y_train, X_val, y_val, label_to_idx)
-    """
+    """Simulate and prepare training data."""
     logger.info("="*80)
     logger.info("STEP 1: DATA PREPARATION")
     logger.info("="*80)
@@ -148,128 +116,62 @@ def prepare_data(config, pwm_file=None):
     y_train = convert_labels_to_categorical(y_train, config.model.num_labels)
     y_val = convert_labels_to_categorical(y_val, config.model.num_labels)
     
-    logger.info(f"✓ Data preparation complete")
+    logger.info(f"Data preparation complete")
     logger.info(f"  X_train: {X_train.shape}")
     logger.info(f"  y_train: {y_train.shape}")
     logger.info(f"  X_val: {X_val.shape}")
     logger.info(f"  y_val: {y_val.shape}")
     
-    return X_train, y_train, X_val, y_val, label_to_idx
+    return X_train, y_train, X_val, y_val, label_to_idx, train_reads, val_reads
 
 
-def build_model(config):
-    """
-    Build model from configuration.
-    
-    Args:
-        config: TempestConfig object
-        
-    Returns:
-        Keras Model
-    """
+def train_standard(config, X_train, y_train, X_val, y_val, label_to_idx):
+    """Standard training without hybrid robustness."""
     logger.info("\n" + "="*80)
-    logger.info("STEP 2: MODEL BUILDING")
+    logger.info("STANDARD TRAINING MODE")
     logger.info("="*80)
     
+    # Build model
     model = build_model_from_config(config)
     print_model_summary(model)
     
-    return model
-
-
-def compile_model(model, config):
-    """
-    Compile model with optimizer and loss.
-    
-    Args:
-        model: Keras Model
-        config: TempestConfig object
-    """
-    logger.info("Compiling model...")
-    
-    # Optimizer
-    if config.training.optimizer.lower() == 'adam':
-        optimizer = keras.optimizers.Adam(learning_rate=config.training.learning_rate)
-    elif config.training.optimizer.lower() == 'sgd':
-        optimizer = keras.optimizers.SGD(learning_rate=config.training.learning_rate)
-    else:
-        logger.warning(f"Unknown optimizer '{config.training.optimizer}', using Adam")
-        optimizer = keras.optimizers.Adam(learning_rate=config.training.learning_rate)
-    
-    # Loss and metrics
+    # Compile
+    optimizer = keras.optimizers.Adam(learning_rate=config.training.learning_rate)
     model.compile(
         optimizer=optimizer,
         loss='categorical_crossentropy',
         metrics=['accuracy']
     )
     
-    logger.info(f"✓ Model compiled with {config.training.optimizer} optimizer")
-
-
-def train_model(model, X_train, y_train, X_val, y_val, config):
-    """
-    Train model with callbacks.
-    
-    Args:
-        model: Keras Model
-        X_train, y_train: Training data
-        X_val, y_val: Validation data
-        config: TempestConfig object
-        
-    Returns:
-        Training history
-    """
-    logger.info("\n" + "="*80)
-    logger.info("STEP 3: MODEL TRAINING")
-    logger.info("="*80)
-    
-    # Create checkpoint directory
+    # Callbacks
     checkpoint_dir = Path(config.training.checkpoint_dir)
     ensure_dir(str(checkpoint_dir))
     
-    # Callbacks
-    callbacks = []
-    
-    # Model checkpoint
-    checkpoint_path = checkpoint_dir / "model_best.h5"
-    checkpoint_callback = keras.callbacks.ModelCheckpoint(
-        filepath=str(checkpoint_path),
-        monitor='val_loss',
-        save_best_only=True,
-        save_weights_only=False,
-        verbose=1
-    )
-    callbacks.append(checkpoint_callback)
-    
-    # Early stopping
-    early_stopping = keras.callbacks.EarlyStopping(
-        monitor='val_loss',
-        patience=config.training.early_stopping_patience,
-        restore_best_weights=True,
-        verbose=1
-    )
-    callbacks.append(early_stopping)
-    
-    # Reduce learning rate on plateau
-    reduce_lr = keras.callbacks.ReduceLROnPlateau(
-        monitor='val_loss',
-        factor=0.5,
-        patience=config.training.reduce_lr_patience,
-        min_lr=1e-6,
-        verbose=1
-    )
-    callbacks.append(reduce_lr)
-    
-    # CSV logger
-    csv_path = checkpoint_dir / "training_history.csv"
-    csv_logger = keras.callbacks.CSVLogger(str(csv_path))
-    callbacks.append(csv_logger)
+    callbacks = [
+        keras.callbacks.ModelCheckpoint(
+            filepath=str(checkpoint_dir / "model_best.h5"),
+            monitor='val_loss',
+            save_best_only=True,
+            verbose=1
+        ),
+        keras.callbacks.EarlyStopping(
+            monitor='val_loss',
+            patience=config.training.early_stopping_patience,
+            restore_best_weights=True,
+            verbose=1
+        ),
+        keras.callbacks.ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.5,
+            patience=config.training.reduce_lr_patience,
+            min_lr=1e-6,
+            verbose=1
+        ),
+        keras.callbacks.CSVLogger(str(checkpoint_dir / "training_history.csv"))
+    ]
     
     # Train
     logger.info(f"Training for up to {config.training.epochs} epochs...")
-    logger.info(f"Batch size: {config.model.batch_size}")
-    logger.info(f"Checkpoints will be saved to: {checkpoint_dir}")
-    
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
@@ -279,61 +181,41 @@ def train_model(model, X_train, y_train, X_val, y_val, config):
         verbose=1
     )
     
-    logger.info("✓ Training complete")
-    
-    return history
-
-
-def evaluate_model(model, X_val, y_val):
-    """
-    Evaluate model on validation set.
-    
-    Args:
-        model: Trained Keras Model
-        X_val, y_val: Validation data
-    """
-    logger.info("\n" + "="*80)
-    logger.info("STEP 4: MODEL EVALUATION")
-    logger.info("="*80)
-    
-    logger.info("Evaluating on validation set...")
+    # Evaluate
     results = model.evaluate(X_val, y_val, verbose=0)
+    logger.info(f"\nValidation Loss: {results[0]:.4f}")
+    logger.info(f"Validation Accuracy: {results[1]:.4f}")
     
-    logger.info(f"✓ Validation Loss: {results[0]:.4f}")
-    logger.info(f"✓ Validation Accuracy: {results[1]:.4f}")
+    # Save
+    model.save(str(checkpoint_dir / "model_final.h5"))
+    logger.info(f"Saved model to: {checkpoint_dir}")
+    
+    return model
 
 
-def save_model(model, config, label_to_idx):
-    """
-    Save trained model and metadata.
-    
-    Args:
-        model: Trained Keras Model
-        config: TempestConfig object
-        label_to_idx: Label to index mapping
-    """
+def train_hybrid(config, train_reads, val_reads, unlabeled_fastq=None):
+    """Hybrid robustness training with invalid reads and pseudo-labels."""
     logger.info("\n" + "="*80)
-    logger.info("STEP 5: SAVING MODEL")
+    logger.info("HYBRID ROBUSTNESS TRAINING MODE")
     logger.info("="*80)
     
-    checkpoint_dir = Path(config.training.checkpoint_dir)
+    if not config.hybrid or not config.hybrid.enabled:
+        logger.warning("Hybrid training requested but not enabled in config!")
+        logger.warning("Add 'hybrid:' section to config or use --config hybrid_config.yaml")
+        return None
     
-    # Save final model
-    final_model_path = checkpoint_dir / "model_final.h5"
-    model.save(str(final_model_path))
-    logger.info(f"✓ Saved final model to: {final_model_path}")
+    # Initialize hybrid trainer
+    trainer = HybridTrainer(config)
     
-    # Save label mapping
-    import json
-    label_map_path = checkpoint_dir / "label_mapping.json"
-    with open(label_map_path, 'w') as f:
-        json.dump(label_to_idx, f, indent=2)
-    logger.info(f"✓ Saved label mapping to: {label_map_path}")
+    # Run hybrid training
+    model = trainer.train(
+        train_reads=train_reads,
+        val_reads=val_reads,
+        unlabeled_fastq=unlabeled_fastq,
+        checkpoint_dir=config.training.checkpoint_dir
+    )
     
-    # Save configuration
-    config_path = checkpoint_dir / "config.yaml"
-    config.to_yaml(str(config_path))
-    logger.info(f"✓ Saved configuration to: {config_path}")
+    return model
 
 
 def main():
@@ -360,12 +242,25 @@ def main():
         default=None,
         help='Output directory for checkpoints (overrides config)'
     )
+    parser.add_argument(
+        '--hybrid',
+        action='store_true',
+        help='Enable hybrid robustness training (requires config.hybrid section)'
+    )
+    parser.add_argument(
+        '--unlabeled',
+        type=str,
+        default=None,
+        help='Path to unlabeled FASTQ for pseudo-label training (hybrid mode only)'
+    )
     
     args = parser.parse_args()
     
     # Print header
     print("\n" + "="*80)
     print(" "*25 + "TEMPEST TRAINING PIPELINE")
+    if args.hybrid:
+        print(" "*25 + "(HYBRID ROBUSTNESS MODE)")
     print("="*80 + "\n")
     
     # Setup GPU
@@ -390,38 +285,27 @@ def main():
     else:
         logger.info("No PWM file specified - ACC sequences will be random or from priors")
     
-    logger.info("✓ Configuration loaded\n")
+    logger.info("Configuration loaded\n")
     
     # Run pipeline
     try:
-        # 1. Prepare data
-        X_train, y_train, X_val, y_val, label_to_idx = prepare_data(config, pwm_file)
+        # Prepare data
+        X_train, y_train, X_val, y_val, label_to_idx, train_reads, val_reads = prepare_data(config, pwm_file)
         
-        # 2. Build model
-        model = build_model(config)
+        # Train based on mode
+        if args.hybrid:
+            model = train_hybrid(config, train_reads, val_reads, args.unlabeled)
+        else:
+            model = train_standard(config, X_train, y_train, X_val, y_val, label_to_idx)
         
-        # 3. Compile model
-        compile_model(model, config)
-        
-        # 4. Train model
-        history = train_model(model, X_train, y_train, X_val, y_val, config)
-        
-        # 5. Evaluate model
-        evaluate_model(model, X_val, y_val)
-        
-        # 6. Save model
-        save_model(model, config, label_to_idx)
-        
-        # Print summary
+        # Summary
         print("\n" + "="*80)
         print(" "*30 + "TRAINING COMPLETE")
         print("="*80)
         print(f"\nCheckpoints saved to: {config.training.checkpoint_dir}")
         print(f"  - model_best.h5: Best model based on validation loss")
-        print(f"  - model_final.h5: Final model after training")
+        print(f"  - model_final.h5 (or model_hybrid_final.h5): Final trained model")
         print(f"  - training_history.csv: Training metrics")
-        print(f"  - label_mapping.json: Label to index mapping")
-        print(f"  - config.yaml: Configuration used for training")
         print("\n" + "="*80 + "\n")
         
     except Exception as e:

@@ -1,0 +1,109 @@
+# Tempest Hybrid Training Configuration
+# This configuration enables robust training with invalid read augmentation
+# and pseudo-labeling from unlabeled data
+
+model:
+  # Vocabulary: A=0, C=1, G=2, T=3, N=4
+  vocab_size: 5
+  
+  # Embedding layer
+  embedding_dim: 128
+  
+  # CNN layers for local motif detection
+  use_cnn: true
+  cnn_filters: [64, 128]
+  cnn_kernels: [3, 5]
+  
+  # BiLSTM layers for long-range dependencies
+  use_bilstm: true
+  lstm_units: 128
+  lstm_layers: 2
+  dropout: 0.3
+  
+  # Output layer
+  num_labels: 6  # ADAPTER5, UMI, ACC, BARCODE, INSERT, ADAPTER3
+  use_crf: false  # Will be enabled when CRF layer is integrated
+  
+  # Sequence processing
+  max_seq_len: 256
+  batch_size: 32
+
+# PWM configuration for ACC detection
+pwm:
+  pwm_file: "acc_pwm.txt"
+  use_pwm: true
+  pwm_threshold: 0.7
+
+# Data simulation settings
+simulation:
+  # Define sequence structure
+  sequence_order: ['ADAPTER5', 'UMI', 'ACC', 'BARCODE', 'INSERT', 'ADAPTER3']
+  
+  # Fixed sequences for adapters
+  sequences:
+    ADAPTER5: 'AGATCGGAAGAGC'
+    ADAPTER3: 'AGATCGGAAGAGC'
+    INSERT: 'random'
+  
+  # UMI settings
+  umi_length: 8
+  
+  # Simulation parameters
+  num_sequences: 5000
+  insert_min_length: 50
+  insert_max_length: 150
+  error_rate: 0.02  # 2% error rate for valid reads
+  random_seed: 42
+
+# Standard training configuration
+training:
+  # Optimizer settings
+  learning_rate: 0.001
+  optimizer: 'adam'
+  epochs: 25  # Total epochs (includes all phases if hybrid enabled)
+  
+  # Data splits
+  train_split: 0.8  # 80% training, 20% validation
+  
+  # Callbacks
+  early_stopping_patience: 5
+  reduce_lr_patience: 3
+  checkpoint_dir: './checkpoints_hybrid'
+
+# Hybrid robustness training configuration
+hybrid:
+  # Enable hybrid training
+  enabled: true
+  
+  # Training phases (epochs for each phase)
+  warmup_epochs: 5           # Standard training to establish baseline
+  discriminator_epochs: 10   # Train with discriminator and invalid reads
+  pseudolabel_epochs: 10     # Fine-tune with pseudo-labeled data
+  
+  # Invalid read generation parameters
+  invalid_ratio: 0.1          # Start with 10% invalid reads
+  segment_loss_prob: 0.3      # Probability of missing segment
+  segment_dup_prob: 0.3       # Probability of duplicated segment
+  truncation_prob: 0.2        # Probability of truncation
+  chimeric_prob: 0.1          # Probability of chimeric read
+  scrambled_prob: 0.1         # Probability of scrambled segments
+  
+  # Loss weights
+  invalid_weight_initial: 0.1  # Start conservative
+  invalid_weight_max: 0.3      # Maximum weight for invalid examples
+  adversarial_weight: 0.1      # Weight for adversarial loss
+  
+  # Pseudo-labeling parameters
+  confidence_threshold: 0.9    # High initial threshold
+  confidence_decay: 0.95       # Reduce threshold by 5% each epoch
+  pseudo_weight: 0.5           # Weight for pseudo-labeled examples
+  max_pseudo_examples: 1000   # Maximum pseudo-labels per epoch
+  
+  # Discriminator settings
+  discriminator_lr_factor: 0.1  # Discriminator learns slower than main model
+  discriminator_hidden_dim: 64  # Hidden layer size
+  
+  # Validation
+  validate_architecture: true    # Check predicted architectures are plausible
+  min_unique_segments: 3        # Minimum different segment types required
+  max_segment_repetition: 2     # Maximum times a segment can repeat
