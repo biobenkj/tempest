@@ -1,0 +1,12 @@
+{
+  "tests_run": 5,
+  "passed": 2,
+  "failed": 3,
+  "results": {
+    "reads_to_arrays": true,
+    "trainer_imports": false,
+    "trainer_initialization": false,
+    "data_preparation": false,
+    "model_building": true
+  }
+}

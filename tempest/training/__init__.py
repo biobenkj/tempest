@@ -1,8 +1,10 @@
 """
 Training module for Tempest.
 
-Contains model training utilities, including hybrid robustness training
-for handling invalid reads and architectural errors.
+Contains model training utilities, including:
+- Single model training (ModelTrainer)
+- Ensemble training with BMA (EnsembleTrainer)
+- Hybrid robustness training for handling invalid reads and architectural errors
 """
 
 from .hybrid_trainer import (
@@ -15,13 +17,35 @@ from .hybrid_trainer import (
     print_model_summary
 )
 
+from .trainer import (
+    ModelTrainer,
+    PerTokenAccuracy,
+    PerLabelMetrics
+)
+
+from .ensemble import (
+    EnsembleTrainer,
+    BMAPredictor
+)
+
 __all__ = [
-    # Main trainer
+    # Single model trainer
+    'ModelTrainer',
+    
+    # Ensemble trainer
+    'EnsembleTrainer',
+    'BMAPredictor',
+    
+    # Hybrid trainer
     'HybridTrainer',
     
     # Components
     'ArchitectureDiscriminator',
     'PseudoLabelGenerator',
+    
+    # Metrics and callbacks
+    'PerTokenAccuracy',
+    'PerLabelMetrics',
     
     # Utility functions
     'pad_sequences',

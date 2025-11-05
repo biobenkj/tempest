@@ -17,11 +17,14 @@ from tensorflow import keras
 # Add to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-# Import from tempest modules
-from tempest.utils import load_config, ensure_dir
-from tempest.data import SequenceSimulator, reads_to_arrays
-from tempest.core import build_model_from_config, print_model_summary
-from tempest.training import HybridTrainer
+# Import from root-level modules (not tempest.* until refactored)
+from config import load_config
+from simulator import SequenceSimulator, reads_to_arrays
+from models import build_model_from_config, print_model_summary
+from io import ensure_dir
+
+# Import hybrid training components
+from hybrid_trainer import HybridTrainer
 
 # Configure logging
 logging.basicConfig(
@@ -274,7 +277,7 @@ def main():
     
     # Determine PWM file
     pwm_file = args.pwm
-    if pwm_file is None and hasattr(config, 'pwm') and hasattr(config.pwm, 'pwm_file'):
+    if pwm_file is None and config.pwm and config.pwm.pwm_file:
         pwm_file = config.pwm.pwm_file
     
     if pwm_file:
