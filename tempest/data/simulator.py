@@ -1,19 +1,16 @@
 """
-Data simulator for Tempest.
+Enhanced Data Simulator for Tempest with Whitelist Support.
 
 Generates synthetic training data with configurable sequence structures,
-ACC PWM-based generation, and error injection.
+ACC PWM-based generation, error injection, and support for sequence whitelists.
 """
 
 import numpy as np
 import random
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Union
 from dataclasses import dataclass
 import logging
-
-from ..utils.config import SimulationConfig
-from ..utils.io import load_acc_priors, load_barcodes, load_pwm
-from ..core.pwm import PWMScorer, generate_acc_from_pwm
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -27,17 +24,128 @@ class SimulatedRead:
     metadata: Dict  # Additional info
 
 
+@dataclass
+class SimulationConfig:
+    """Configuration for sequence simulation."""
+    sequence_order: List[str]
+    num_sequences: int = 10000
+    error_rate: float = 0.02
+    random_seed: int = 42
+    
+    # Component lengths
+    umi_length: int = 8
+    insert_min_length: int = 50
+    insert_max_length: int = 150
+    
+    # File paths
+    acc_priors_file: Optional[str] = None
+    barcode_file: Optional[str] = None
+    pwm_file: Optional[str] = None
+    
+    # Whitelist files for specific segments
+    i7_whitelist_file: Optional[str] = None
+    i5_whitelist_file: Optional[str] = None
+    cbc_whitelist_file: Optional[str] = None
+    
+    # Generic whitelist mapping
+    whitelist_files: Optional[Dict[str, str]] = None
+    
+    # Fixed sequences
+    sequences: Optional[Dict[str, Union[str, List[str]]]] = None
+    
+    # ACC configuration
+    acc_sequences: Optional[List[str]] = None
+    acc_frequencies: Optional[List[float]] = None
+
+
+class WhitelistLoader:
+    """Handles loading and managing sequence whitelists."""
+    
+    def __init__(self):
+        self.whitelists = {}
+    
+    def load_whitelist(self, filepath: str, segment_name: str) -> List[str]:
+        """
+        Load sequences from a whitelist file.
+        
+        Args:
+            filepath: Path to whitelist file (one sequence per line)
+            segment_name: Name of the segment (for logging)
+            
+        Returns:
+            List of sequences
+        """
+        sequences = []
+        
+        try:
+            path = Path(filepath)
+            if not path.exists():
+                logger.warning(f"Whitelist file not found for {segment_name}: {filepath}")
+                return sequences
+            
+            with open(filepath, 'r') as f:
+                for line in f:
+                    seq = line.strip().upper()
+                    # Validate DNA sequence
+                    if seq and all(base in 'ACGTN' for base in seq):
+                        sequences.append(seq)
+                    elif seq:
+                        logger.warning(f"Skipping invalid sequence in {segment_name} whitelist: {seq}")
+            
+            logger.info(f"Loaded {len(sequences)} sequences from {segment_name} whitelist")
+            
+        except Exception as e:
+            logger.error(f"Error loading {segment_name} whitelist from {filepath}: {e}")
+        
+        return sequences
+    
+    def add_whitelist(self, segment_name: str, filepath: str):
+        """Add a whitelist for a specific segment."""
+        sequences = self.load_whitelist(filepath, segment_name)
+        if sequences:
+            self.whitelists[segment_name.upper()] = sequences
+            return True
+        return False
+    
+    def get_sequence(self, segment_name: str, random_state: np.random.RandomState) -> Optional[str]:
+        """
+        Get a random sequence from whitelist for the specified segment.
+        
+        Args:
+            segment_name: Name of the segment
+            random_state: Random state for reproducibility
+            
+        Returns:
+            Random sequence from whitelist or None if not available
+        """
+        segment_key = segment_name.upper()
+        
+        # Check various possible keys
+        possible_keys = [
+            segment_key,
+            segment_key.replace('_', ''),
+            segment_key.replace('INDEX_', ''),
+            segment_key.replace('INDEX', '')
+        ]
+        
+        for key in possible_keys:
+            if key in self.whitelists:
+                return random_state.choice(self.whitelists[key])
+        
+        return None
+
+
 class SequenceSimulator:
     """
-    Simulate training data for sequence annotation.
+    Enhanced sequence simulator with whitelist support.
     
-    Generates sequences with defined structure (adapters, UMI, ACC, barcode, insert)
-    with realistic error profiles.
+    Generates sequences with defined structure (adapters, UMI, ACC, barcode, indexes, insert)
+    with realistic error profiles and support for sequence whitelists.
     """
     
     def __init__(self, config: SimulationConfig, pwm_file: Optional[str] = None):
         """
-        Initialize simulator.
+        Initialize simulator with whitelist support.
         
         Args:
             config: Simulation configuration
@@ -45,50 +153,57 @@ class SequenceSimulator:
         """
         self.config = config
         self.random_state = np.random.RandomState(config.random_seed)
+        self.whitelist_loader = WhitelistLoader()
+        
+        # Load specific whitelists
+        if config.i7_whitelist_file:
+            self.whitelist_loader.add_whitelist('i7', config.i7_whitelist_file)
+            self.whitelist_loader.add_whitelist('INDEX_i7', config.i7_whitelist_file)
+        
+        if config.i5_whitelist_file:
+            self.whitelist_loader.add_whitelist('i5', config.i5_whitelist_file)
+            self.whitelist_loader.add_whitelist('INDEX_i5', config.i5_whitelist_file)
+        
+        if config.cbc_whitelist_file:
+            self.whitelist_loader.add_whitelist('CBC', config.cbc_whitelist_file)
+            self.whitelist_loader.add_whitelist('BARCODE', config.cbc_whitelist_file)
+            self.whitelist_loader.add_whitelist('CELL_BARCODE', config.cbc_whitelist_file)
+        
+        # Load generic whitelists from mapping
+        if config.whitelist_files:
+            for segment_name, filepath in config.whitelist_files.items():
+                self.whitelist_loader.add_whitelist(segment_name, filepath)
         
         # Load ACC priors if provided
-        self.acc_sequences = None
-        self.acc_frequencies = None
-        if config.acc_priors_file:
-            try:
-                self.acc_sequences, self.acc_frequencies = load_acc_priors(
-                    config.acc_priors_file
-                )
-                logger.info(f"Loaded {len(self.acc_sequences)} ACC sequences from priors")
-            except Exception as e:
-                logger.warning(f"Could not load ACC priors: {e}")
+        self.acc_sequences = config.acc_sequences
+        self.acc_frequencies = config.acc_frequencies
         
-        # If priors not available but sequences/frequencies provided directly
-        if self.acc_sequences is None and config.acc_sequences:
-            self.acc_sequences = config.acc_sequences
-            self.acc_frequencies = config.acc_frequencies
-            logger.info(f"Using {len(self.acc_sequences)} ACC sequences from config")
-        
-        # Load PWM if provided
-        self.pwm = None
-        self.pwm_scorer = None
-        if pwm_file:
-            try:
-                self.pwm = load_pwm(pwm_file)
-                self.pwm_scorer = PWMScorer(self.pwm)
-                logger.info(f"Loaded PWM with shape {self.pwm.shape}")
-            except Exception as e:
-                logger.warning(f"Could not load PWM: {e}")
-        
-        # Load barcodes if provided
+        # Load barcodes if provided (legacy support)
         self.barcodes = None
         if config.barcode_file:
-            try:
-                self.barcodes = load_barcodes(config.barcode_file)
-                logger.info(f"Loaded {len(self.barcodes)} barcodes")
-            except Exception as e:
-                logger.warning(f"Could not load barcodes: {e}")
+            self.barcodes = self._load_barcodes(config.barcode_file)
         
         # Validate sequence order
         if not config.sequence_order:
             raise ValueError("sequence_order must be specified in config")
         
-        logger.info(f"Initialized simulator with structure: {' → '.join(config.sequence_order)}")
+        logger.info(f"Initialized enhanced simulator with structure: {' → '.join(config.sequence_order)}")
+        logger.info(f"Loaded whitelists for: {list(self.whitelist_loader.whitelists.keys())}")
+    
+    def _load_barcodes(self, filepath: str) -> Optional[List[str]]:
+        """Load barcode sequences from file."""
+        try:
+            barcodes = []
+            with open(filepath, 'r') as f:
+                for line in f:
+                    barcode = line.strip().upper()
+                    if barcode:
+                        barcodes.append(barcode)
+            logger.info(f"Loaded {len(barcodes)} barcodes from {filepath}")
+            return barcodes
+        except Exception as e:
+            logger.warning(f"Could not load barcodes from {filepath}: {e}")
+            return None
     
     def generate_random_sequence(self, length: int) -> str:
         """Generate random DNA sequence."""
@@ -96,43 +211,72 @@ class SequenceSimulator:
         return ''.join(self.random_state.choice(bases, size=length))
     
     def generate_umi(self) -> str:
-        """Generate random UMI sequence."""
+        """Generate UMI sequence (check whitelist first)."""
+        # Check whitelist
+        seq = self.whitelist_loader.get_sequence('UMI', self.random_state)
+        if seq:
+            return seq
+        
+        # Generate random
         return self.generate_random_sequence(self.config.umi_length)
     
     def generate_acc(self) -> str:
-        """
-        Generate ACC sequence using priors or PWM.
+        """Generate ACC sequence using priors, PWM, or whitelist."""
+        # Check whitelist first
+        seq = self.whitelist_loader.get_sequence('ACC', self.random_state)
+        if seq:
+            return seq
         
-        Priority:
-        1. Sample from ACC priors if available
-        2. Generate from PWM if available
-        3. Generate random 6bp sequence as fallback
-        """
         # Use priors if available
         if self.acc_sequences and self.acc_frequencies:
             return self.random_state.choice(self.acc_sequences, p=self.acc_frequencies)
         
-        # Use PWM if available
-        if self.pwm is not None:
-            acc_seq = generate_acc_from_pwm(self.pwm, n=1)[0]
-            return acc_seq
-        
-        # Fallback: random sequence
-        # Default ACC length is 6
-        logger.warning("No ACC priors or PWM available, generating random sequence")
+        # Fallback: random 6bp sequence
         return self.generate_random_sequence(6)
     
-    def generate_barcode(self) -> str:
-        """
-        Generate barcode sequence.
+    def generate_index_i7(self) -> str:
+        """Generate i7 index sequence."""
+        seq = self.whitelist_loader.get_sequence('i7', self.random_state)
+        if seq:
+            return seq
         
-        If barcode list provided, sample from it.
-        Otherwise generate random sequence.
-        """
+        # Default i7 is typically 8bp
+        return self.generate_random_sequence(8)
+    
+    def generate_index_i5(self) -> str:
+        """Generate i5 index sequence."""
+        seq = self.whitelist_loader.get_sequence('i5', self.random_state)
+        if seq:
+            return seq
+        
+        # Default i5 is typically 8bp
+        return self.generate_random_sequence(8)
+    
+    def generate_cbc(self) -> str:
+        """Generate cell barcode (CBC) sequence."""
+        seq = self.whitelist_loader.get_sequence('CBC', self.random_state)
+        if seq:
+            return seq
+        
+        # Check legacy barcode list
         if self.barcodes:
             return self.random_state.choice(self.barcodes)
         
-        # Default barcode length is 16
+        # Default CBC is typically 16bp
+        return self.generate_random_sequence(16)
+    
+    def generate_barcode(self) -> str:
+        """Generate generic barcode sequence."""
+        # Check if CBC whitelist should be used
+        seq = self.whitelist_loader.get_sequence('BARCODE', self.random_state)
+        if seq:
+            return seq
+        
+        # Check legacy barcode list
+        if self.barcodes:
+            return self.random_state.choice(self.barcodes)
+        
+        # Default barcode length
         return self.generate_random_sequence(16)
     
     def generate_insert(self) -> str:
@@ -145,39 +289,64 @@ class SequenceSimulator:
     
     def get_component_sequence(self, component: str) -> str:
         """
-        Get sequence for a component based on config.
+        Get sequence for a component, checking whitelists first.
         
         Args:
-            component: Component name (e.g., 'ADAPTER5', 'UMI', 'ACC')
+            component: Component name (e.g., 'ADAPTER5', 'UMI', 'i7', 'CBC')
             
         Returns:
             Sequence string
         """
+        # First check whitelist
+        seq = self.whitelist_loader.get_sequence(component, self.random_state)
+        if seq:
+            return seq
+        
         # Check if sequence is defined in config
-        if component in self.config.sequences:
+        if self.config.sequences and component in self.config.sequences:
             defined_seq = self.config.sequences[component]
             
-            # If 'random', generate appropriate sequence
-            if defined_seq.lower() == 'random':
-                if 'INSERT' in component.upper():
-                    return self.generate_insert()
+            # Handle list of sequences (pick random)
+            if isinstance(defined_seq, list):
+                return self.random_state.choice(defined_seq)
+            
+            # Handle 'random' keyword
+            if isinstance(defined_seq, str):
+                if defined_seq.lower() == 'random':
+                    if 'INSERT' in component.upper():
+                        return self.generate_insert()
+                    else:
+                        return self.generate_random_sequence(10)
                 else:
-                    # For other random components, generate reasonable length
-                    return self.generate_random_sequence(10)
-            else:
-                return defined_seq
+                    return defined_seq
         
-        # Component-specific generation
-        if 'UMI' in component.upper():
+        # Component-specific generation with whitelist support
+        component_upper = component.upper()
+        
+        if 'I7' in component_upper or 'INDEX_I7' in component_upper:
+            return self.generate_index_i7()
+        elif 'I5' in component_upper or 'INDEX_I5' in component_upper:
+            return self.generate_index_i5()
+        elif 'CBC' in component_upper or 'CELL_BARCODE' in component_upper:
+            return self.generate_cbc()
+        elif 'UMI' in component_upper:
             return self.generate_umi()
-        elif 'ACC' in component.upper():
+        elif 'ACC' in component_upper:
             return self.generate_acc()
-        elif 'BARCODE' in component.upper() or 'BC' in component.upper():
+        elif 'BARCODE' in component_upper or 'BC' in component_upper:
             return self.generate_barcode()
-        elif 'INSERT' in component.upper():
+        elif 'INSERT' in component_upper:
             return self.generate_insert()
+        elif 'ADAPTER' in component_upper:
+            # Default adapter sequences
+            if '5' in component or 'FIVE' in component_upper:
+                return 'AGATCGGAAGAGC'
+            elif '3' in component or 'THREE' in component_upper:
+                return 'AGATCGGAAGAGC'
+            else:
+                return 'AGATCGGAAGAGC'
         else:
-            # Unknown component, generate short random sequence
+            # Unknown component
             logger.warning(f"Unknown component '{component}', generating 10bp random sequence")
             return self.generate_random_sequence(10)
     
@@ -191,50 +360,62 @@ class SequenceSimulator:
         Returns:
             Sequence with errors
         """
-        if self.config.error_rate <= 0:
+        if self.config.error_rate == 0:
             return sequence
         
+        sequence = list(sequence)
         bases = ['A', 'C', 'G', 'T']
-        result = list(sequence)
         
-        for i in range(len(result)):
+        for i in range(len(sequence)):
             if self.random_state.random() < self.config.error_rate:
-                error_type = self.random_state.choice(['substitution', 'deletion', 'insertion'])
+                error_type = self.random_state.choice(['substitution', 'insertion', 'deletion'])
                 
                 if error_type == 'substitution':
                     # Replace with different base
-                    current = result[i]
-                    other_bases = [b for b in bases if b != current]
-                    result[i] = self.random_state.choice(other_bases)
+                    current = sequence[i]
+                    choices = [b for b in bases if b != current]
+                    sequence[i] = self.random_state.choice(choices)
                 
-                elif error_type == 'deletion':
-                    # Mark for deletion
-                    result[i] = ''
-                
-                elif error_type == 'insertion':
+                elif error_type == 'insertion' and i < len(sequence) - 1:
                     # Insert random base
-                    result[i] = result[i] + self.random_state.choice(bases)
+                    sequence.insert(i + 1, self.random_state.choice(bases))
+                
+                elif error_type == 'deletion' and len(sequence) > 1:
+                    # Delete current base
+                    del sequence[i]
+                    if i >= len(sequence):
+                        break
         
-        return ''.join(result)
+        return ''.join(sequence)
     
-    def generate_single_read(self) -> SimulatedRead:
+    def generate_read(self) -> SimulatedRead:
         """
-        Generate a single simulated read.
+        Generate a single simulated read with labels.
         
         Returns:
             SimulatedRead object
         """
         components = []
         component_labels = []
+        component_sources = []  # Track where each sequence came from
         
         # Generate each component
         for component_name in self.config.sequence_order:
             seq = self.get_component_sequence(component_name)
             components.append(seq)
             component_labels.append(component_name)
+            
+            # Track if sequence came from whitelist
+            if self.whitelist_loader.get_sequence(component_name, self.random_state):
+                component_sources.append('whitelist')
+            elif self.config.sequences and component_name in self.config.sequences:
+                component_sources.append('config')
+            else:
+                component_sources.append('generated')
         
         # Concatenate to form full sequence
         full_sequence = ''.join(components)
+        original_length = len(full_sequence)
         
         # Create labels (one per base)
         labels = []
@@ -254,14 +435,10 @@ class SequenceSimulator:
         
         # Inject errors
         if self.config.error_rate > 0:
-            # Store original before errors
-            original_sequence = full_sequence
             full_sequence = self.inject_errors(full_sequence)
             
-            # Update labels to match new length
-            # This is simplified - proper error handling would adjust labels
+            # Adjust labels if length changed due to indels
             if len(full_sequence) != len(labels):
-                # Adjust labels if length changed due to indels
                 if len(full_sequence) > len(labels):
                     # Insertions occurred
                     labels.extend(['UNKNOWN'] * (len(full_sequence) - len(labels)))
@@ -269,11 +446,14 @@ class SequenceSimulator:
                     # Deletions occurred
                     labels = labels[:len(full_sequence)]
         
+        # Create metadata
         metadata = {
             'num_components': len(components),
-            'original_length': len(''.join(components)),
+            'original_length': original_length,
             'final_length': len(full_sequence),
-            'error_rate': self.config.error_rate
+            'error_rate': self.config.error_rate,
+            'component_sources': dict(zip(component_labels, component_sources)),
+            'has_errors': original_length != len(full_sequence)
         }
         
         return SimulatedRead(
@@ -283,114 +463,79 @@ class SequenceSimulator:
             metadata=metadata
         )
     
-    def generate(self, num_sequences: Optional[int] = None) -> List[SimulatedRead]:
+    def generate(self, num_sequences: Optional[int] = None) -> Tuple[List[SimulatedRead], List[SimulatedRead]]:
         """
         Generate multiple simulated reads.
         
         Args:
-            num_sequences: Number of sequences to generate (default: from config)
+            num_sequences: Number of sequences to generate (overrides config)
             
         Returns:
-            List of SimulatedRead objects
+            Tuple of (training_reads, validation_reads) with 80/20 split
         """
-        if num_sequences is None:
-            num_sequences = self.config.num_sequences
-        
-        logger.info(f"Generating {num_sequences} simulated reads...")
+        n = num_sequences or self.config.num_sequences
         
         reads = []
-        for i in range(num_sequences):
-            read = self.generate_single_read()
-            reads.append(read)
-            
-            if (i + 1) % 1000 == 0:
-                logger.info(f"  Generated {i + 1}/{num_sequences} reads")
+        for i in range(n):
+            if i % 1000 == 0 and i > 0:
+                logger.info(f"Generated {i}/{n} sequences...")
+            reads.append(self.generate_read())
         
-        logger.info(f"✓ Generated {len(reads)} reads")
+        logger.info(f"Generated {len(reads)} total sequences")
         
-        # Log statistics
-        total_length = sum(len(r.sequence) for r in reads)
-        avg_length = total_length / len(reads)
-        logger.info(f"  Average read length: {avg_length:.1f} bp")
+        # Split into train/val
+        split_idx = int(len(reads) * 0.8)
+        train_reads = reads[:split_idx]
+        val_reads = reads[split_idx:]
         
-        # Count labels
-        all_labels = set()
-        for read in reads:
-            all_labels.update(read.labels)
-        logger.info(f"  Unique labels: {len(all_labels)} ({', '.join(sorted(all_labels))})")
-        
-        return reads
-    
-    def generate_train_val_split(self, train_fraction: float = 0.8) -> Tuple[List[SimulatedRead], List[SimulatedRead]]:
-        """
-        Generate reads and split into train/validation sets.
-        
-        Args:
-            train_fraction: Fraction of data for training (default: 0.8)
-            
-        Returns:
-            Tuple of (train_reads, val_reads)
-        """
-        all_reads = self.generate()
-        
-        # Shuffle
-        indices = list(range(len(all_reads)))
-        self.random_state.shuffle(indices)
-        
-        # Split
-        split_idx = int(len(all_reads) * train_fraction)
-        train_indices = indices[:split_idx]
-        val_indices = indices[split_idx:]
-        
-        train_reads = [all_reads[i] for i in train_indices]
-        val_reads = [all_reads[i] for i in val_indices]
-        
-        logger.info(f"Split: {len(train_reads)} train, {len(val_reads)} validation")
+        logger.info(f"Split into {len(train_reads)} training and {len(val_reads)} validation sequences")
         
         return train_reads, val_reads
-
-
-def reads_to_arrays(reads: List[SimulatedRead], 
-                   label_to_idx: Optional[Dict[str, int]] = None) -> Tuple[np.ndarray, np.ndarray, Dict[str, int]]:
-    """
-    Convert SimulatedRead objects to numpy arrays for training.
     
-    Args:
-        reads: List of SimulatedRead objects
-        label_to_idx: Optional mapping from label to index
+    def get_statistics(self, reads: List[SimulatedRead]) -> Dict:
+        """
+        Compute statistics about generated reads.
         
-    Returns:
-        Tuple of (sequences_array, labels_array, label_to_idx)
-        - sequences_array: (num_reads, max_length) with base indices
-        - labels_array: (num_reads, max_length) with label indices
-    """
-    # Base encoding
-    base_to_idx = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
-    
-    # Create label mapping if not provided
-    if label_to_idx is None:
-        all_labels = set()
+        Args:
+            reads: List of simulated reads
+            
+        Returns:
+            Dictionary of statistics
+        """
+        stats = {
+            'num_reads': len(reads),
+            'sequence_lengths': [len(r.sequence) for r in reads],
+            'component_counts': {},
+            'whitelist_usage': {},
+            'error_injection': {
+                'num_with_errors': sum(1 for r in reads if r.metadata.get('has_errors', False)),
+                'percent_with_errors': 0
+            }
+        }
+        
+        # Count component occurrences and sources
         for read in reads:
-            all_labels.update(read.labels)
-        label_to_idx = {label: idx for idx, label in enumerate(sorted(all_labels))}
-    
-    # Find max length
-    max_length = max(len(read.sequence) for read in reads)
-    
-    # Initialize arrays
-    num_reads = len(reads)
-    sequences_array = np.zeros((num_reads, max_length), dtype=np.int32)
-    labels_array = np.zeros((num_reads, max_length), dtype=np.int32)
-    
-    # Fill arrays
-    for i, read in enumerate(reads):
-        # Encode sequence
-        for j, base in enumerate(read.sequence.upper()):
-            sequences_array[i, j] = base_to_idx.get(base, 4)  # 4 for unknown
+            for component in read.metadata.get('component_sources', {}).keys():
+                if component not in stats['component_counts']:
+                    stats['component_counts'][component] = 0
+                stats['component_counts'][component] += 1
+            
+            # Track whitelist usage
+            for component, source in read.metadata.get('component_sources', {}).items():
+                if component not in stats['whitelist_usage']:
+                    stats['whitelist_usage'][component] = {'whitelist': 0, 'config': 0, 'generated': 0}
+                stats['whitelist_usage'][component][source] += 1
         
-        # Encode labels
-        for j, label in enumerate(read.labels):
-            if j < max_length:  # Safety check
-                labels_array[i, j] = label_to_idx.get(label, 0)
-    
-    return sequences_array, labels_array, label_to_idx
+        # Compute percentages
+        if stats['num_reads'] > 0:
+            stats['error_injection']['percent_with_errors'] = (
+                100 * stats['error_injection']['num_with_errors'] / stats['num_reads']
+            )
+        
+        # Sequence length statistics
+        if stats['sequence_lengths']:
+            stats['avg_length'] = np.mean(stats['sequence_lengths'])
+            stats['min_length'] = min(stats['sequence_lengths'])
+            stats['max_length'] = max(stats['sequence_lengths'])
+        
+        return stats

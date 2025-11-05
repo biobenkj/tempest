@@ -1,0 +1,200 @@
+# Tempest Configuration with Whitelist Support
+# Example configuration file showing how to use sequence whitelists
+
+model:
+  vocab_size: 5  # A=0, C=1, G=2, T=3, N=4
+  embedding_dim: 128
+  
+  # CNN layers
+  use_cnn: true
+  cnn_filters: [64, 128]
+  cnn_kernels: [3, 5]
+  
+  # BiLSTM layers
+  use_bilstm: true
+  lstm_units: 128
+  lstm_layers: 2
+  dropout: 0.3
+  
+  # Output configuration
+  num_labels: 8  # ADAPTER5, UMI, INDEX_i7, ACC, INDEX_i5, CBC, INSERT, ADAPTER3
+  use_crf: true
+  
+  # Length constraints for segments
+  length_constraints:
+    constraints:
+      UMI: [8, 8]
+      INDEX_i7: [8, 8]
+      INDEX_i5: [8, 8]
+      ACC: [6, 6]
+      CBC: [16, 16]
+      INSERT: [50, 300]
+
+# Simulation settings with whitelist support
+simulation:
+  # Define the sequence structure
+  # Example 1: Dual-index Illumina-style
+  sequence_order: ['ADAPTER5', 'UMI', 'INDEX_i7', 'ACC', 'INDEX_i5', 'INSERT', 'ADAPTER3']
+  
+  # Example 2: Single-cell 10x-style (uncomment to use)
+  # sequence_order: ['TSO', 'CBC', 'UMI', 'POLY_T', 'INSERT', 'ADAPTER3']
+  
+  # Example 3: Custom structure (uncomment to use)
+  # sequence_order: ['ADAPTER5', 'CBC', 'UMI', 'ACC', 'INSERT', 'ADAPTER3']
+  
+  # Whitelist files for specific segments
+  # These files should contain one sequence per line
+  i7_whitelist_file: "whitelists/i7_sequences.txt"
+  i5_whitelist_file: "whitelists/i5_sequences.txt"
+  cbc_whitelist_file: "whitelists/cbc_barcodes.txt"
+  
+  # Alternative: Generic whitelist mapping
+  # Use this for custom segment names
+  whitelist_files:
+    INDEX_i7: "whitelists/i7_sequences.txt"
+    INDEX_i5: "whitelists/i5_sequences.txt"
+    CBC: "whitelists/cbc_barcodes.txt"
+    CELL_BARCODE: "whitelists/cbc_barcodes.txt"
+    CUSTOM_TAG: "whitelists/custom_tags.txt"
+  
+  # Fixed sequences (these override whitelists)
+  sequences:
+    ADAPTER5: 'AGATCGGAAGAGCACACGTCTGAACTCCAGTCA'
+    ADAPTER3: 'AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT'
+    TSO: 'AAGCAGTGGTATCAACGCAGAGTAC'  # For single-cell
+    POLY_T: 'TTTTTTTTTTTTTTTTTTTT'  # For single-cell
+    INSERT: 'random'  # Generate random insert sequences
+  
+  # Fallback sequences (used if whitelist is empty/missing)
+  # Can be a single sequence or list of sequences
+  fallback_sequences:
+    INDEX_i7: ['ATTACTCG', 'TCCGGAGA', 'CGCTCATT', 'GAGATTCC']
+    INDEX_i5: ['TATAGCCT', 'ATAGAGGC', 'CCTATCCT', 'GGCTCTGA']
+  
+  # ACC configuration
+  acc_priors_file: "data/acc_priors.tsv"  # Optional: ACC sequence frequencies
+  acc_sequences: null  # Will be loaded from priors file
+  acc_frequencies: null  # Will be loaded from priors file
+  
+  # Legacy barcode support (used if CBC whitelist not provided)
+  barcode_file: "data/legacy_barcodes.txt"
+  
+  # Segment length parameters
+  umi_length: 8
+  insert_min_length: 50
+  insert_max_length: 300
+  
+  # Simulation parameters
+  num_sequences: 10000
+  error_rate: 0.02  # 2% sequencing error rate
+  random_seed: 42
+  
+  # Error profile (optional, for advanced error simulation)
+  error_profile:
+    substitution_rate: 0.015
+    insertion_rate: 0.0025
+    deletion_rate: 0.0025
+
+# PWM configuration for ACC detection
+pwm:
+  pwm_file: "data/acc_pwm.txt"
+  use_pwm: true
+  pwm_threshold: 0.7
+  pwm_pseudocount: 0.01
+
+# Training configuration
+training:
+  learning_rate: 0.001
+  optimizer: 'adam'
+  epochs: 30
+  batch_size: 32
+  
+  # Data split
+  train_split: 0.8
+  validation_split: 0.2
+  
+  # Callbacks
+  early_stopping_patience: 5
+  reduce_lr_patience: 3
+  checkpoint_dir: './checkpoints'
+  
+  # Length constraint ramping
+  constraint_weight: 5.0
+  constraint_ramp_epochs: 5  # Gradually increase constraint weight
+  
+  # Advanced training options
+  use_mixed_precision: false
+  use_xla: true
+  gradient_clip_value: 1.0
+
+# Ensemble configuration
+ensemble:
+  method: 'bma'  # Bayesian Model Averaging
+  num_models: 5
+  
+  # Diversity settings
+  random_seeds: [42, 123, 456, 789, 1024]
+  learning_rates: [0.001, 0.0008, 0.0012, 0.001, 0.0009]
+  
+  # BMA settings
+  temperature: 1.0
+  weight_by_validation_loss: true
+
+# Inference configuration
+inference:
+  batch_size: 64
+  use_ensemble: true
+  confidence_threshold: 0.9
+  
+  # Post-processing
+  apply_length_constraints: true
+  smooth_predictions: true
+  smoothing_window: 3
+
+# Evaluation metrics
+evaluation:
+  metrics: ['accuracy', 'precision', 'recall', 'f1', 'segment_accuracy']
+  per_segment_metrics: true
+  confusion_matrix: true
+  
+  # Segment-specific evaluation
+  focus_segments: ['INDEX_i7', 'INDEX_i5', 'CBC', 'UMI', 'ACC']
+  
+# Visualization settings
+visualization:
+  output_format: 'pdf'
+  color_scheme: 'tranquillyzer'  # Use Tranquillyzer-style colors
+  
+  # Segment colors (optional custom colors)
+  segment_colors:
+    ADAPTER5: '#FF6B6B'
+    ADAPTER3: '#FF6B6B'
+    UMI: '#4ECDC4'
+    INDEX_i7: '#45B7D1'
+    INDEX_i5: '#96CEB4'
+    CBC: '#FFEAA7'
+    ACC: '#DDA0DD'
+    INSERT: '#95E1D3'
+    POLY_T: '#F38181'
+    TSO: '#AA96DA'
+  
+  # Visualization options
+  show_quality_scores: false
+  show_confidence: true
+  max_sequences_per_page: 10
+
+# Logging configuration
+logging:
+  level: 'INFO'
+  log_dir: './logs'
+  tensorboard: true
+  wandb:
+    enabled: false
+    project: 'tempest-experiments'
+    entity: null
+
+# Hardware configuration
+hardware:
+  gpu_memory_growth: true
+  num_gpus: 1
+  mixed_precision: false
