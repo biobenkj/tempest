@@ -15,13 +15,129 @@ from typing import List, Dict, Tuple, Optional
 import logging
 from pathlib import Path
 
-from simulator import SimulatedRead, reads_to_arrays
-from models import build_model_from_config, convert_labels_to_categorical, pad_sequences
-from config import TempestConfig
-from io import load_fastq, ensure_dir
-from invalid_generator import InvalidReadGenerator
+# Import from proper tempest modules
+from tempest.data.simulator import SimulatedRead, reads_to_arrays
+from tempest.data.invalid_generator import InvalidReadGenerator
+from tempest.utils.config import TempestConfig
+from tempest.utils.io import load_fastq, ensure_dir
 
 logger = logging.getLogger(__name__)
+
+
+def pad_sequences(sequences: np.ndarray, labels: np.ndarray, max_length: int) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Pad sequences to max_length.
+    
+    Args:
+        sequences: Input sequences array [batch, seq_len]
+        labels: Label array [batch, seq_len]
+        max_length: Target length for padding
+        
+    Returns:
+        Tuple of padded sequences and labels
+    """
+    num_sequences = sequences.shape[0]
+    current_length = sequences.shape[1]
+    
+    if current_length == max_length:
+        return sequences, labels
+    
+    padded_sequences = np.zeros((num_sequences, max_length), dtype=sequences.dtype)
+    padded_labels = np.zeros((num_sequences, max_length), dtype=labels.dtype)
+    
+    copy_length = min(current_length, max_length)
+    padded_sequences[:, :copy_length] = sequences[:, :copy_length]
+    padded_labels[:, :copy_length] = labels[:, :copy_length]
+    
+    return padded_sequences, padded_labels
+
+
+def convert_labels_to_categorical(labels: np.ndarray, num_classes: int) -> np.ndarray:
+    """
+    Convert integer labels to one-hot encoding.
+    
+    Args:
+        labels: Integer label array [batch, seq_len]
+        num_classes: Number of label classes
+        
+    Returns:
+        One-hot encoded labels [batch, seq_len, num_classes]
+    """
+    num_samples, seq_length = labels.shape
+    categorical = np.zeros((num_samples, seq_length, num_classes), dtype=np.float32)
+    
+    for i in range(num_samples):
+        for j in range(seq_length):
+            if labels[i, j] < num_classes:  # Bounds check
+                categorical[i, j, labels[i, j]] = 1.0
+    
+    return categorical
+
+
+def build_model_from_config(config: TempestConfig) -> keras.Model:
+    """
+    Build a sequence labeling model from configuration.
+    
+    Args:
+        config: TempestConfig object with model parameters
+        
+    Returns:
+        Compiled Keras model
+    """
+    # Model parameters from config
+    max_seq_len = config.model.max_seq_len
+    num_labels = config.model.num_labels
+    embedding_dim = config.model.embedding_dim
+    lstm_units = config.model.lstm_units
+    lstm_layers = config.model.lstm_layers
+    dropout = config.model.dropout
+    use_cnn = config.model.use_cnn
+    use_bilstm = config.model.use_bilstm
+    
+    # Build model
+    inputs = keras.Input(shape=(max_seq_len,), dtype='int32')
+    
+    # Embedding layer (5 for ACGTN)
+    x = layers.Embedding(config.model.vocab_size, embedding_dim, mask_zero=True)(inputs)
+    
+    # Optional CNN layers
+    if use_cnn:
+        for filters, kernel in zip(config.model.cnn_filters, config.model.cnn_kernels):
+            x = layers.Conv1D(filters, kernel, activation='relu', padding='same')(x)
+    
+    # BiLSTM layers
+    if use_bilstm:
+        for i in range(lstm_layers):
+            return_sequences = True  # Always return sequences for sequence labeling
+            units = lstm_units if i == 0 else lstm_units // 2
+            x = layers.Bidirectional(
+                layers.LSTM(units, return_sequences=return_sequences, dropout=dropout)
+            )(x)
+    
+    # Dense layers
+    x = layers.Dense(64, activation='relu')(x)
+    x = layers.Dropout(dropout)(x)
+    
+    # Output layer
+    outputs = layers.Dense(num_labels, activation='softmax')(x)
+    
+    model = keras.Model(inputs=inputs, outputs=outputs)
+    
+    return model
+
+
+def print_model_summary(model: keras.Model):
+    """
+    Print a formatted model summary.
+    
+    Args:
+        model: Keras model to summarize
+    """
+    print("\n" + "="*80)
+    print("MODEL ARCHITECTURE")
+    print("="*80)
+    model.summary()
+    print("="*80 + "\n")
 
 
 class ArchitectureDiscriminator(keras.Model):
@@ -105,11 +221,22 @@ class PseudoLabelGenerator:
         
     def _default_label_mapping(self) -> Dict[str, int]:
         """Create default label mapping from config."""
-        if self.config.simulation:
-            labels = self.config.simulation.sequence_order
-            return {label: idx for idx, label in enumerate(labels)}
-        return {'ADAPTER5': 0, 'UMI': 1, 'ACC': 2, 
-                'BARCODE': 3, 'INSERT': 4, 'ADAPTER3': 5}
+        if self.config and self.config.simulation and self.config.simulation.sequence_order:
+            sequence_order = self.config.simulation.sequence_order
+            mapping = {label: idx for idx, label in enumerate(sequence_order)}
+            # Add PAD and UNKNOWN if not present
+            if 'PAD' not in mapping:
+                mapping['PAD'] = len(mapping)
+            if 'UNKNOWN' not in mapping:
+                mapping['UNKNOWN'] = len(mapping)
+            return mapping
+        
+        # Default mapping
+        return {
+            'ADAPTER5': 0, 'UMI': 1, 'ACC': 2, 
+            'BARCODE': 3, 'INSERT': 4, 'ADAPTER3': 5,
+            'PAD': 6, 'UNKNOWN': 7
+        }
     
     def generate_from_fastq(self, fastq_file: str, 
                            max_reads: int = 1000) -> List[SimulatedRead]:
@@ -148,231 +275,149 @@ class PseudoLabelGenerator:
             pseudo_labeled.extend(batch_pseudo)
         
         logger.info(f"Generated {len(pseudo_labeled)} pseudo-labels from "
-                   f"{min(max_reads, i+1)} sequences")
+                   f"{max_reads} reads with confidence >= {self.confidence_threshold}")
+        
         return pseudo_labeled
     
     def _process_batch(self, sequences: List[str], 
                       read_ids: List[str]) -> List[SimulatedRead]:
-        """Process a batch of sequences."""
-        # Convert to arrays
-        X = self._sequences_to_array(sequences)
+        """Process a batch of sequences to generate pseudo-labels."""
+        batch_reads = []
         
-        # Predict forward
-        preds_fwd = self.model.predict(X, verbose=0)
-        conf_fwd = self._compute_confidence(preds_fwd)
-        
-        # Predict reverse complement
-        X_rev = self._reverse_complement_array(X)
-        preds_rev = self.model.predict(X_rev, verbose=0)
-        conf_rev = self._compute_confidence(preds_rev)
-        
-        # Select best orientation and filter by confidence
-        pseudo_reads = []
-        
-        for i in range(len(sequences)):
-            if max(conf_fwd[i], conf_rev[i]) > self.confidence_threshold:
-                if conf_fwd[i] > conf_rev[i]:
-                    # Use forward
-                    labels = np.argmax(preds_fwd[i], axis=-1)
-                    if self._validate_architecture(labels):
-                        pseudo_reads.append(self._create_read(
-                            sequences[i], labels, conf_fwd[i], 'forward'
-                        ))
-                else:
-                    # Use reverse
-                    labels = np.argmax(preds_rev[i], axis=-1)
-                    if self._validate_architecture(labels):
-                        rev_seq = self._reverse_complement_string(sequences[i])
-                        pseudo_reads.append(self._create_read(
-                            rev_seq, labels, conf_rev[i], 'reverse'
-                        ))
-        
-        return pseudo_reads
-    
-    def _sequences_to_array(self, sequences: List[str]) -> np.ndarray:
-        """Convert sequences to numeric array."""
-        base_to_idx = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
+        # Convert sequences to input format
         max_len = self.config.model.max_seq_len
+        X = self._sequences_to_array(sequences, max_len)
         
-        X = np.zeros((len(sequences), max_len), dtype=np.int32)
+        # Get predictions
+        predictions = self.model.predict(X, verbose=0)
+        
+        for i, (seq, pred) in enumerate(zip(sequences, predictions)):
+            # Check confidence
+            confidence = np.max(pred, axis=-1)[:len(seq)]
+            mean_conf = np.mean(confidence)
+            
+            if mean_conf >= self.confidence_threshold:
+                # Convert predictions to labels
+                label_indices = np.argmax(pred, axis=-1)[:len(seq)]
+                labels = [self.idx_to_label.get(idx, 'UNKNOWN') 
+                         for idx in label_indices]
+                
+                # Create label regions
+                label_regions = self._extract_regions(labels)
+                
+                batch_reads.append(SimulatedRead(
+                    sequence=seq,
+                    labels=labels,
+                    label_regions=label_regions,
+                    metadata={'pseudo_label': True, 
+                             'confidence': float(mean_conf),
+                             'read_id': read_ids[i]}
+                ))
+        
+        return batch_reads
+    
+    def _sequences_to_array(self, sequences: List[str], max_len: int) -> np.ndarray:
+        """Convert sequences to numpy array."""
+        base_to_idx = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
+        
+        X = np.zeros((len(sequences), max_len), dtype=np.int8)
         for i, seq in enumerate(sequences):
-            for j, base in enumerate(seq.upper()[:max_len]):
+            for j, base in enumerate(seq[:max_len]):
                 X[i, j] = base_to_idx.get(base, 4)
         
         return X
     
-    def _reverse_complement_array(self, X: np.ndarray) -> np.ndarray:
-        """Reverse complement numeric array."""
-        complement = np.array([3, 2, 1, 0, 4])  # A->T, C->G, G->C, T->A, N->N
-        X_rev = X[:, ::-1]  # Reverse
-        return complement[X_rev]  # Complement
-    
-    def _reverse_complement_string(self, seq: str) -> str:
-        """Reverse complement a sequence string."""
-        complement = {'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C', 'N': 'N'}
-        return ''.join(complement.get(base, 'N') for base in seq.upper()[::-1])
-    
-    def _compute_confidence(self, predictions: np.ndarray) -> np.ndarray:
-        """Compute confidence as 1 - normalized entropy."""
-        entropy = -np.sum(predictions * np.log(predictions + 1e-8), axis=-1)
-        max_entropy = np.log(predictions.shape[-1])
-        confidence = 1 - (entropy / max_entropy)
-        return np.mean(confidence, axis=1)  # Average over sequence
-    
-    def _validate_architecture(self, labels: np.ndarray) -> bool:
-        """Check if predicted architecture is plausible."""
-        # Get validation parameters from config
-        if self.config.hybrid and self.config.hybrid.validate_architecture:
-            min_segments = self.config.hybrid.min_unique_segments
-            max_rep = self.config.hybrid.max_segment_repetition
-        else:
-            min_segments = 3
-            max_rep = 2
-        
-        # Must have minimum number of different segment types
-        unique_labels = np.unique(labels)
-        if len(unique_labels) < min_segments:
-            return False
-        
-        # Check for excessive repetition
-        for label_idx in unique_labels:
-            segments = self._count_segments(labels, label_idx)
-            if segments > max_rep:
-                return False
-        
-        return True
-    
-    def _count_segments(self, labels: np.ndarray, label_idx: int) -> int:
-        """Count number of segments for a given label."""
-        count = 0
-        in_segment = False
-        
-        for label in labels:
-            if label == label_idx:
-                if not in_segment:
-                    count += 1
-                    in_segment = True
-            else:
-                in_segment = False
-        
-        return count
-    
-    def _create_read(self, sequence: str, labels: np.ndarray, 
-                    confidence: float, orientation: str) -> SimulatedRead:
-        """Create SimulatedRead from predictions."""
-        # Convert labels to list
-        label_list = [self.idx_to_label.get(int(idx), 'UNKNOWN') 
-                     for idx in labels[:len(sequence)]]
-        
-        # Build label regions
+    def _extract_regions(self, labels: List[str]) -> Dict[str, List[Tuple[int, int]]]:
+        """Extract contiguous regions for each label."""
         regions = {}
-        if label_list:
-            current = label_list[0]
-            start = 0
-            
-            for i, label in enumerate(label_list[1:], 1):
-                if label != current:
-                    if current not in regions:
-                        regions[current] = []
-                    regions[current].append((start, i))
-                    current = label
-                    start = i
-            
-            # Add final region
-            if current not in regions:
-                regions[current] = []
-            regions[current].append((start, len(label_list)))
+        if not labels:
+            return regions
         
-        return SimulatedRead(
-            sequence=sequence,
-            labels=label_list,
-            label_regions=regions,
-            metadata={
-                'confidence': confidence,
-                'orientation': orientation,
-                'source': 'pseudo_label'
-            }
-        )
+        current_label = labels[0]
+        start = 0
+        
+        for i, label in enumerate(labels[1:], 1):
+            if label != current_label:
+                if current_label not in regions:
+                    regions[current_label] = []
+                regions[current_label].append((start, i))
+                current_label = label
+                start = i
+        
+        # Add final region
+        if current_label not in regions:
+            regions[current_label] = []
+        regions[current_label].append((start, len(labels)))
+        
+        return regions
 
 
 class HybridTrainer:
     """
-    Orchestrate hybrid training with invalid reads and pseudo-labels.
-    
-    Training proceeds in three phases:
-    1. Warmup: Standard training on valid reads
-    2. Discriminator: Training with invalid reads and discriminator
-    3. Pseudo-label: Fine-tuning with pseudo-labeled unlabeled data
+    Implements hybrid robustness training combining:
+    1. Invalid read generation for architecture robustness
+    2. Discriminator-based adversarial training
+    3. Pseudo-label self-training on unlabeled data
     """
     
-    def __init__(self, config: TempestConfig, base_model=None):
+    def __init__(self, config: TempestConfig):
         """
         Initialize hybrid trainer.
         
         Args:
-            config: Tempest configuration with hybrid settings
-            base_model: Optional pre-built model (otherwise built from config)
+            config: TempestConfig with hybrid training parameters
         """
         self.config = config
-        self.base_model = base_model or build_model_from_config(config)
-        
-        # Initialize components
-        self.discriminator = ArchitectureDiscriminator(
-            num_labels=config.model.num_labels,
-            hidden_dim=config.hybrid.discriminator_hidden_dim if config.hybrid else 64
-        )
         self.invalid_generator = InvalidReadGenerator(config)
-        self.pseudo_generator = None  # Created after model is trained
         
-        # Training state
-        self.phase = 'warmup'
-        self.current_epoch = 0
-        
-        # Get phase schedule from config
+        # Training parameters from config
         if config.hybrid:
-            self.phase_schedule = {
-                'warmup': config.hybrid.warmup_epochs,
-                'discriminator': config.hybrid.discriminator_epochs,
-                'pseudo_label': config.hybrid.pseudolabel_epochs
-            }
-            self.invalid_weight = config.hybrid.invalid_weight_initial
-            self.invalid_weight_max = config.hybrid.invalid_weight_max
-            self.adversarial_weight = config.hybrid.adversarial_weight
             self.invalid_ratio = config.hybrid.invalid_ratio
+            self.discriminator_weight = config.hybrid.adversarial_weight
+            self.pseudo_label_conf = config.hybrid.confidence_threshold
+            self.warmup_epochs = config.hybrid.warmup_epochs
+            self.discriminator_epochs = config.hybrid.discriminator_epochs
+            self.pseudo_epochs = config.hybrid.pseudolabel_epochs
         else:
-            self.phase_schedule = {
-                'warmup': 5,
-                'discriminator': 10,
-                'pseudo_label': 10
-            }
-            self.invalid_weight = 0.1
-            self.invalid_weight_max = 0.3
-            self.adversarial_weight = 0.1
+            # Defaults
             self.invalid_ratio = 0.1
+            self.discriminator_weight = 0.1
+            self.pseudo_label_conf = 0.9
+            self.warmup_epochs = 5
+            self.discriminator_epochs = 10
+            self.pseudo_epochs = 5
         
-        logger.info(f"Initialized HybridTrainer with phase schedule: {self.phase_schedule}")
+        logger.info(f"Initialized HybridTrainer with invalid_ratio={self.invalid_ratio}, "
+                   f"discriminator_weight={self.discriminator_weight}")
     
-    def train(self, train_reads: List[SimulatedRead],
+    def train(self, train_reads: List[SimulatedRead], 
              val_reads: List[SimulatedRead],
              unlabeled_fastq: Optional[str] = None,
-             checkpoint_dir: str = './checkpoints') -> keras.Model:
+             checkpoint_dir: str = "checkpoints") -> keras.Model:
         """
-        Run complete hybrid training pipeline.
+        Run hybrid training pipeline.
         
         Args:
-            train_reads: Labeled training reads
-            val_reads: Labeled validation reads
-            unlabeled_fastq: Optional path to unlabeled FASTQ for pseudo-labeling
-            checkpoint_dir: Directory for model checkpoints
+            train_reads: Training SimulatedRead objects
+            val_reads: Validation SimulatedRead objects  
+            unlabeled_fastq: Optional path to unlabeled FASTQ
+            checkpoint_dir: Directory for saving checkpoints
             
         Returns:
             Trained model
         """
-        ensure_dir(checkpoint_dir)
+        logger.info("="*80)
+        logger.info("STARTING HYBRID TRAINING PIPELINE")
+        logger.info("="*80)
         
-        # Convert to arrays
+        # Ensure checkpoint directory exists
+        checkpoint_path = Path(checkpoint_dir)
+        ensure_dir(str(checkpoint_path))
+        
+        # Convert reads to arrays
+        logger.info("Converting reads to arrays...")
         X_train, y_train, label_to_idx = reads_to_arrays(train_reads)
-        X_val, y_val, _ = reads_to_arrays(val_reads, label_to_idx)
+        X_val, y_val, _ = reads_to_arrays(val_reads, label_to_idx=label_to_idx)
         
         # Pad sequences
         max_len = self.config.model.max_seq_len
@@ -380,124 +425,195 @@ class HybridTrainer:
         X_val, y_val = pad_sequences(X_val, y_val, max_len)
         
         # Convert to categorical
-        y_train = convert_labels_to_categorical(y_train, self.config.model.num_labels)
-        y_val = convert_labels_to_categorical(y_val, self.config.model.num_labels)
+        num_labels = self.config.model.num_labels
+        y_train = convert_labels_to_categorical(y_train, num_labels)
+        y_val = convert_labels_to_categorical(y_val, num_labels)
         
-        logger.info("="*80)
-        logger.info("HYBRID ROBUSTNESS TRAINING MODE")
-        logger.info("="*80)
+        logger.info(f"Training data shape: X={X_train.shape}, y={y_train.shape}")
         
-        # Compile model
-        self._compile_model()
+        # Phase 1: Warm-up training on clean data
+        logger.info("\n" + "="*60)
+        logger.info("PHASE 1: WARM-UP TRAINING")
+        logger.info("="*60)
         
-        # Phase 1: Warmup
-        logger.info("\n=== Switching to warmup phase ===")
-        self.phase = 'warmup'
-        for epoch in range(self.phase_schedule['warmup']):
-            self.current_epoch = epoch
-            logger.info(f"\nEpoch {epoch+1}/{self.phase_schedule['warmup']} [warmup]")
-            self.base_model.fit(
-                X_train, y_train,
-                validation_data=(X_val, y_val),
-                batch_size=self.config.model.batch_size,
-                epochs=1,
-                verbose=1
-            )
+        model = self._warmup_training(X_train, y_train, X_val, y_val, checkpoint_path)
         
-        # Phase 2: Discriminator training
-        logger.info("\n=== Switching to discriminator phase ===")
-        self.phase = 'discriminator'
-        for epoch in range(self.phase_schedule['discriminator']):
-            self.current_epoch = epoch + self.phase_schedule['warmup']
-            logger.info(f"\nEpoch {self.current_epoch+1} [discriminator]")
-            
-            # Generate invalid reads
-            train_with_invalid = self.invalid_generator.generate_batch(
-                train_reads, self.invalid_ratio
-            )
-            X_mixed, y_mixed, _ = reads_to_arrays(train_with_invalid, label_to_idx)
-            X_mixed, y_mixed = pad_sequences(X_mixed, y_mixed, max_len)
-            y_mixed = convert_labels_to_categorical(y_mixed, self.config.model.num_labels)
-            
-            # Train
-            self.base_model.fit(
-                X_mixed, y_mixed,
-                validation_data=(X_val, y_val),
-                batch_size=self.config.model.batch_size,
-                epochs=1,
-                verbose=1
-            )
-            
-            # Gradually increase invalid weight
-            self.invalid_weight = min(
-                self.invalid_weight_max,
-                self.invalid_weight * 1.1
-            )
+        # Phase 2: Invalid read augmentation
+        logger.info("\n" + "="*60)
+        logger.info("PHASE 2: INVALID READ AUGMENTATION")
+        logger.info("="*60)
         
-        # Phase 3: Pseudo-label fine-tuning
-        if unlabeled_fastq:
-            logger.info("\n=== Switching to pseudo_label phase ===")
-            logger.info(f"Using unlabeled data from: {unlabeled_fastq}")
-            self.phase = 'pseudo_label'
-            
-            # Initialize pseudo-label generator
-            self.pseudo_generator = PseudoLabelGenerator(
-                self.base_model, self.config,
-                confidence_threshold=self.config.hybrid.confidence_threshold if self.config.hybrid else 0.9,
-                label_to_idx=label_to_idx
-            )
-            
-            for epoch in range(self.phase_schedule['pseudo_label']):
-                self.current_epoch = epoch + self.phase_schedule['warmup'] + self.phase_schedule['discriminator']
-                logger.info(f"\nEpoch {self.current_epoch+1} [pseudo_label]")
-                
-                # Generate pseudo-labels
-                logger.info("Generating pseudo-labels...")
-                max_pseudo = self.config.hybrid.max_pseudo_examples if self.config.hybrid else 1000
-                pseudo_reads = self.pseudo_generator.generate_from_fastq(
-                    unlabeled_fastq, max_reads=max_pseudo
-                )
-                logger.info(f"Generated {len(pseudo_reads)} pseudo-labels")
-                
-                if pseudo_reads:
-                    # Combine with training data
-                    combined_reads = train_reads + pseudo_reads
-                    X_combined, y_combined, _ = reads_to_arrays(combined_reads, label_to_idx)
-                    X_combined, y_combined = pad_sequences(X_combined, y_combined, max_len)
-                    y_combined = convert_labels_to_categorical(y_combined, self.config.model.num_labels)
-                    
-                    # Train
-                    self.base_model.fit(
-                        X_combined, y_combined,
-                        validation_data=(X_val, y_val),
-                        batch_size=self.config.model.batch_size,
-                        epochs=1,
-                        verbose=1
-                    )
-                    
-                    # Decay confidence threshold
-                    if self.config.hybrid:
-                        self.pseudo_generator.confidence_threshold *= self.config.hybrid.confidence_decay
-        else:
-            logger.info("\nNo unlabeled data provided, skipping pseudo-label phase")
-        
-        # Save final model
-        final_path = Path(checkpoint_dir) / "model_hybrid_final.h5"
-        self.base_model.save(str(final_path))
-        logger.info(f"\nSaved hybrid-trained model to: {final_path}")
-        
-        return self.base_model
-    
-    def _compile_model(self):
-        """Compile model with appropriate optimizer and loss."""
-        optimizer = keras.optimizers.Adam(
-            learning_rate=self.config.training.learning_rate
+        model = self._invalid_augmentation_training(
+            model, train_reads, val_reads, label_to_idx, checkpoint_path
         )
         
-        self.base_model.compile(
+        # Phase 3: Pseudo-label training (if unlabeled data provided)
+        if unlabeled_fastq and Path(unlabeled_fastq).exists():
+            logger.info("\n" + "="*60)
+            logger.info("PHASE 3: PSEUDO-LABEL TRAINING")
+            logger.info("="*60)
+            
+            model = self._pseudo_label_training(
+                model, unlabeled_fastq, label_to_idx, checkpoint_path
+            )
+        else:
+            logger.info("\nSkipping Phase 3: No unlabeled data provided")
+        
+        # Final evaluation
+        logger.info("\n" + "="*60)
+        logger.info("FINAL EVALUATION")
+        logger.info("="*60)
+        
+        results = model.evaluate(X_val, y_val, verbose=0)
+        logger.info(f"Final Validation Loss: {results[0]:.4f}")
+        logger.info(f"Final Validation Accuracy: {results[1]:.4f}")
+        
+        # Save final model
+        final_path = checkpoint_path / "model_hybrid_final.h5"
+        model.save(str(final_path))
+        logger.info(f"Saved final hybrid model to: {final_path}")
+        
+        return model
+    
+    def _warmup_training(self, X_train, y_train, X_val, y_val, 
+                        checkpoint_path) -> keras.Model:
+        """Phase 1: Standard training on clean data."""
+        model = build_model_from_config(self.config)
+        print_model_summary(model)
+        
+        # Compile
+        learning_rate = self.config.training.learning_rate if self.config.training else 0.001
+        optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
+        model.compile(
             optimizer=optimizer,
             loss='categorical_crossentropy',
             metrics=['accuracy']
         )
         
-        logger.info("Model compiled for hybrid training")
+        # Train
+        batch_size = self.config.model.batch_size
+        history = model.fit(
+            X_train, y_train,
+            validation_data=(X_val, y_val),
+            epochs=self.warmup_epochs,
+            batch_size=batch_size,
+            verbose=1
+        )
+        
+        # Save warmup checkpoint
+        warmup_path = checkpoint_path / "model_warmup.h5"
+        model.save(str(warmup_path))
+        logger.info(f"Warmup model saved to: {warmup_path}")
+        
+        return model
+    
+    def _invalid_augmentation_training(self, model, train_reads, val_reads,
+                                      label_to_idx, checkpoint_path) -> keras.Model:
+        """Phase 2: Training with invalid read augmentation."""
+        
+        # Generate invalid reads
+        logger.info(f"Generating invalid reads (ratio={self.invalid_ratio})...")
+        invalid_train = []
+        for read in train_reads[:int(len(train_reads) * self.invalid_ratio)]:
+            invalid_train.append(self.invalid_generator.generate_invalid_read(read))
+        
+        invalid_val = []
+        for read in val_reads[:int(len(val_reads) * self.invalid_ratio * 0.5)]:
+            invalid_val.append(self.invalid_generator.generate_invalid_read(read))
+        
+        logger.info(f"Generated {len(invalid_train)} training and "
+                   f"{len(invalid_val)} validation invalid reads")
+        
+        # Combine valid and invalid
+        all_train = train_reads + invalid_train
+        all_val = val_reads + invalid_val
+        
+        # Convert to arrays
+        X_train_aug, y_train_aug, _ = reads_to_arrays(all_train, label_to_idx=label_to_idx)
+        X_val_aug, y_val_aug, _ = reads_to_arrays(all_val, label_to_idx=label_to_idx)
+        
+        # Pad and convert
+        max_len = self.config.model.max_seq_len
+        num_labels = self.config.model.num_labels
+        
+        X_train_aug, y_train_aug = pad_sequences(X_train_aug, y_train_aug, max_len)
+        X_val_aug, y_val_aug = pad_sequences(X_val_aug, y_val_aug, max_len)
+        
+        y_train_aug = convert_labels_to_categorical(y_train_aug, num_labels)
+        y_val_aug = convert_labels_to_categorical(y_val_aug, num_labels)
+        
+        # Continue training
+        batch_size = self.config.model.batch_size
+        
+        history = model.fit(
+            X_train_aug, y_train_aug,
+            validation_data=(X_val_aug, y_val_aug),
+            epochs=self.discriminator_epochs,
+            batch_size=batch_size,
+            callbacks=[
+                keras.callbacks.ReduceLROnPlateau(
+                    monitor='val_loss', factor=0.5, patience=3, min_lr=1e-6
+                )
+            ],
+            verbose=1
+        )
+        
+        # Save augmentation checkpoint
+        aug_path = checkpoint_path / "model_augmented.h5"
+        model.save(str(aug_path))
+        logger.info(f"Augmented model saved to: {aug_path}")
+        
+        return model
+    
+    def _pseudo_label_training(self, model, unlabeled_fastq: str,
+                              label_to_idx: Dict[str, int],
+                              checkpoint_path) -> keras.Model:
+        """Phase 3: Self-training with pseudo-labels."""
+        
+        # Generate pseudo-labels
+        pseudo_generator = PseudoLabelGenerator(
+            model, self.config, 
+            confidence_threshold=self.pseudo_label_conf,
+            label_to_idx=label_to_idx
+        )
+        
+        max_unlabeled = self.config.hybrid.max_pseudo_examples if self.config.hybrid else 1000
+        pseudo_reads = pseudo_generator.generate_from_fastq(
+            unlabeled_fastq, max_reads=max_unlabeled
+        )
+        
+        if not pseudo_reads:
+            logger.warning("No high-confidence pseudo-labels generated")
+            return model
+        
+        logger.info(f"Generated {len(pseudo_reads)} high-confidence pseudo-labels")
+        
+        # Convert to arrays
+        X_pseudo, y_pseudo, _ = reads_to_arrays(pseudo_reads, label_to_idx=label_to_idx)
+        
+        # Pad and convert
+        max_len = self.config.model.max_seq_len
+        num_labels = self.config.model.num_labels
+        
+        X_pseudo, y_pseudo = pad_sequences(X_pseudo, y_pseudo, max_len)
+        y_pseudo = convert_labels_to_categorical(y_pseudo, num_labels)
+        
+        # Fine-tune with pseudo-labels
+        batch_size = self.config.model.batch_size
+        
+        # Use lower learning rate for pseudo-label training
+        model.optimizer.learning_rate = 1e-4
+        
+        history = model.fit(
+            X_pseudo, y_pseudo,
+            epochs=self.pseudo_epochs,
+            batch_size=batch_size,
+            verbose=1
+        )
+        
+        # Save pseudo-label checkpoint
+        pseudo_path = checkpoint_path / "model_pseudo.h5"
+        model.save(str(pseudo_path))
+        logger.info(f"Pseudo-label model saved to: {pseudo_path}")
+        
+        return model

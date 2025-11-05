@@ -11,8 +11,7 @@ import numpy as np
 from typing import List, Dict, Optional
 import logging
 
-# Import SimulatedRead from the same data module
-from tempest.data.simulator import SimulatedRead
+from simulator import SimulatedRead
 
 logger = logging.getLogger(__name__)
 
@@ -29,62 +28,41 @@ class InvalidReadGenerator:
     - scrambled: Randomized segment order
     """
     
-    def __init__(self, config=None):
+    def __init__(self, config):
         """
         Initialize invalid read generator.
         
         Args:
-            config: TempestConfig with hybrid training parameters (optional)
+            config: TempestConfig with hybrid training parameters
         """
         self.config = config
         
-        # Default error probabilities - handle both object and dict config
-        if config:
-            if hasattr(config, 'hybrid') and config.hybrid:
-                # Config is a TempestConfig object
-                hybrid = config.hybrid
-                self.error_probabilities = {
-                    'segment_loss': getattr(hybrid, 'segment_loss_prob', 0.3),
-                    'segment_duplication': getattr(hybrid, 'segment_dup_prob', 0.3),
-                    'truncation': getattr(hybrid, 'truncation_prob', 0.2),
-                    'chimeric': getattr(hybrid, 'chimeric_prob', 0.1),
-                    'scrambled': getattr(hybrid, 'scrambled_prob', 0.1)
-                }
-            elif isinstance(config, dict) and 'hybrid' in config:
-                # Config is a dict
-                hybrid = config['hybrid']
-                self.error_probabilities = {
-                    'segment_loss': hybrid.get('segment_loss_prob', 0.3),
-                    'segment_duplication': hybrid.get('segment_dup_prob', 0.3),
-                    'truncation': hybrid.get('truncation_prob', 0.2),
-                    'chimeric': hybrid.get('chimeric_prob', 0.1),
-                    'scrambled': hybrid.get('scrambled_prob', 0.1)
-                }
-            else:
-                # Use defaults
-                self.error_probabilities = self._default_probabilities()
+        # Default error probabilities
+        if config.hybrid:
+            self.error_probabilities = {
+                'segment_loss': config.hybrid.segment_loss_prob,
+                'segment_duplication': config.hybrid.segment_dup_prob,
+                'truncation': config.hybrid.truncation_prob,
+                'chimeric': config.hybrid.chimeric_prob,
+                'scrambled': config.hybrid.scrambled_prob
+            }
         else:
-            self.error_probabilities = self._default_probabilities()
+            self.error_probabilities = {
+                'segment_loss': 0.3,
+                'segment_duplication': 0.3,
+                'truncation': 0.2,
+                'chimeric': 0.1,
+                'scrambled': 0.1
+            }
         
         # Normalize probabilities
         total = sum(self.error_probabilities.values())
-        if total > 0:
-            self.error_probabilities = {
-                k: v/total for k, v in self.error_probabilities.items()
-            }
+        self.error_probabilities = {
+            k: v/total for k, v in self.error_probabilities.items()
+        }
         
         logger.info(f"Initialized InvalidReadGenerator with error probabilities: "
                    f"{self.error_probabilities}")
-    
-    def _default_probabilities(self) -> Dict[str, float]:
-        """Return default error probabilities."""
-        return {
-            'segment_loss': 0.3,
-            'segment_duplication': 0.3,
-            'truncation': 0.2,
-            'chimeric': 0.1,
-            'scrambled': 0.1
-        }
     
     def generate_invalid_read(self, valid_read: SimulatedRead, 
                              error_type: Optional[str] = None) -> SimulatedRead:
@@ -130,13 +108,7 @@ class InvalidReadGenerator:
         Returns:
             List combining valid and invalid reads
         """
-        if not valid_reads:
-            return []
-            
         n_invalid = int(len(valid_reads) * invalid_ratio)
-        
-        if n_invalid == 0:
-            return valid_reads
         
         # Sample reads to corrupt
         indices = np.random.choice(len(valid_reads), n_invalid, replace=False)
@@ -155,9 +127,6 @@ class InvalidReadGenerator:
         """Remove a segment (common error pattern)."""
         segments = self._extract_segments(read)
         
-        if not segments:
-            return read
-        
         # Don't remove adapters or insert
         removable = [s for s in segments 
                     if 'ADAPTER' not in s['type'] and 'INSERT' not in s['type']]
@@ -175,51 +144,25 @@ class InvalidReadGenerator:
         
         # Update label_regions
         new_regions = {}
-        removed_len = to_remove['end'] - to_remove['start']
-        
         for label, regions in read.label_regions.items():
             if label != to_remove['type']:
-                # Adjust positions for removed segment
-                adjusted_regions = []
-                for start, end in regions:
-                    if end <= to_remove['start']:
-                        # Region before removed segment
-                        adjusted_regions.append((start, end))
-                    elif start >= to_remove['end']:
-                        # Region after removed segment - shift back
-                        adjusted_regions.append((start - removed_len, end - removed_len))
-                    elif start < to_remove['start'] and end > to_remove['end']:
-                        # Region spans the removed segment
-                        adjusted_regions.append((start, to_remove['start']))
-                        adjusted_regions.append((to_remove['start'], end - removed_len))
-                
-                if adjusted_regions:
-                    new_regions[label] = adjusted_regions
-        
-        metadata = dict(read.metadata) if read.metadata else {}
-        metadata.update({'error_type': 'segment_loss', 'removed_segment': to_remove['type']})
+                new_regions[label] = regions
         
         return SimulatedRead(
             sequence=new_sequence,
             labels=new_labels,
             label_regions=new_regions,
-            metadata=metadata
+            metadata={**read.metadata, 'error_type': 'segment_loss',
+                     'removed_segment': to_remove['type']}
         )
     
     def _apply_segment_duplication(self, read: SimulatedRead) -> SimulatedRead:
         """Duplicate a segment (PCR artifacts)."""
         segments = self._extract_segments(read)
         
-        if not segments:
-            return read
-        
         # UMI and BARCODE commonly duplicated
         duplicatable = [s for s in segments 
                        if s['type'] in ['UMI', 'BARCODE', 'ACC']]
-        
-        if not duplicatable:
-            # Fall back to any segment except INSERT
-            duplicatable = [s for s in segments if s['type'] != 'INSERT']
         
         if not duplicatable:
             return read
@@ -238,50 +181,21 @@ class InvalidReadGenerator:
                      seg_labels + 
                      read.labels[to_dup['end']:])
         
-        # Update label_regions
-        new_regions = {}
-        dup_len = to_dup['end'] - to_dup['start']
-        
-        for label, regions in read.label_regions.items():
-            adjusted_regions = []
-            for start, end in regions:
-                if label == to_dup['type'] and start == to_dup['start']:
-                    # Add the original and duplicated segment
-                    adjusted_regions.append((start, end))
-                    adjusted_regions.append((end, end + dup_len))
-                elif start >= to_dup['end']:
-                    # Shift regions after duplication
-                    adjusted_regions.append((start + dup_len, end + dup_len))
-                else:
-                    # Keep regions before duplication
-                    adjusted_regions.append((start, end))
-            
-            if adjusted_regions:
-                new_regions[label] = adjusted_regions
-        
-        metadata = dict(read.metadata) if read.metadata else {}
-        metadata.update({'error_type': 'segment_duplication', 'duplicated_segment': to_dup['type']})
-        
         return SimulatedRead(
             sequence=new_sequence,
             labels=new_labels,
-            label_regions=new_regions,
-            metadata=metadata
+            label_regions=read.label_regions,
+            metadata={**read.metadata, 'error_type': 'segment_duplication',
+                     'duplicated_segment': to_dup['type']}
         )
     
     def _apply_truncation(self, read: SimulatedRead) -> SimulatedRead:
         """Truncate read (incomplete sequencing)."""
         # Truncate to 50-90% of original length
-        min_len = max(10, len(read.sequence) // 2)
-        max_len = int(len(read.sequence) * 0.9)
-        
-        if min_len >= max_len:
-            cut_point = min_len
-        else:
-            cut_point = np.random.randint(min_len, max_len)
-        
-        metadata = dict(read.metadata) if read.metadata else {}
-        metadata.update({'error_type': 'truncation', 'truncation_point': cut_point})
+        cut_point = np.random.randint(
+            len(read.sequence) // 2, 
+            int(len(read.sequence) * 0.9)
+        )
         
         return SimulatedRead(
             sequence=read.sequence[:cut_point],
@@ -289,97 +203,55 @@ class InvalidReadGenerator:
             label_regions=self._update_regions_for_truncation(
                 read.label_regions, cut_point
             ),
-            metadata=metadata
+            metadata={**read.metadata, 'error_type': 'truncation',
+                     'truncation_point': cut_point}
         )
     
-    def _apply_chimeric(self, read: SimulatedRead, 
-                        other_read: Optional[SimulatedRead] = None) -> SimulatedRead:
+    def _apply_chimeric(self, read: SimulatedRead) -> SimulatedRead:
         """Create chimeric read by mixing segments."""
         segments = self._extract_segments(read)
         
         if len(segments) < 4:
-            # Not enough segments to make chimeric
             return read
         
         # Keep adapters, scramble middle
-        first = segments[0] if segments else None
-        last = segments[-1] if segments else None
-        middle = segments[1:-1] if len(segments) > 2 else []
-        
-        if middle:
-            np.random.shuffle(middle)
+        first = segments[0]
+        last = segments[-1]
+        middle = segments[1:-1]
+        np.random.shuffle(middle)
         
         # Reconstruct
         new_sequence = ""
         new_labels = []
-        new_regions = {}
         
-        ordered_segments = []
-        if first:
-            ordered_segments.append(first)
-        ordered_segments.extend(middle)
-        if last:
-            ordered_segments.append(last)
-        
-        current_pos = 0
-        for seg in ordered_segments:
-            seg_seq = read.sequence[seg['start']:seg['end']]
-            seg_labels = read.labels[seg['start']:seg['end']]
-            
-            new_sequence += seg_seq
-            new_labels.extend(seg_labels)
-            
-            # Update regions
-            if seg['type'] not in new_regions:
-                new_regions[seg['type']] = []
-            new_regions[seg['type']].append((current_pos, current_pos + len(seg_seq)))
-            current_pos += len(seg_seq)
-        
-        metadata = dict(read.metadata) if read.metadata else {}
-        metadata['error_type'] = 'chimeric'
+        for seg in [first] + middle + [last]:
+            new_sequence += read.sequence[seg['start']:seg['end']]
+            new_labels.extend(read.labels[seg['start']:seg['end']])
         
         return SimulatedRead(
             sequence=new_sequence,
             labels=new_labels,
-            label_regions=new_regions,
-            metadata=metadata
+            label_regions=read.label_regions,
+            metadata={**read.metadata, 'error_type': 'chimeric'}
         )
     
     def _apply_scrambled(self, read: SimulatedRead) -> SimulatedRead:
         """Completely scramble segment order."""
         segments = self._extract_segments(read)
-        
-        if len(segments) <= 1:
-            return read
-        
         np.random.shuffle(segments)
         
         new_sequence = ""
         new_labels = []
-        new_regions = {}
         
-        current_pos = 0
         for seg in segments:
-            seg_seq = read.sequence[seg['start']:seg['end']]
-            seg_labels = read.labels[seg['start']:seg['end']]
-            
-            new_sequence += seg_seq
-            new_labels.extend(seg_labels)
-            
-            # Update regions
-            if seg['type'] not in new_regions:
-                new_regions[seg['type']] = []
-            new_regions[seg['type']].append((current_pos, current_pos + len(seg_seq)))
-            current_pos += len(seg_seq)
-        
-        metadata = dict(read.metadata) if read.metadata else {}
-        metadata['error_type'] = 'scrambled'
+            new_sequence += read.sequence[seg['start']:seg['end']]
+            new_labels.extend(read.labels[seg['start']:seg['end']])
         
         return SimulatedRead(
             sequence=new_sequence,
             labels=new_labels,
-            label_regions=new_regions,
-            metadata=metadata
+            label_regions=read.label_regions,
+            metadata={**read.metadata, 'error_type': 'scrambled'}
         )
     
     def _extract_segments(self, read: SimulatedRead) -> List[Dict]:
