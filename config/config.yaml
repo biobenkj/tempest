@@ -1,0 +1,246 @@
+# Unified Tempest Configuration
+# Supports: Whitelists, Transcript cDNA inserts, Variable polyA, Flexible architecture
+
+model:
+  vocab_size: 5  # A=0, C=1, G=2, T=3, N=4
+  embedding_dim: 128
+  
+  # CNN layers
+  use_cnn: true
+  cnn_filters: [64, 128]
+  cnn_kernels: [3, 5]
+  
+  # BiLSTM layers
+  use_bilstm: true
+  lstm_units: 128
+  lstm_layers: 2
+  dropout: 0.3
+  
+  # Output configuration - dynamically set based on sequence_order
+  num_labels: null  # Will be set automatically from sequence_order
+  use_crf: true
+  
+  # Length constraints for segments (optional)
+  length_constraints:
+    constraints: {}  # Will be populated dynamically or manually
+
+# Simulation settings with full feature support
+simulation:
+  # FLEXIBLE SEQUENCE ARCHITECTURE
+  # Define any sequence structure you want - not hard-coded!
+  # Examples below - uncomment/modify as needed:
+  
+  # Example 1: Dual-index Illumina with polyA
+  sequence_order: ['ADAPTER5', 'UMI', 'INDEX_i7', 'ACC', 'INDEX_i5', 'INSERT', 'POLYA', 'ADAPTER3']
+  
+  # Example 2: Single-cell 10x-style
+  # sequence_order: ['TSO', 'CBC', 'UMI', 'POLY_T', 'INSERT', 'POLYA', 'ADAPTER3']
+  
+  # Example 3: Oxford Nanopore Direct RNA
+  # sequence_order: ['ADAPTER5', 'BARCODE', 'RT_PRIMER', 'INSERT', 'POLYA', 'RNA_ADAPTER']
+  
+  # Example 4: Custom multiplex
+  # sequence_order: ['CUSTOM_TAG1', 'MOLECULAR_ID', 'SAMPLE_BC', 'INSERT', 'QUALITY_TAG', 'TERMINATOR']
+  
+  # SEGMENT DEFINITIONS
+  # Three ways to define sequences for segments:
+  
+  # 1. Fixed sequences (highest priority)
+  sequences:
+    ADAPTER5: 'AGATCGGAAGAGCACACGTCTGAACTCCAGTCA'
+    ADAPTER3: 'AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT'
+    TSO: 'AAGCAGTGGTATCAACGCAGAGTAC'
+    POLY_T: 'TTTTTTTTTTTTTTTTTTTT'
+    RT_PRIMER: 'ACTCTAATTGGAC'
+    RNA_ADAPTER: 'GGGGGGGG'
+    # Use 'random' to generate random sequence
+    # Use 'transcript' for cDNA from transcript pool
+    # Use 'polya' for polyA tail generation
+    INSERT: 'transcript'  # Special keyword for transcript-based generation
+    POLYA: 'polya'  # Special keyword for polyA tail generation
+  
+  # 2. Whitelist files (second priority)
+  # Maps segment names to whitelist files
+  whitelist_files:
+    INDEX_i7: "whitelists/i7_indices.txt"
+    INDEX_i5: "whitelists/i5_indices.txt"
+    CBC: "whitelists/cell_barcodes.txt"
+    BARCODE: "whitelists/sample_barcodes.txt"
+    UMI: "whitelists/umi_sequences.txt"  # Can even whitelist UMIs if needed
+    CUSTOM_TAG1: "whitelists/custom_tags.txt"
+    MOLECULAR_ID: "whitelists/molecular_ids.txt"
+    SAMPLE_BC: "whitelists/sample_barcodes.txt"
+    ACC: "whitelists/acc_sequences.txt"
+  
+  # 3. Fallback sequences (third priority)
+  # Used if whitelist is empty/missing
+  fallback_sequences:
+    INDEX_i7: ['ATTACTCG', 'TCCGGAGA', 'CGCTCATT', 'GAGATTCC']
+    INDEX_i5: ['TATAGCCT', 'ATAGAGGC', 'CCTATCCT', 'GGCTCTGA']
+    CBC: ['AAACCCAAGAAACCCT', 'AAACCCAAGAAACACT', 'AAACCCAAGAAACCAT']
+    BARCODE: ['ACTGACTGACTGACTG', 'TGACTGACTGACTGAC']
+    ACC: ['GGGGGG', 'AAAAAA', 'CCCCCC', 'TTTTTT']
+  
+  # 4. Generated sequences (lowest priority)
+  # Segments not defined above will be generated based on these rules
+  segment_generation:
+    # Length-based generation for segments
+    lengths:
+      UMI: 12
+      MOLECULAR_ID: 8
+      QUALITY_TAG: 6
+      CUSTOM_TAG1: 10
+      DEFAULT: 20  # Default length for unknown segments
+    
+    # Special generation modes
+    generation_mode:
+      ACC: 'pwm'  # Use PWM-based generation
+      INSERT: 'transcript'  # Use transcript pool
+      POLYA: 'polya'  # Use polyA generator
+      DEFAULT: 'random'  # Random DNA sequence
+  
+  # TRANSCRIPT POOL CONFIGURATION (for cDNA inserts)
+  transcript:
+    fasta_file: "transcripts/reference_transcripts.fasta"
+    min_length: 100  # Minimum transcript length to include
+    max_length: 5000  # Maximum transcript length to include
+    
+    # Fragment sampling from transcripts
+    fragment_min: 200  # Minimum fragment size
+    fragment_max: 800  # Maximum fragment size
+    
+    # Orientation
+    reverse_complement_prob: 0.5  # Probability of antisense strand
+    
+    # Fallback if no transcript file
+    fallback_mode: 'random'  # Generate random sequence if no transcripts
+    fallback_gc_content: 0.5  # GC content for random generation
+  
+  # POLYA TAIL CONFIGURATION
+  polya_tail:
+    # Distribution type: 'normal', 'exponential', 'uniform', 'empirical'
+    distribution: 'normal'
+    
+    # Parameters for normal distribution
+    mean_length: 150
+    std_length: 50
+    
+    # Parameters for exponential distribution
+    lambda_param: 0.01  # Rate parameter
+    
+    # Global bounds
+    min_length: 10
+    max_length: 300
+    
+    # Realism parameters
+    purity: 0.95  # Probability of 'A' vs other bases
+    interruption_bases: ['T', 'G', 'C']  # Bases that can interrupt
+    
+    # Empirical distribution (if available)
+    empirical_file: null  # File with observed polyA lengths
+  
+  # ACC/PWM CONFIGURATION
+  pwm:
+    pwm_file: "data/acc_pwm.txt"
+    use_pwm: true
+    threshold: 0.7
+    pseudocount: 0.01
+    
+    # Alternative: predefined ACC sequences with frequencies
+    acc_sequences: null  # List of sequences
+    acc_frequencies: null  # List of frequencies (must sum to 1)
+    acc_priors_file: null  # TSV file with sequences and frequencies
+  
+  # ERROR SIMULATION
+  error_profile:
+    # Overall error rate
+    error_rate: 0.02
+    
+    # Detailed error model
+    substitution:
+      rate: 0.015
+      matrix:  # A->X transition probabilities (optional)
+        A: {'C': 0.3, 'G': 0.3, 'T': 0.4}
+        C: {'A': 0.3, 'G': 0.4, 'T': 0.3}
+        G: {'A': 0.3, 'C': 0.4, 'T': 0.3}
+        T: {'A': 0.4, 'C': 0.3, 'G': 0.3}
+    
+    insertion:
+      rate: 0.0025
+      max_length: 2  # Maximum insertion length
+    
+    deletion:
+      rate: 0.0025
+      max_length: 2  # Maximum deletion length
+    
+    # Quality score simulation (optional)
+    quality_scores:
+      enabled: false
+      min_qual: 10
+      max_qual: 40
+      error_qual_correlation: -0.8  # Correlation between error and quality
+  
+  # SIMULATION PARAMETERS
+  num_sequences: 10000
+  random_seed: 42
+  
+  # Train/validation split
+  train_split: 0.8
+  validation_split: 0.2
+  
+  # Advanced options
+  parallel_generation: false  # Use multiprocessing
+  num_workers: 4  # Number of parallel workers
+  chunk_size: 1000  # Sequences per chunk
+
+# Training configuration
+training:
+  learning_rate: 0.001
+  optimizer: 'adam'
+  epochs: 30
+  batch_size: 32
+  
+  # Length constraint settings
+  use_length_constraints: true
+  constraint_weight: 5.0
+  constraint_ramp_epochs: 5
+  
+  # Dynamic label detection
+  auto_detect_labels: true  # Automatically detect labels from sequence_order
+  
+  # Class weights (optional)
+  use_class_weights: true
+  class_weight_mode: 'balanced'  # or 'manual'
+  manual_class_weights: {}  # Specify if mode is 'manual'
+
+# Evaluation configuration
+evaluation:
+  metrics: ['accuracy', 'precision', 'recall', 'f1', 'segment_accuracy']
+  per_segment_metrics: true
+  confusion_matrix: true
+  
+  # Focus on specific segments (optional)
+  focus_segments: []  # Empty = evaluate all segments
+
+# Output configuration
+output:
+  save_format: ['json', 'tsv', 'pickle']
+  visualization: true
+  
+  # Visualization settings
+  max_sequences_to_plot: 20
+  color_scheme: 'auto'  # Automatically assign colors to segments
+  
+  # Custom colors (optional)
+  segment_colors: {}  # Will be auto-generated if not specified
+
+# Logging
+logging:
+  level: 'INFO'
+  log_dir: './logs'
+  tensorboard: true
+  
+  # Detailed logging
+  log_generation_stats: true
+  log_whitelist_usage: true
+  log_error_injection: true
