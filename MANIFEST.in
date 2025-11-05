@@ -1,0 +1,25 @@
+# Include important documentation and configuration files
+include README.md
+include LICENSE
+include requirements.txt
+include environment.yml
+
+# Include config files
+recursive-include tempest/config *.yaml
+
+# Include documentation
+recursive-include docs *.md
+recursive-include docs *.yaml
+
+# Exclude unnecessary files
+exclude .gitignore
+exclude .DS_Store
+exclude setup_and_test.sh
+exclude acc_pwm.txt
+exclude main.py
+recursive-exclude backup *
+recursive-exclude examples *
+recursive-exclude tests *
+recursive-exclude * __pycache__
+recursive-exclude * *.py[co]
+recursive-exclude * .DS_Store

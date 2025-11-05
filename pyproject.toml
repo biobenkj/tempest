@@ -1,0 +1,119 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tempest-bio"
+version = "0.2.0"
+description = "Modular sequence annotation using length-constrained CRFs with PWM priors"
+readme = "README.md"
+authors = [
+    { name = "Ben Johnson", email = "ben.johnson@vai.org" }
+]
+maintainers = [
+    { name = "Ben Johnson", email = "ben.johnson@vai.org" }
+]
+license = { file = "LICENSE" }
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: OS Independent",
+]
+keywords = [
+    "bioinformatics",
+    "deep learning",
+    "sequence annotation",
+    "CRF",
+    "nanopore",
+    "genomics",
+    "machine learning",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "tensorflow>=2.10.0,<2.16.0",
+    "tf2crf>=0.1.33",
+    "numpy>=1.21.0,<2.0.0",
+    "pandas>=2.0.0",
+    "biopython>=1.80",
+    "scikit-learn>=1.2.0",
+    "matplotlib>=3.5.0",
+    "seaborn>=0.12.0",
+    "pyyaml>=6.0",
+    "tqdm>=4.60.0",
+]
+
+[project.optional-dependencies]
+tf-addons = [
+    "tensorflow-addons>=0.20.0; python_version < '3.11'",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=22.0",
+    "flake8>=5.0",
+    "mypy>=0.990",
+]
+docs = [
+    "sphinx>=5.0",
+    "sphinx-rtd-theme>=1.0",
+    "sphinx-autodoc-typehints>=1.19",
+]
+
+[project.urls]
+Homepage = "https://github.com/biobenkj/tempest"
+Documentation = "https://github.com/biobenkj/tempest/tree/main/docs"
+Repository = "https://github.com/biobenkj/tempest"
+"Bug Tracker" = "https://github.com/biobenkj/tempest/issues"
+
+[project.scripts]
+tempest = "tempest.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tempest*"]
+exclude = ["tests*", "examples*", "backup*", "docs*"]
+
+[tool.setuptools.package-data]
+tempest = ["config/*.yaml"]
+
+[tool.black]
+line-length = 88
+target-version = ['py38', 'py39', 'py310', 'py311']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+  | backup
+)/
+'''
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --cov=tempest --cov-report=term-missing --cov-report=html"
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true

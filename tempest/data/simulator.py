@@ -810,8 +810,9 @@ def create_simulator_from_config(config_file: str) -> SequenceSimulator:
     return SequenceSimulator(config_file=config_file)
 
 
-def convert_reads_to_arrays(
+def reads_to_arrays(
     reads: List[SimulatedRead],
+    label_to_idx: Optional[Dict[str, int]] = None,
     max_len: Optional[int] = None,
     padding_value: int = 4
 ) -> Tuple[np.ndarray, np.ndarray, Dict]:
@@ -820,6 +821,7 @@ def convert_reads_to_arrays(
     
     Args:
         reads: List of SimulatedRead objects
+        label_to_idx: Optional pre-existing label mapping. If None, creates one.
         max_len: Maximum sequence length (pad/truncate to this)
         padding_value: Value to use for padding (4 = N)
         
@@ -832,16 +834,17 @@ def convert_reads_to_arrays(
     if max_len is None:
         max_len = max(len(read.sequence) for read in reads)
     
-    # Create label mapping
-    all_labels = set()
-    for read in reads:
-        all_labels.update(read.labels)
-    
-    # Add special labels
-    all_labels.add('PAD')
-    all_labels.add('UNKNOWN')
-    
-    label_to_idx = {label: i for i, label in enumerate(sorted(all_labels))}
+    # Create label mapping if not provided
+    if label_to_idx is None:
+        all_labels = set()
+        for read in reads:
+            all_labels.update(read.labels)
+        
+        # Add special labels
+        all_labels.add('PAD')
+        all_labels.add('UNKNOWN')
+        
+        label_to_idx = {label: i for i, label in enumerate(sorted(all_labels))}
     
     # Base encoding
     base_to_idx = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
