@@ -69,6 +69,11 @@ OPTIONS:
   # Hybrid training options
   --hybrid                  Enable hybrid training mode
   --pwm PWM_FILE           PWM file for hybrid constraints
+  --unlabeled PATH         Path to unlabeled FASTQ file or directory for pseudo-labeling
+  --unlabeled-dir DIR      Directory containing FASTQ files for pseudo-labeling
+  --max-pseudo-per-file N  Max pseudo-labels per FASTQ file (default: 1000)
+  --max-pseudo-total N     Max total pseudo-labels across all files (default: 10000)
+  --confidence-threshold T  Min confidence for pseudo-labels (default: 0.85)
   --constraint-weight W     Weight for constraint loss (default: 1.0)
   --hard-constraints        Use hard constraints instead of soft
   --temperature T           Temperature for soft constraints (default: 1.0)
@@ -92,6 +97,18 @@ EXAMPLES:
   
   # Hybrid training with PWM constraints
   tempest train --config config.yaml --hybrid --pwm acc_pwm.txt
+  
+  # Hybrid training with single unlabeled FASTQ file
+  tempest train --config config.yaml --hybrid --unlabeled unlabeled.fastq
+  
+  # Hybrid training with directory of FASTQ files
+  tempest train --config config.yaml --hybrid --unlabeled-dir /data/fastq_files/
+  
+  # Hybrid training with directory and custom limits
+  tempest train --config config.yaml --hybrid \
+                --unlabeled-dir /data/fastq_files/ \
+                --max-pseudo-per-file 500 \
+                --max-pseudo-total 5000
   
   # Training with early stopping and checkpointing
   tempest train --config config.yaml --early-stopping --patience 15 --checkpoint-freq 5

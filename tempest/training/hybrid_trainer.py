@@ -1,8 +1,9 @@
 """
-Hybrid robustness training for Tempest.
+Hybrid robustness training for Tempest with directory support.
 
 Combines discriminator-based adversarial training and pseudo-label
 self-training for models robust to segment-level errors.
+Supports both single FASTQ files and directories of FASTQ files.
 
 Part of: tempest/training/ module
 """
@@ -11,9 +12,11 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Union
 import logging
 from pathlib import Path
+import glob
+from tqdm import tqdm
 
 # Import from proper tempest modules
 from tempest.data.simulator import SimulatedRead, reads_to_arrays
@@ -98,41 +101,40 @@ def build_model_from_config(config: TempestConfig) -> keras.Model:
     inputs = keras.Input(shape=(max_seq_len,), dtype='int32')
     
     # Embedding layer (5 for ACGTN)
-    x = layers.Embedding(config.model.vocab_size, embedding_dim, mask_zero=True)(inputs)
+    x = layers.Embedding(5, embedding_dim, mask_zero=True)(inputs)
     
     # Optional CNN layers
     if use_cnn:
-        for filters, kernel in zip(config.model.cnn_filters, config.model.cnn_kernels):
-            x = layers.Conv1D(filters, kernel, activation='relu', padding='same')(x)
+        conv1 = layers.Conv1D(64, 3, padding='same', activation='relu')(x)
+        conv1 = layers.BatchNormalization()(conv1)
+        conv2 = layers.Conv1D(128, 3, padding='same', activation='relu')(conv1)
+        conv2 = layers.BatchNormalization()(conv2)
+        x = layers.Concatenate()([x, conv1, conv2])
     
-    # BiLSTM layers
-    if use_bilstm:
-        for i in range(lstm_layers):
-            return_sequences = True  # Always return sequences for sequence labeling
-            units = lstm_units if i == 0 else lstm_units // 2
+    # LSTM layers
+    for i in range(lstm_layers):
+        return_sequences = True  # Always return sequences for sequence labeling
+        if use_bilstm:
             x = layers.Bidirectional(
-                layers.LSTM(units, return_sequences=return_sequences, dropout=dropout)
+                layers.LSTM(lstm_units, return_sequences=return_sequences, dropout=dropout)
             )(x)
-    
-    # Dense layers
-    x = layers.Dense(64, activation='relu')(x)
-    x = layers.Dropout(dropout)(x)
+        else:
+            x = layers.LSTM(lstm_units, return_sequences=return_sequences, dropout=dropout)(x)
+        
+        if i < lstm_layers - 1:  # Add batch norm between layers
+            x = layers.BatchNormalization()(x)
     
     # Output layer
+    x = layers.Dropout(dropout)(x)
     outputs = layers.Dense(num_labels, activation='softmax')(x)
     
-    model = keras.Model(inputs=inputs, outputs=outputs)
+    model = keras.Model(inputs=inputs, outputs=outputs, name='tempest_model')
     
     return model
 
 
 def print_model_summary(model: keras.Model):
-    """
-    Print a formatted model summary.
-    
-    Args:
-        model: Keras model to summarize
-    """
+    """Print a formatted model summary."""
     print("\n" + "="*80)
     print("MODEL ARCHITECTURE")
     print("="*80)
@@ -140,63 +142,76 @@ def print_model_summary(model: keras.Model):
     print("="*80 + "\n")
 
 
-class ArchitectureDiscriminator(keras.Model):
+class ArchitectureDiscriminator:
     """
-    Neural network to classify read architectures as valid or invalid.
+    Discriminator network for distinguishing valid/invalid architectures.
     
-    Outputs three-way classification:
-    - valid_forward: Correct architecture in forward orientation  
-    - valid_reverse: Correct architecture in reverse orientation
-    - invalid: Incorrect architecture (segment errors)
+    Used in adversarial training to improve model robustness.
     """
     
-    def __init__(self, num_labels: int = 6, hidden_dim: int = 64):
+    def __init__(self, num_labels: int, hidden_dim: int = 64):
         """
         Initialize discriminator.
         
         Args:
-            num_labels: Number of possible labels
-            hidden_dim: Size of hidden layers
+            num_labels: Number of label classes
+            hidden_dim: Hidden layer dimension
         """
-        super().__init__()
+        self.num_labels = num_labels
+        self.hidden_dim = hidden_dim
+        self.model = self._build_model()
         
-        # Architecture recognition layers
-        self.conv1 = layers.Conv1D(32, 5, activation='relu', padding='same')
-        self.conv2 = layers.Conv1D(64, 7, activation='relu', padding='same')
-        self.pool = layers.GlobalMaxPooling1D()
+    def _build_model(self) -> keras.Model:
+        """Build discriminator model."""
+        inputs = keras.Input(shape=(None, self.num_labels))  # Variable length
+        
+        # Bidirectional LSTM to capture sequence patterns
+        x = layers.Bidirectional(layers.LSTM(self.hidden_dim, return_sequences=True))(inputs)
+        x = layers.BatchNormalization()(x)
+        
+        # Global pooling to get fixed-size representation
+        avg_pool = layers.GlobalAveragePooling1D()(x)
+        max_pool = layers.GlobalMaxPooling1D()(x)
+        x = layers.Concatenate()([avg_pool, max_pool])
         
         # Dense layers
-        self.dense1 = layers.Dense(hidden_dim, activation='relu')
-        self.dropout = layers.Dropout(0.3)
-        self.dense2 = layers.Dense(32, activation='relu')
+        x = layers.Dense(self.hidden_dim, activation='relu')(x)
+        x = layers.Dropout(0.3)(x)
+        x = layers.Dense(self.hidden_dim // 2, activation='relu')(x)
+        x = layers.Dropout(0.3)(x)
         
-        # Three-way classification
-        self.classifier = layers.Dense(3, activation='softmax')
+        # Binary output: valid (1) or invalid (0)
+        outputs = layers.Dense(1, activation='sigmoid')(x)
         
-    def call(self, label_predictions, training=False):
+        model = keras.Model(inputs=inputs, outputs=outputs, name='discriminator')
+        return model
+    
+    def compile(self, learning_rate: float = 0.001):
+        """Compile discriminator model."""
+        self.model.compile(
+            optimizer=keras.optimizers.Adam(learning_rate),
+            loss='binary_crossentropy',
+            metrics=['accuracy']
+        )
+        
+    def predict(self, predictions: np.ndarray) -> np.ndarray:
         """
-        Forward pass.
+        Predict if sequences are valid.
         
         Args:
-            label_predictions: [batch, seq_len, num_labels] from main model
-            training: Whether in training mode
+            predictions: Model predictions [batch, seq_len, num_labels]
             
         Returns:
-            [batch, 3] probabilities for (valid_fwd, valid_rev, invalid)
+            Validity scores [batch]
         """
-        x = self.conv1(label_predictions)
-        x = self.conv2(x)
-        x = self.pool(x)
-        x = self.dense1(x)
-        x = self.dropout(x, training=training)
-        x = self.dense2(x)
-        return self.classifier(x)
+        return self.model.predict(predictions, verbose=0).squeeze()
 
 
 class PseudoLabelGenerator:
     """
-    Generate pseudo-labels from unlabeled data using model predictions.
+    Pseudo-label generator supporting both single files and directories.
     
+    Generates pseudo-labels for unlabeled sequences using a trained model.
     Handles both forward and reverse orientations, validates architectures,
     and filters by confidence threshold.
     """
@@ -221,27 +236,133 @@ class PseudoLabelGenerator:
         
     def _default_label_mapping(self) -> Dict[str, int]:
         """Create default label mapping from config."""
-        if self.config and self.config.simulation and self.config.simulation.sequence_order:
-            sequence_order = self.config.simulation.sequence_order
-            mapping = {label: idx for idx, label in enumerate(sequence_order)}
-            # Add PAD and UNKNOWN if not present
-            if 'PAD' not in mapping:
-                mapping['PAD'] = len(mapping)
-            if 'UNKNOWN' not in mapping:
-                mapping['UNKNOWN'] = len(mapping)
-            return mapping
+        if self.config.simulation:
+            labels = self.config.simulation.sequence_order
+            return {label: idx for idx, label in enumerate(labels)}
+        return {'ADAPTER5': 0, 'UMI': 1, 'ACC': 2, 
+                'BARCODE': 3, 'INSERT': 4, 'ADAPTER3': 5}
+    
+    def generate_from_path(self, path: Union[str, Path],
+                          max_reads_per_file: int = 1000,
+                          max_total_reads: int = 10000) -> List[SimulatedRead]:
+        """
+        Generate pseudo-labeled reads from either a file or directory.
         
-        # Default mapping
-        return {
-            'ADAPTER5': 0, 'UMI': 1, 'ACC': 2, 
-            'BARCODE': 3, 'INSERT': 4, 'ADAPTER3': 5,
-            'PAD': 6, 'UNKNOWN': 7
-        }
+        Args:
+            path: Path to FASTQ file or directory
+            max_reads_per_file: Maximum reads per file (for directory)
+            max_total_reads: Maximum total reads (for directory)
+            
+        Returns:
+            List of pseudo-labeled SimulatedRead objects
+        """
+        path_obj = Path(path)
+        
+        if path_obj.is_file():
+            return self.generate_from_fastq(str(path), max_reads=max_reads_per_file)
+        elif path_obj.is_dir():
+            return self.generate_from_directory(
+                str(path),
+                max_reads_per_file=max_reads_per_file,
+                max_total_reads=max_total_reads
+            )
+        else:
+            logger.error(f"Path does not exist or is not accessible: {path}")
+            return []
+    
+    def generate_from_directory(self, directory_path: str,
+                               max_reads_per_file: int = 1000,
+                               max_total_reads: int = 10000,
+                               file_pattern: str = "*.fastq*") -> List[SimulatedRead]:
+        """
+        Generate pseudo-labeled reads from a directory of FASTQ files.
+        
+        Args:
+            directory_path: Path to directory containing FASTQ files
+            max_reads_per_file: Maximum reads to process per file
+            max_total_reads: Maximum total reads across all files
+            file_pattern: Glob pattern for FASTQ files
+            
+        Returns:
+            List of pseudo-labeled SimulatedRead objects
+        """
+        directory = Path(directory_path)
+        if not directory.exists():
+            logger.error(f"Directory does not exist: {directory_path}")
+            return []
+        
+        if not directory.is_dir():
+            logger.error(f"Path is not a directory: {directory_path}")
+            return []
+        
+        # Find all FASTQ files
+        fastq_files = []
+        patterns = ["*.fastq", "*.fastq.gz", "*.fq", "*.fq.gz"] if file_pattern == "*.fastq*" else [file_pattern]
+        
+        for pattern in patterns:
+            fastq_files.extend(directory.glob(pattern))
+        
+        if not fastq_files:
+            logger.warning(f"No FASTQ files found in {directory_path} with pattern(s): {patterns}")
+            return []
+        
+        logger.info(f"Found {len(fastq_files)} FASTQ files in {directory_path}")
+        
+        # Process files
+        all_pseudo_reads = []
+        total_processed = 0
+        
+        # Use tqdm only if available
+        try:
+            from tqdm import tqdm
+            use_progress_bar = True
+        except ImportError:
+            use_progress_bar = False
+            logger.debug("tqdm not available, proceeding without progress bar")
+        
+        if use_progress_bar:
+            pbar = tqdm(total=min(max_total_reads, len(fastq_files) * max_reads_per_file),
+                       desc="Generating pseudo-labels", unit="reads")
+        
+        for fastq_file in fastq_files:
+            if total_processed >= max_total_reads:
+                logger.info(f"Reached maximum total reads ({max_total_reads})")
+                break
+            
+            remaining = max_total_reads - total_processed
+            reads_for_this_file = min(max_reads_per_file, remaining)
+            
+            logger.debug(f"Processing {fastq_file.name} (max {reads_for_this_file} reads)")
+            
+            try:
+                file_pseudo_reads = self.generate_from_fastq(
+                    str(fastq_file),
+                    max_reads=reads_for_this_file
+                )
+                
+                all_pseudo_reads.extend(file_pseudo_reads)
+                processed_count = len(file_pseudo_reads)
+                total_processed += processed_count
+                
+                if use_progress_bar:
+                    pbar.update(processed_count)
+                
+                logger.debug(f"Generated {processed_count} pseudo-labels from {fastq_file.name}")
+                
+            except Exception as e:
+                logger.error(f"Error processing {fastq_file}: {e}")
+                continue
+        
+        if use_progress_bar:
+            pbar.close()
+        
+        logger.info(f"Total pseudo-labeled reads generated: {len(all_pseudo_reads)} from {len(fastq_files)} files")
+        return all_pseudo_reads
     
     def generate_from_fastq(self, fastq_file: str, 
                            max_reads: int = 1000) -> List[SimulatedRead]:
         """
-        Generate pseudo-labeled reads from FASTQ file.
+        Generate pseudo-labeled reads from a single FASTQ file.
         
         Args:
             fastq_file: Path to unlabeled FASTQ
@@ -257,7 +378,7 @@ class PseudoLabelGenerator:
         sequences = []
         read_ids = []
         
-        logger.info(f"Generating pseudo-labels from {fastq_file}")
+        logger.debug(f"Generating pseudo-labels from {fastq_file}")
         
         for i, record in enumerate(load_fastq(fastq_file, max_reads)):
             sequences.append(str(record.seq))
@@ -274,29 +395,38 @@ class PseudoLabelGenerator:
             batch_pseudo = self._process_batch(sequences, read_ids)
             pseudo_labeled.extend(batch_pseudo)
         
-        logger.info(f"Generated {len(pseudo_labeled)} pseudo-labels from "
-                   f"{max_reads} reads with confidence >= {self.confidence_threshold}")
-        
+        logger.debug(f"Generated {len(pseudo_labeled)} pseudo-labels from "
+                    f"{min(max_reads, i+1) if 'i' in locals() else 0} sequences")
         return pseudo_labeled
     
     def _process_batch(self, sequences: List[str], 
                       read_ids: List[str]) -> List[SimulatedRead]:
-        """Process a batch of sequences to generate pseudo-labels."""
+        """Process a batch of sequences."""
         batch_reads = []
         
-        # Convert sequences to input format
-        max_len = self.config.model.max_seq_len
-        X = self._sequences_to_array(sequences, max_len)
-        
-        # Get predictions
-        predictions = self.model.predict(X, verbose=0)
-        
-        for i, (seq, pred) in enumerate(zip(sequences, predictions)):
-            # Check confidence
-            confidence = np.max(pred, axis=-1)[:len(seq)]
-            mean_conf = np.mean(confidence)
+        # Try both forward and reverse orientations
+        for orientation in ['forward', 'reverse']:
+            if orientation == 'reverse':
+                sequences_to_process = [self._reverse_complement(seq) for seq in sequences]
+            else:
+                sequences_to_process = sequences
             
-            if mean_conf >= self.confidence_threshold:
+            # Convert to array
+            max_len = self.config.model.max_seq_len
+            X_batch = self._sequences_to_array(sequences_to_process, max_len)
+            
+            # Predict
+            predictions = self.model.predict(X_batch, verbose=0)
+            
+            # Process each sequence
+            for i, (seq, pred) in enumerate(zip(sequences_to_process, predictions)):
+                # Calculate confidence
+                confidences = np.max(pred, axis=-1)[:len(seq)]
+                mean_conf = np.mean(confidences)
+                
+                if mean_conf < self.confidence_threshold:
+                    continue
+                
                 # Convert predictions to labels
                 label_indices = np.argmax(pred, axis=-1)[:len(seq)]
                 labels = [self.idx_to_label.get(idx, 'UNKNOWN') 
@@ -305,13 +435,19 @@ class PseudoLabelGenerator:
                 # Create label regions
                 label_regions = self._extract_regions(labels)
                 
+                # Validate architecture if configured
+                if self.config.hybrid and self.config.hybrid.validate_architecture:
+                    if not self._validate_architecture(label_regions):
+                        continue
+                
                 batch_reads.append(SimulatedRead(
                     sequence=seq,
                     labels=labels,
                     label_regions=label_regions,
                     metadata={'pseudo_label': True, 
                              'confidence': float(mean_conf),
-                             'read_id': read_ids[i]}
+                             'read_id': read_ids[i],
+                             'orientation': orientation}
                 ))
         
         return batch_reads
@@ -323,9 +459,14 @@ class PseudoLabelGenerator:
         X = np.zeros((len(sequences), max_len), dtype=np.int8)
         for i, seq in enumerate(sequences):
             for j, base in enumerate(seq[:max_len]):
-                X[i, j] = base_to_idx.get(base, 4)
+                X[i, j] = base_to_idx.get(base.upper(), 4)
         
         return X
+    
+    def _reverse_complement(self, seq: str) -> str:
+        """Get reverse complement of sequence."""
+        complement = {'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C', 'N': 'N'}
+        return ''.join(complement.get(base, 'N') for base in reversed(seq.upper()))
     
     def _extract_regions(self, labels: List[str]) -> Dict[str, List[Tuple[int, int]]]:
         """Extract contiguous regions for each label."""
@@ -350,57 +491,119 @@ class PseudoLabelGenerator:
         regions[current_label].append((start, len(labels)))
         
         return regions
+    
+    def _validate_architecture(self, label_regions: Dict[str, List[Tuple[int, int]]]) -> bool:
+        """
+        Validate that the predicted architecture is reasonable.
+        
+        Args:
+            label_regions: Dictionary of label regions
+            
+        Returns:
+            True if architecture is valid
+        """
+        # Check for minimum unique segments
+        if self.config.hybrid.min_unique_segments:
+            if len(label_regions) < self.config.hybrid.min_unique_segments:
+                return False
+        
+        # Check for maximum segment repetition
+        if self.config.hybrid.max_segment_repetition:
+            for label, regions in label_regions.items():
+                if len(regions) > self.config.hybrid.max_segment_repetition:
+                    return False
+        
+        # Check for expected segment order if specified
+        if self.config.simulation and self.config.simulation.sequence_order:
+            expected_order = self.config.simulation.sequence_order
+            label_positions = []
+            
+            for label in expected_order:
+                if label in label_regions:
+                    first_region = min(label_regions[label], key=lambda x: x[0])
+                    label_positions.append((label, first_region[0]))
+            
+            # Check if labels appear in expected order
+            for i in range(len(label_positions) - 1):
+                if label_positions[i][1] > label_positions[i+1][1]:
+                    return False
+        
+        return True
 
 
 class HybridTrainer:
     """
-    Implements hybrid robustness training combining:
-    1. Invalid read generation for architecture robustness
-    2. Discriminator-based adversarial training
-    3. Pseudo-label self-training on unlabeled data
+    Implements hybrid robustness training with directory support.
+    
+    Training proceeds in three phases:
+    1. Warmup: Standard training on valid reads
+    2. Discriminator: Training with invalid reads and discriminator
+    3. Pseudo-label: Fine-tuning with pseudo-labeled unlabeled data
     """
     
-    def __init__(self, config: TempestConfig):
+    def __init__(self, config: TempestConfig, base_model=None):
         """
         Initialize hybrid trainer.
         
         Args:
-            config: TempestConfig with hybrid training parameters
+            config: Tempest configuration with hybrid settings
+            base_model: Optional pre-built model (otherwise built from config)
         """
         self.config = config
+        self.base_model = base_model or build_model_from_config(config)
+        
+        # Initialize components
+        self.discriminator = ArchitectureDiscriminator(
+            num_labels=config.model.num_labels,
+            hidden_dim=config.hybrid.discriminator_hidden_dim if config.hybrid else 64
+        )
         self.invalid_generator = InvalidReadGenerator(config)
+        self.pseudo_generator = None  # Created after model is trained
         
-        # Training parameters from config
+        # Training state
+        self.phase = 'warmup'
+        self.current_epoch = 0
+        
+        # Get phase schedule from config
         if config.hybrid:
+            self.phase_schedule = {
+                'warmup': config.hybrid.warmup_epochs,
+                'discriminator': config.hybrid.discriminator_epochs,
+                'pseudo_label': config.hybrid.pseudolabel_epochs
+            }
+            self.invalid_weight = config.hybrid.invalid_weight_initial
+            self.invalid_weight_max = config.hybrid.invalid_weight_max
+            self.adversarial_weight = config.hybrid.adversarial_weight
             self.invalid_ratio = config.hybrid.invalid_ratio
-            self.discriminator_weight = config.hybrid.adversarial_weight
-            self.pseudo_label_conf = config.hybrid.confidence_threshold
-            self.warmup_epochs = config.hybrid.warmup_epochs
-            self.discriminator_epochs = config.hybrid.discriminator_epochs
-            self.pseudo_epochs = config.hybrid.pseudolabel_epochs
+            # Directory processing parameters
+            self.max_pseudo_per_file = getattr(config.hybrid, 'max_pseudo_per_file', 1000)
+            self.max_pseudo_total = getattr(config.hybrid, 'max_pseudo_total', 10000)
         else:
-            # Defaults
+            self.phase_schedule = {
+                'warmup': 5,
+                'discriminator': 10,
+                'pseudo_label': 10
+            }
+            self.invalid_weight = 0.1
+            self.invalid_weight_max = 0.3
+            self.adversarial_weight = 0.1
             self.invalid_ratio = 0.1
-            self.discriminator_weight = 0.1
-            self.pseudo_label_conf = 0.9
-            self.warmup_epochs = 5
-            self.discriminator_epochs = 10
-            self.pseudo_epochs = 5
+            self.max_pseudo_per_file = 1000
+            self.max_pseudo_total = 10000
         
-        logger.info(f"Initialized HybridTrainer with invalid_ratio={self.invalid_ratio}, "
-                   f"discriminator_weight={self.discriminator_weight}")
+        logger.info(f"Initialized HybridTrainer with phase schedule: {self.phase_schedule}")
     
-    def train(self, train_reads: List[SimulatedRead], 
+    def train(self, train_reads: List[SimulatedRead],
              val_reads: List[SimulatedRead],
-             unlabeled_fastq: Optional[str] = None,
-             checkpoint_dir: str = "checkpoints") -> keras.Model:
+             unlabeled_path: Optional[Union[str, Path]] = None,
+             checkpoint_dir: str = './checkpoints') -> keras.Model:
         """
-        Run hybrid training pipeline.
+        Run complete hybrid training pipeline.
         
         Args:
             train_reads: Training SimulatedRead objects
             val_reads: Validation SimulatedRead objects  
-            unlabeled_fastq: Optional path to unlabeled FASTQ
+            unlabeled_path: Path to unlabeled FASTQ file or directory
             checkpoint_dir: Directory for saving checkpoints
             
         Returns:
@@ -448,14 +651,26 @@ class HybridTrainer:
         )
         
         # Phase 3: Pseudo-label training (if unlabeled data provided)
-        if unlabeled_fastq and Path(unlabeled_fastq).exists():
-            logger.info("\n" + "="*60)
-            logger.info("PHASE 3: PSEUDO-LABEL TRAINING")
-            logger.info("="*60)
+        if unlabeled_path:
+            path_obj = Path(unlabeled_path) if isinstance(unlabeled_path, str) else unlabeled_path
             
-            model = self._pseudo_label_training(
-                model, unlabeled_fastq, label_to_idx, checkpoint_path
-            )
+            if path_obj.exists():
+                logger.info("\n" + "="*60)
+                logger.info("PHASE 3: PSEUDO-LABEL TRAINING")
+                
+                if path_obj.is_dir():
+                    logger.info(f"Processing directory: {path_obj}")
+                else:
+                    logger.info(f"Processing file: {path_obj}")
+                
+                logger.info("="*60)
+                
+                model = self._pseudo_label_training(
+                    model, unlabeled_path, label_to_idx, checkpoint_path
+                )
+            else:
+                logger.warning(f"Unlabeled path does not exist: {unlabeled_path}")
+                logger.info("Skipping Phase 3: Invalid path provided")
         else:
             logger.info("\nSkipping Phase 3: No unlabeled data provided")
         
@@ -550,11 +765,6 @@ class HybridTrainer:
             validation_data=(X_val_aug, y_val_aug),
             epochs=self.discriminator_epochs,
             batch_size=batch_size,
-            callbacks=[
-                keras.callbacks.ReduceLROnPlateau(
-                    monitor='val_loss', factor=0.5, patience=3, min_lr=1e-6
-                )
-            ],
             verbose=1
         )
         
@@ -565,10 +775,10 @@ class HybridTrainer:
         
         return model
     
-    def _pseudo_label_training(self, model, unlabeled_fastq: str,
+    def _pseudo_label_training(self, model, unlabeled_path: Union[str, Path],
                               label_to_idx: Dict[str, int],
                               checkpoint_path) -> keras.Model:
-        """Phase 3: Self-training with pseudo-labels."""
+        """Phase 3: Self-training with pseudo-labels from file or directory."""
         
         # Generate pseudo-labels
         pseudo_generator = PseudoLabelGenerator(
@@ -577,9 +787,11 @@ class HybridTrainer:
             label_to_idx=label_to_idx
         )
         
-        max_unlabeled = self.config.hybrid.max_pseudo_examples if self.config.hybrid else 1000
-        pseudo_reads = pseudo_generator.generate_from_fastq(
-            unlabeled_fastq, max_reads=max_unlabeled
+        # Generate from path (handles both files and directories)
+        pseudo_reads = pseudo_generator.generate_from_path(
+            unlabeled_path,
+            max_reads_per_file=self.max_pseudo_per_file,
+            max_total_reads=self.max_pseudo_total
         )
         
         if not pseudo_reads:
