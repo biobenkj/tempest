@@ -12,159 +12,37 @@ import logging
 import warnings
 from pathlib import Path
 
-# ============================================================================
-# TENSORFLOW WARNING SUPPRESSION
-# ============================================================================
-# Set these BEFORE importing TensorFlow to suppress various warnings
-# To re-enable for debugging, set TEMPEST_DEBUG=1 environment variable
-if os.getenv('TEMPEST_DEBUG', '0') != '1':
-    # Suppress TensorFlow C++ logging
-    # 0 = all logs, 1 = filter INFO, 2 = filter INFO & WARNING, 3 = filter all
-    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-    
-    # Disable oneDNN custom operations message
-    os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-    
-    # Suppress CUDA/cuDNN/cuBLAS registration warnings
-    os.environ['TF_DISABLE_PLUGIN_REGISTRATION'] = '1'
-    
-    # Suppress CPU instruction optimization messages
-    os.environ['TF_ENABLE_DEPRECATION_WARNINGS'] = '0'
-    
-    # Suppress TensorRT warnings
-    os.environ['TF_TRT_ALLOW_ENGINE_CACHING'] = '0'
-    
-    # Set up Python warning filters
-    warnings.filterwarnings("ignore")
-    
-    # Configure logging to suppress TF messages
-    logging.getLogger('tensorflow').setLevel(logging.ERROR)
-    logging.getLogger('tensorflow').propagate = False
-# ============================================================================
+# Add to path
+sys.path.insert(0, str(Path(__file__).parent))
 
-# Check for --help early to display help quickly without loading heavy modules
-def check_help_early():
-    """Check if help is requested and display it before loading heavy modules."""
-    if '--help' in sys.argv or '-h' in sys.argv:
-        parser = argparse.ArgumentParser(
-            description='Tempest - Modular sequence annotation using length-constrained CRFs',
-            formatter_class=argparse.RawDescriptionHelpFormatter,
-            epilog="""
-TEMPEST OVERVIEW:
------------------
-Tempest is a deep learning framework for sequence annotation that combines:
-  • Conditional Random Fields (CRFs) for structured prediction
-  • Length constraints to enforce biologically meaningful segment sizes
-  • Position Weight Matrix (PWM) priors for incorporating domain knowledge
-  • Hybrid training modes for improved robustness
-
-TRAINING MODES:
----------------
-1. Standard Mode (default):
-   - Basic supervised training with CRF layers
-   - Uses simulated or provided sequence data
-   - Suitable for clean, well-labeled data
-
-2. Hybrid Mode (--hybrid):
-   - Advanced training with invalid sequence handling
-   - Pseudo-label generation for unlabeled data
-   - Improved robustness to noisy real-world sequences
-   - Requires hybrid configuration section in config file
-
-CONFIGURATION:
---------------
-Training is controlled via YAML configuration files:
-  • config.yaml - Standard training configuration
-  • hybrid_config.yaml - Hybrid training with robustness features
-  • config_with_whitelists.yaml - Training with sequence constraints
-
-Example config files are provided in the config/ directory.
-
-EXAMPLES:
----------
-Standard training:
-  tempest --config config/train_config.yaml
-
-Hybrid training with PWM:
-  tempest --config config/hybrid_config.yaml --hybrid --pwm acc_pwm.txt
-
-Training with unlabeled data:
-  tempest --config config/hybrid_config.yaml --hybrid --unlabeled reads.fastq
-
-Custom output directory:
-  tempest --config config/train_config.yaml --output-dir ./my_model
-
-For more information, visit: https://github.com/biobenkj/tempest
-            """
-        )
-        parser.add_argument(
-            '--config',
-            type=str,
-            required=True,
-            help='Path to configuration YAML file (required)'
-        )
-        parser.add_argument(
-            '--pwm',
-            type=str,
-            default=None,
-            help='Path to PWM file for ACC generation (overrides config)'
-        )
-        parser.add_argument(
-            '--output-dir',
-            type=str,
-            default=None,
-            help='Output directory for model checkpoints (overrides config)'
-        )
-        parser.add_argument(
-            '--hybrid',
-            action='store_true',
-            help='Enable hybrid robustness training mode'
-        )
-        parser.add_argument(
-            '--unlabeled',
-            type=str,
-            default=None,
-            help='Path to unlabeled FASTQ file for pseudo-labeling (hybrid mode only)'
-        )
-        
-        args = parser.parse_args()
-        sys.exit(0)
-
-# Check for help before importing heavy modules
-check_help_early()
-
-# Now import heavy modules after help check
+# Import numpy first
 import numpy as np
 
-# Import TensorFlow with full suppression
-if os.getenv('TEMPEST_DEBUG', '0') != '1':
-    # Redirect stderr temporarily during TF import to suppress C++ warnings
-    import io
-    import contextlib
-    
-    with contextlib.redirect_stderr(io.StringIO()):
-        import tensorflow as tf
-else:
-    import tensorflow as tf
+# Configure TensorFlow suppression if not already done
+if os.getenv('TEMPEST_DEBUG', '0') != '1' and os.getenv('TF_CPP_MIN_LOG_LEVEL') != '3':
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+    os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+    warnings.filterwarnings("ignore")
+    logging.getLogger('tensorflow').setLevel(logging.ERROR)
 
-# Configure TensorFlow logging after import
+# Import TensorFlow
+import tensorflow as tf
 if os.getenv('TEMPEST_DEBUG', '0') != '1':
     tf.get_logger().setLevel('ERROR')
     tf.autograph.set_verbosity(3)
-    tf.config.set_soft_device_placement(True)
     
-    # Suppress absl logging (used by TensorFlow)
-    import absl.logging
-    absl.logging.set_verbosity(absl.logging.ERROR)
+    # Try to suppress absl logging if available
+    try:
+        import absl.logging
+        absl.logging.set_verbosity(absl.logging.ERROR)
+    except ImportError:
+        pass
 
 from tensorflow import keras
 
-# Suppress TensorFlow Addons deprecation warning specifically
+# Suppress TensorFlow Addons warnings
 warnings.filterwarnings("ignore", message=".*TensorFlow Addons.*")
 warnings.filterwarnings("ignore", category=UserWarning, module="tensorflow_addons")
-
-# Add to path
-sys.path.insert(0, str(Path(__file__).parent))
 
 # Import from tempest modules
 from tempest.utils import load_config, ensure_dir

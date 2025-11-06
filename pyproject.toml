@@ -74,7 +74,7 @@ Repository = "https://github.com/biobenkj/tempest"
 "Bug Tracker" = "https://github.com/biobenkj/tempest/issues"
 
 [project.scripts]
-tempest = "tempest.main:main"
+tempest = "tempest.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

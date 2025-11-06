@@ -76,7 +76,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'tempest=tempest.main:main',
+            'tempest=tempest.cli:main',
         ],
     },
     keywords=[
