@@ -8,6 +8,203 @@ import sys
 import os
 
 
+# Define subcommand help texts
+SUBCOMMAND_HELP = {
+    'simulate': """usage: tempest simulate [options]
+
+Generate synthetic sequence data for testing and training
+
+OPTIONS:
+  --config CONFIG             Path to configuration YAML file (required)
+  --output OUTPUT             Output directory for generated data
+                             (default: tempest_simulated_data)
+  --num-sequences N          Number of sequences to generate (default: 1000)
+  --split                    Create train/validation split (80/20)
+  --train-ratio RATIO        Training data ratio when splitting (default: 0.8)
+  --seed SEED                Random seed for reproducibility
+  --whitelists               Generate whitelists for allowed state sequences
+  --pwm PWM_FILE             Include PWM file for motif generation
+  --noise-level LEVEL        Add noise to sequences (0.0-1.0, default: 0.0)
+  --variable-length          Generate sequences with variable lengths
+  --min-length N             Minimum sequence length (default: 100)
+  --max-length N             Maximum sequence length (default: 500)
+  
+EXAMPLES:
+  # Generate basic training data
+  tempest simulate --config config.yaml --num-sequences 10000
+  
+  # Generate with train/validation split
+  tempest simulate --config config.yaml --num-sequences 10000 --split
+  
+  # Generate with PWM motifs and noise
+  tempest simulate --config config.yaml --pwm acc_pwm.txt --noise-level 0.1
+  
+  # Generate variable length sequences
+  tempest simulate --config config.yaml --variable-length --min-length 50 --max-length 300
+""",
+    
+    'train': """usage: tempest train [options]
+
+Train a Tempest model using length-constrained CRFs
+
+OPTIONS:
+  --config CONFIG            Path to configuration YAML file (required)
+  --train-data DIR          Training data directory
+                            (default: tempest_simulated_data/train)
+  --val-data DIR            Validation data directory
+                            (default: tempest_simulated_data/val)
+  --output-dir DIR          Output directory for models and logs
+                            (default: tempest_training_output)
+  --epochs N                Number of training epochs (default: 100)
+  --batch-size N            Batch size for training (default: 32)
+  --learning-rate LR        Initial learning rate (default: 0.001)
+  --optimizer OPT           Optimizer: adam, sgd, rmsprop (default: adam)
+  
+  # Model architecture options
+  --hidden-units N          Number of hidden units (default: 256)
+  --num-layers N            Number of RNN layers (default: 2)
+  --dropout RATE            Dropout rate (default: 0.2)
+  --l2-reg LAMBDA          L2 regularization strength (default: 0.01)
+  
+  # Hybrid training options
+  --hybrid                  Enable hybrid training mode
+  --pwm PWM_FILE           PWM file for hybrid constraints
+  --constraint-weight W     Weight for constraint loss (default: 1.0)
+  --hard-constraints        Use hard constraints instead of soft
+  --temperature T           Temperature for soft constraints (default: 1.0)
+  
+  # Checkpoint and monitoring
+  --checkpoint-freq N       Save checkpoint every N epochs (default: 10)
+  --early-stopping          Enable early stopping
+  --patience N              Early stopping patience (default: 10)
+  --tensorboard             Enable TensorBoard logging
+  --wandb                   Enable Weights & Biases logging
+  --wandb-project NAME      W&B project name
+  
+  # Performance options
+  --mixed-precision         Enable mixed precision training
+  --num-workers N           Number of data loading workers (default: 4)
+  --prefetch N              Number of batches to prefetch (default: 2)
+  
+EXAMPLES:
+  # Basic training
+  tempest train --config config.yaml --epochs 100
+  
+  # Hybrid training with PWM constraints
+  tempest train --config config.yaml --hybrid --pwm acc_pwm.txt
+  
+  # Training with early stopping and checkpointing
+  tempest train --config config.yaml --early-stopping --patience 15 --checkpoint-freq 5
+  
+  # Advanced training with custom architecture
+  tempest train --config config.yaml --hidden-units 512 --num-layers 3 --dropout 0.3
+""",
+    
+    'evaluate': """usage: tempest evaluate [options]
+
+Evaluate a trained Tempest model on test data
+
+OPTIONS:
+  --model MODEL             Path to trained model file (required)
+                           Accepts: .h5, .keras, or checkpoint directory
+  --test-data DATA         Path to test data file or directory (required)
+  --config CONFIG          Configuration file (optional, uses model config if not specified)
+  --output-dir DIR         Output directory for results
+                           (default: tempest_evaluation_results)
+  --batch-size N           Batch size for evaluation (default: 32)
+  
+  # Evaluation metrics
+  --metrics METRICS        Comma-separated metrics to compute
+                          Options: accuracy, f1, precision, recall, auc, confusion_matrix
+                          (default: all)
+  --per-class              Compute per-class metrics
+  --segment-level          Evaluate at segment level (not token level)
+  
+  # Visualization options  
+  --plot-confusion         Save confusion matrix plot
+  --plot-predictions N     Plot first N prediction examples (default: 10)
+  --save-predictions       Save all predictions to file
+  
+  # Analysis options
+  --analyze-lengths        Analyze prediction lengths vs ground truth
+  --analyze-transitions    Analyze state transition patterns
+  --error-analysis         Perform detailed error analysis
+  --bootstrap N            Number of bootstrap samples for CI (default: 0)
+  
+EXAMPLES:
+  # Basic evaluation
+  tempest evaluate --model model_final.h5 --test-data test_data/
+  
+  # Evaluation with specific metrics
+  tempest evaluate --model model_final.h5 --test-data test.txt --metrics accuracy,f1
+  
+  # Full analysis with visualizations
+  tempest evaluate --model checkpoint/ --test-data test/ --plot-confusion --error-analysis
+  
+  # Bootstrap confidence intervals
+  tempest evaluate --model model.h5 --test-data test.txt --bootstrap 1000
+""",
+    
+    'visualize': """usage: tempest visualize [options]
+
+Create visualizations of Tempest results and models
+
+OPTIONS:
+  --type TYPE              Visualization type (required)
+                          Options: training, predictions, weights, embeddings, 
+                                  confusion, lengths, transitions, summary
+  --input INPUT            Input file(s) or directory (required)
+  --output OUTPUT          Output file or directory for plots
+                          (default: tempest_visualizations/)
+  --format FORMAT          Output format: png, pdf, svg, html (default: png)
+  --dpi DPI               Resolution for raster formats (default: 300)
+  
+  # Training visualization options (--type training)
+  --metrics METRICS        Comma-separated metrics to plot
+                          (default: loss,accuracy)
+  --smooth WINDOW         Smoothing window size (default: 1)
+  --log-scale             Use log scale for y-axis
+  
+  # Prediction visualization options (--type predictions)
+  --num-examples N         Number of examples to visualize (default: 10)
+  --show-probabilities     Show prediction probabilities
+  --show-ground-truth      Show ground truth alongside predictions
+  --colormap CMAP         Colormap for state visualization (default: tab10)
+  
+  # Weight visualization options (--type weights)
+  --layer LAYER           Specific layer to visualize (default: all)
+  --normalize             Normalize weights for visualization
+  --top-k K               Show only top K weights by magnitude
+  
+  # Embedding visualization options (--type embeddings)  
+  --method METHOD         Reduction method: tsne, umap, pca (default: tsne)
+  --perplexity P          t-SNE perplexity (default: 30)
+  --n-neighbors N         UMAP n_neighbors (default: 15)
+  --labels                Color points by labels
+  
+  # Summary statistics (--type summary)
+  --compare FILES         Compare multiple result files
+  --statistical-tests     Run statistical significance tests
+  
+EXAMPLES:
+  # Visualize training history
+  tempest visualize --type training --input training_history.csv --output curves.png
+  
+  # Visualize predictions
+  tempest visualize --type predictions --input predictions.pkl --num-examples 20
+  
+  # Create confusion matrix
+  tempest visualize --type confusion --input eval_results.json --output confusion.pdf
+  
+  # Visualize model weights
+  tempest visualize --type weights --input model.h5 --layer lstm_1 --normalize
+  
+  # Compare multiple runs
+  tempest visualize --type summary --compare run1.json,run2.json,run3.json
+""",
+}
+
+
 def show_quick_help():
     """Display quick help message without importing any modules."""
     help_text = """usage: tempest [-h] [--verbose] [--debug] {simulate,train,evaluate,visualize} ...
@@ -78,6 +275,17 @@ For more information, visit: https://github.com/biobenkj/tempest
     sys.exit(0)
 
 
+def show_subcommand_help(subcommand):
+    """Display help for a specific subcommand."""
+    if subcommand in SUBCOMMAND_HELP:
+        print(SUBCOMMAND_HELP[subcommand])
+    else:
+        print(f"Error: Unknown command '{subcommand}'", file=sys.stderr)
+        print("\nAvailable commands: simulate, train, evaluate, visualize", file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0)
+
+
 def main():
     """Main entry point that checks for help before ANY imports."""
     # Check for quick help FIRST, before any imports
@@ -88,6 +296,20 @@ def main():
     # Check if help is requested at top level (not for a subcommand)
     if ('--help' in sys.argv or '-h' in sys.argv) and len(sys.argv) == 2:
         show_quick_help()
+    
+    # Check for subcommand help requests
+    # This handles cases like: tempest simulate --help
+    if len(sys.argv) >= 3:
+        # Get the potential subcommand
+        subcommand = None
+        for arg in sys.argv[1:]:
+            if not arg.startswith('-'):
+                subcommand = arg
+                break
+        
+        # Check if help is requested for this subcommand
+        if subcommand and ('--help' in sys.argv or '-h' in sys.argv):
+            show_subcommand_help(subcommand)
     
     # Set up TensorFlow suppression before any imports
     if '--debug' not in sys.argv and os.getenv('TEMPEST_DEBUG', '0') != '1':
