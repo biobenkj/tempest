@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Tempest CLI wrapper - checks for help before importing heavy modules.
+Tempest CLI wrapper - checks for help before importing ANYTHING.
 
 This script is the entry point for the 'tempest' command and handles
---help requests without importing TensorFlow or other heavy dependencies.
+--help requests without importing TensorFlow or the tempest package.
 """
 
 import sys
 import os
 
+
 def show_help():
-    """Display help message without importing heavy modules."""
+    """Display help message without importing any modules."""
     help_text = """usage: tempest [-h] --config CONFIG [--pwm PWM] [--output-dir OUTPUT_DIR] [--hybrid]
                [--unlabeled UNLABELED]
 
@@ -75,9 +76,10 @@ For more information, visit: https://github.com/biobenkj/tempest
     print(help_text)
     sys.exit(0)
 
+
 def main():
-    """Main entry point that checks for help before imports."""
-    # Check for help FIRST, before any imports
+    """Main entry point that checks for help before ANY imports."""
+    # Check for help FIRST, before any imports from tempest package
     if '--help' in sys.argv or '-h' in sys.argv:
         show_help()
     
@@ -101,12 +103,30 @@ def main():
         import logging
         logging.getLogger('tensorflow').setLevel(logging.ERROR)
         logging.getLogger('tensorflow').propagate = False
+        
+        # Suppress absl logging
+        try:
+            import absl.logging
+            absl.logging.set_verbosity(absl.logging.ERROR)
+        except ImportError:
+            pass
     
-    # NOW we can import the actual main function
-    from tempest.main import main as tempest_main
+    # NOW we can import tempest - but we do it carefully
+    # We import ONLY what we need, not the whole package
+    # This avoids triggering the __init__.py imports
+    import importlib.util
+    
+    # Load main.py directly without going through __init__.py
+    spec = importlib.util.spec_from_file_location(
+        "tempest_main", 
+        os.path.join(os.path.dirname(__file__), "main.py")
+    )
+    tempest_main = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tempest_main)
     
     # Run the actual tempest main
-    tempest_main()
+    tempest_main.main()
+
 
 if __name__ == '__main__':
     main()
