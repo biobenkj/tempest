@@ -251,10 +251,10 @@ def main():
 TEMPEST OVERVIEW:
 -----------------
 Tempest is a deep learning framework for sequence annotation that combines:
-  • Conditional Random Fields (CRFs) for structured prediction
-  • Length constraints to enforce biologically meaningful segment sizes
-  • Position Weight Matrix (PWM) priors for incorporating domain knowledge
-  • Hybrid training modes for improved robustness
+  - Conditional Random Fields (CRFs) for structured prediction
+  - Length constraints to enforce biologically meaningful segment sizes
+  - Position Weight Matrix (PWM) priors for incorporating domain knowledge
+  - Hybrid training modes for improved robustness
 
 TRAINING MODES:
 ---------------
@@ -272,9 +272,9 @@ TRAINING MODES:
 CONFIGURATION:
 --------------
 Training is controlled via YAML configuration files:
-  • config.yaml - Standard training configuration
-  • hybrid_config.yaml - Hybrid training with robustness features
-  • config_with_whitelists.yaml - Training with sequence constraints
+  - config.yaml - Standard training configuration
+  - hybrid_config.yaml - Hybrid training with robustness features
+  - config_with_whitelists.yaml - Training with sequence constraints
 
 Example config files are provided in the config/ directory.
 

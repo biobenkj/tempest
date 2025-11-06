@@ -12,16 +12,33 @@ import argparse
 import logging
 from pathlib import Path
 import numpy as np
-import tensorflow as tf
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# TensorFlow import (optional - only needed if loading models directly)
+try:
+    import tensorflow as tf
+    _HAS_TF = True
+except ImportError:
+    _HAS_TF = False
 
+# Add parent directory to path for standalone execution
+if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Import from Tempest modules
 from tempest.core import build_model_from_config
-from tempest.data import DataGenerator, SequenceEncoder
-from tempest.inference import predict_sequences
-from tempest.visualization import TempestVisualizer
-from tempest.utils import load_model_weights
+from tempest.inference.inference_utils import encode_sequences  # Import from utils, not __init__
+
+# Optional imports with graceful fallback
+try:
+    from tempest.visualization import TempestVisualizer
+    _HAS_VISUALIZER = True
+except ImportError:
+    _HAS_VISUALIZER = False
+    TempestVisualizer = None
+
+# Note: These imports may not exist yet - comment out if they cause issues
+# from tempest.data import DataGenerator, SequenceEncoder
+# from tempest.utils import load_model_weights
 
 # Configure logging
 logging.basicConfig(
@@ -50,6 +67,13 @@ class TempestInferenceVisualizer:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
+        # Check TensorFlow availability
+        if not _HAS_TF:
+            raise ImportError(
+                "TensorFlow is required for TempestInferenceVisualizer. "
+                "Install with: pip install tensorflow"
+            )
+        
         # Load configuration
         with open(config_path, 'r') as f:
             self.config = json.load(f)
@@ -57,16 +81,26 @@ class TempestInferenceVisualizer:
         # Build model
         self.model = self._build_model()
         
-        # Initialize visualizer
-        self.visualizer = TempestVisualizer(
-            label_names=self.config.get('label_names', self._default_labels()),
-            output_dir=str(self.output_dir / "visualizations")
-        )
+        # Initialize visualizer if available
+        if _HAS_VISUALIZER and TempestVisualizer is not None:
+            self.visualizer = TempestVisualizer(
+                label_names=self.config.get('label_names', self._default_labels()),
+                output_dir=str(self.output_dir / "visualizations")
+            )
+            self._has_visualizer = True
+        else:
+            logger.warning(
+                "TempestVisualizer not available. Visualization features will be disabled. "
+                "Ensure tempest.visualization module is properly installed."
+            )
+            self.visualizer = None
+            self._has_visualizer = False
         
         logger.info(f"Initialized TempestInferenceVisualizer")
         logger.info(f"  Config: {config_path}")
         logger.info(f"  Model: {model_path}")
         logger.info(f"  Output: {output_dir}")
+        logger.info(f"  Visualization: {'enabled' if self._has_visualizer else 'disabled'}")
     
     def _build_model(self):
         """Build and load the model."""
@@ -124,8 +158,10 @@ class TempestInferenceVisualizer:
             self._save_predictions(sequences, predictions, read_names)
         
         # Create visualizations if requested
-        if visualize:
+        if visualize and self._has_visualizer:
             self._visualize_results(sequences, predictions, read_names)
+        elif visualize and not self._has_visualizer:
+            logger.warning("Visualization requested but TempestVisualizer not available")
         
         return predictions
     
@@ -160,8 +196,10 @@ class TempestInferenceVisualizer:
         if save_predictions:
             self._save_predictions(sequences, predictions, read_names)
         
-        if visualize:
+        if visualize and self._has_visualizer:
             self._visualize_results(sequences, predictions, read_names)
+        elif visualize and not self._has_visualizer:
+            logger.warning("Visualization requested but TempestVisualizer not available")
         
         return predictions
     
@@ -179,8 +217,11 @@ class TempestInferenceVisualizer:
                 
                 sequences.append(str(record.seq))
                 read_names.append(record.id)
+            
+            logger.debug("Loaded sequences using BioPython")
+        
         except ImportError:
-            logger.warning("BioPython not available, using simple FASTA parser")
+            logger.debug("BioPython not available, using simple FASTA parser")
             
             # Simple FASTA parser
             current_seq = []
@@ -208,18 +249,9 @@ class TempestInferenceVisualizer:
         return sequences, read_names
     
     def _encode_sequences(self, sequences: list):
-        """Encode sequences for model input."""
-        # Simple encoding (extend as needed)
-        base_map = {'A': 1, 'C': 2, 'G': 3, 'T': 4, 'N': 0}
-        
-        max_len = max(len(seq) for seq in sequences)
-        encoded = np.zeros((len(sequences), max_len), dtype=np.int32)
-        
-        for i, seq in enumerate(sequences):
-            for j, base in enumerate(seq.upper()):
-                encoded[i, j] = base_map.get(base, 0)
-        
-        return encoded
+        """Encode sequences for model input using inference_utils."""
+        # Use the shared encoding function from inference_utils
+        return encode_sequences(sequences)
     
     def _save_predictions(self, sequences: list, predictions: np.ndarray, read_names: list):
         """Save predictions to file."""
@@ -248,28 +280,36 @@ class TempestInferenceVisualizer:
     
     def _visualize_results(self, sequences: list, predictions: np.ndarray, read_names: list):
         """Create visualizations of the results."""
+        if not self._has_visualizer:
+            logger.warning("Cannot create visualizations - TempestVisualizer not available")
+            return
+        
         # Create main visualization PDF
-        pdf_path = self.visualizer.visualize_predictions(
-            sequences=sequences,
-            predictions=predictions,
-            read_names=read_names,
-            output_filename="inference_results.pdf",
-            include_statistics=True
-        )
+        try:
+            pdf_path = self.visualizer.visualize_predictions(
+                sequences=sequences,
+                predictions=predictions,
+                read_names=read_names,
+                output_filename="inference_results.pdf",
+                include_statistics=True
+            )
+            
+            logger.info(f"Created visualization: {pdf_path}")
+            
+            # Also create individual visualizations for first few sequences
+            if len(sequences) <= 5:
+                for i, (seq, pred, name) in enumerate(zip(sequences, predictions, read_names)):
+                    individual_path = self.visualizer.visualize_predictions(
+                        sequences=[seq],
+                        predictions=[pred],
+                        read_names=[name],
+                        output_filename=f"individual_{i:02d}_{name[:20]}.pdf",
+                        include_statistics=False
+                    )
+                    logger.info(f"  Individual visualization: {individual_path}")
         
-        logger.info(f"Created visualization: {pdf_path}")
-        
-        # Also create individual visualizations for first few sequences
-        if len(sequences) <= 5:
-            for i, (seq, pred, name) in enumerate(zip(sequences, predictions, read_names)):
-                individual_path = self.visualizer.visualize_predictions(
-                    sequences=[seq],
-                    predictions=[pred],
-                    read_names=[name],
-                    output_filename=f"individual_{i:02d}_{name[:20]}.pdf",
-                    include_statistics=False
-                )
-                logger.info(f"  Individual visualization: {individual_path}")
+        except Exception as e:
+            logger.error(f"Failed to create visualizations: {e}")
 
 
 def main():
@@ -323,11 +363,15 @@ def main():
     args = parser.parse_args()
     
     # Initialize the inference visualizer
-    visualizer = TempestInferenceVisualizer(
-        config_path=args.config,
-        model_path=args.model,
-        output_dir=args.output_dir
-    )
+    try:
+        visualizer = TempestInferenceVisualizer(
+            config_path=args.config,
+            model_path=args.model,
+            output_dir=args.output_dir
+        )
+    except Exception as e:
+        logger.error(f"Failed to initialize visualizer: {e}")
+        sys.exit(1)
     
     # Process the input
     input_path = Path(args.input)
@@ -347,20 +391,28 @@ def main():
                      list(input_path.glob("*.fa")) + \
                      list(input_path.glob("*.fna"))
         
+        if not fasta_files:
+            logger.error(f"No FASTA files found in directory: {input_path}")
+            sys.exit(1)
+        
         for fasta_file in fasta_files:
             logger.info(f"Processing {fasta_file}")
-            visualizer.process_fasta_file(
-                fasta_path=str(fasta_file),
-                batch_size=args.batch_size,
-                max_sequences=args.max_sequences,
-                visualize=not args.no_visualization,
-                save_predictions=not args.no_save
-            )
+            try:
+                visualizer.process_fasta_file(
+                    fasta_path=str(fasta_file),
+                    batch_size=args.batch_size,
+                    max_sequences=args.max_sequences,
+                    visualize=not args.no_visualization,
+                    save_predictions=not args.no_save
+                )
+            except Exception as e:
+                logger.error(f"Failed to process {fasta_file}: {e}")
+                continue
     else:
-        logger.error(f"Invalid input: {input_path}")
+        logger.error(f"Invalid input: {input_path}. Must be a FASTA file or directory.")
         sys.exit(1)
     
-    logger.info("Inference and visualization completed")
+    logger.info("Inference and visualization completed successfully")
 
 
 if __name__ == "__main__":

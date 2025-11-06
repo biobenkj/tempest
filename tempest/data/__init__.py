@@ -9,7 +9,13 @@ from .simulator import (
     SimulatedRead,
     TranscriptPool,
     PolyATailGenerator,
-    reads_to_arrays
+    WhitelistManager,
+    reads_to_arrays,
+    create_simulator_from_config
+)
+
+from .invalid_generator import (
+    InvalidReadGenerator
 )
 
 __all__ = [
@@ -17,5 +23,8 @@ __all__ = [
     'SimulatedRead', 
     'TranscriptPool',
     'PolyATailGenerator',
-    'reads_to_arrays'
+    'WhitelistManager',
+    'reads_to_arrays',
+    'create_simulator_from_config',
+    'InvalidReadGenerator'
 ]
