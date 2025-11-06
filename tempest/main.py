@@ -12,6 +12,36 @@ import logging
 import warnings
 from pathlib import Path
 
+# ============================================================================
+# TENSORFLOW WARNING SUPPRESSION
+# ============================================================================
+# Set these BEFORE importing TensorFlow to suppress various warnings
+# To re-enable for debugging, set TEMPEST_DEBUG=1 environment variable
+if os.getenv('TEMPEST_DEBUG', '0') != '1':
+    # Suppress TensorFlow C++ logging
+    # 0 = all logs, 1 = filter INFO, 2 = filter INFO & WARNING, 3 = filter all
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+    
+    # Disable oneDNN custom operations message
+    os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+    
+    # Suppress CUDA/cuDNN/cuBLAS registration warnings
+    os.environ['TF_DISABLE_PLUGIN_REGISTRATION'] = '1'
+    
+    # Suppress CPU instruction optimization messages
+    os.environ['TF_ENABLE_DEPRECATION_WARNINGS'] = '0'
+    
+    # Suppress TensorRT warnings
+    os.environ['TF_TRT_ALLOW_ENGINE_CACHING'] = '0'
+    
+    # Set up Python warning filters
+    warnings.filterwarnings("ignore")
+    
+    # Configure logging to suppress TF messages
+    logging.getLogger('tensorflow').setLevel(logging.ERROR)
+    logging.getLogger('tensorflow').propagate = False
+# ============================================================================
+
 # Check for --help early to display help quickly without loading heavy modules
 def check_help_early():
     """Check if help is requested and display it before loading heavy modules."""
@@ -106,10 +136,32 @@ check_help_early()
 # Now import heavy modules after help check
 import numpy as np
 
-# filter the tensorflow and tensorflow addons warnings
-warnings.filterwarnings("ignore")
-import tensorflow as tf
+# Import TensorFlow with full suppression
+if os.getenv('TEMPEST_DEBUG', '0') != '1':
+    # Redirect stderr temporarily during TF import to suppress C++ warnings
+    import io
+    import contextlib
+    
+    with contextlib.redirect_stderr(io.StringIO()):
+        import tensorflow as tf
+else:
+    import tensorflow as tf
+
+# Configure TensorFlow logging after import
+if os.getenv('TEMPEST_DEBUG', '0') != '1':
+    tf.get_logger().setLevel('ERROR')
+    tf.autograph.set_verbosity(3)
+    tf.config.set_soft_device_placement(True)
+    
+    # Suppress absl logging (used by TensorFlow)
+    import absl.logging
+    absl.logging.set_verbosity(absl.logging.ERROR)
+
 from tensorflow import keras
+
+# Suppress TensorFlow Addons deprecation warning specifically
+warnings.filterwarnings("ignore", message=".*TensorFlow Addons.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="tensorflow_addons")
 
 # Add to path
 sys.path.insert(0, str(Path(__file__).parent))
