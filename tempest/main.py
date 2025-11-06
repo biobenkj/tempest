@@ -11,6 +11,99 @@ import argparse
 import logging
 import warnings
 from pathlib import Path
+
+# Check for --help early to display help quickly without loading heavy modules
+def check_help_early():
+    """Check if help is requested and display it before loading heavy modules."""
+    if '--help' in sys.argv or '-h' in sys.argv:
+        parser = argparse.ArgumentParser(
+            description='Tempest - Modular sequence annotation using length-constrained CRFs',
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog="""
+TEMPEST OVERVIEW:
+-----------------
+Tempest is a deep learning framework for sequence annotation that combines:
+  • Conditional Random Fields (CRFs) for structured prediction
+  • Length constraints to enforce biologically meaningful segment sizes
+  • Position Weight Matrix (PWM) priors for incorporating domain knowledge
+  • Hybrid training modes for improved robustness
+
+TRAINING MODES:
+---------------
+1. Standard Mode (default):
+   - Basic supervised training with CRF layers
+   - Uses simulated or provided sequence data
+   - Suitable for clean, well-labeled data
+
+2. Hybrid Mode (--hybrid):
+   - Advanced training with invalid sequence handling
+   - Pseudo-label generation for unlabeled data
+   - Improved robustness to noisy real-world sequences
+   - Requires hybrid configuration section in config file
+
+CONFIGURATION:
+--------------
+Training is controlled via YAML configuration files:
+  • config.yaml - Standard training configuration
+  • hybrid_config.yaml - Hybrid training with robustness features
+  • config_with_whitelists.yaml - Training with sequence constraints
+
+Example config files are provided in the config/ directory.
+
+EXAMPLES:
+---------
+Standard training:
+  tempest --config config/train_config.yaml
+
+Hybrid training with PWM:
+  tempest --config config/hybrid_config.yaml --hybrid --pwm acc_pwm.txt
+
+Training with unlabeled data:
+  tempest --config config/hybrid_config.yaml --hybrid --unlabeled reads.fastq
+
+Custom output directory:
+  tempest --config config/train_config.yaml --output-dir ./my_model
+
+For more information, visit: https://github.com/biobenkj/tempest
+            """
+        )
+        parser.add_argument(
+            '--config',
+            type=str,
+            required=True,
+            help='Path to configuration YAML file (required)'
+        )
+        parser.add_argument(
+            '--pwm',
+            type=str,
+            default=None,
+            help='Path to PWM file for ACC generation (overrides config)'
+        )
+        parser.add_argument(
+            '--output-dir',
+            type=str,
+            default=None,
+            help='Output directory for model checkpoints (overrides config)'
+        )
+        parser.add_argument(
+            '--hybrid',
+            action='store_true',
+            help='Enable hybrid robustness training mode'
+        )
+        parser.add_argument(
+            '--unlabeled',
+            type=str,
+            default=None,
+            help='Path to unlabeled FASTQ file for pseudo-labeling (hybrid mode only)'
+        )
+        
+        args = parser.parse_args()
+        sys.exit(0)
+
+# Check for help before importing heavy modules
+check_help_early()
+
+# Now import heavy modules after help check
 import numpy as np
 
 # filter the tensorflow and tensorflow addons warnings
@@ -222,14 +315,61 @@ def train_hybrid(config, train_reads, val_reads, unlabeled_fastq=None):
 def main():
     """Main training pipeline."""
     parser = argparse.ArgumentParser(
-        description='Train Tempest sequence annotation model',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        description='Tempest - Modular sequence annotation using length-constrained CRFs',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+TEMPEST OVERVIEW:
+-----------------
+Tempest is a deep learning framework for sequence annotation that combines:
+  • Conditional Random Fields (CRFs) for structured prediction
+  • Length constraints to enforce biologically meaningful segment sizes
+  • Position Weight Matrix (PWM) priors for incorporating domain knowledge
+  • Hybrid training modes for improved robustness
+
+TRAINING MODES:
+---------------
+1. Standard Mode (default):
+   - Basic supervised training with CRF layers
+   - Uses simulated or provided sequence data
+   - Suitable for clean, well-labeled data
+
+2. Hybrid Mode (--hybrid):
+   - Advanced training with invalid sequence handling
+   - Pseudo-label generation for unlabeled data
+   - Improved robustness to noisy real-world sequences
+   - Requires hybrid configuration section in config file
+
+CONFIGURATION:
+--------------
+Training is controlled via YAML configuration files:
+  • config.yaml - Standard training configuration
+  • hybrid_config.yaml - Hybrid training with robustness features
+  • config_with_whitelists.yaml - Training with sequence constraints
+
+Example config files are provided in the config/ directory.
+
+EXAMPLES:
+---------
+Standard training:
+  tempest --config config/train_config.yaml
+
+Hybrid training with PWM:
+  tempest --config config/hybrid_config.yaml --hybrid --pwm acc_pwm.txt
+
+Training with unlabeled data:
+  tempest --config config/hybrid_config.yaml --hybrid --unlabeled reads.fastq
+
+Custom output directory:
+  tempest --config config/train_config.yaml --output-dir ./my_model
+
+For more information, visit: https://github.com/biobenkj/tempest
+        """
     )
     parser.add_argument(
         '--config',
         type=str,
         required=True,
-        help='Path to configuration YAML file'
+        help='Path to configuration YAML file (required)'
     )
     parser.add_argument(
         '--pwm',
@@ -241,18 +381,18 @@ def main():
         '--output-dir',
         type=str,
         default=None,
-        help='Output directory for checkpoints (overrides config)'
+        help='Output directory for model checkpoints (overrides config)'
     )
     parser.add_argument(
         '--hybrid',
         action='store_true',
-        help='Enable hybrid robustness training (requires config.hybrid section)'
+        help='Enable hybrid robustness training mode'
     )
     parser.add_argument(
         '--unlabeled',
         type=str,
         default=None,
-        help='Path to unlabeled FASTQ for pseudo-label training (hybrid mode only)'
+        help='Path to unlabeled FASTQ file for pseudo-labeling (hybrid mode only)'
     )
     
     args = parser.parse_args()
