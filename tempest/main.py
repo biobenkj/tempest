@@ -9,8 +9,12 @@ import os
 import sys
 import argparse
 import logging
+import warnings
 from pathlib import Path
 import numpy as np
+
+# filter the tensorflow and tensorflow addons warnings
+warnings.filterwarnings("ignore")
 import tensorflow as tf
 from tensorflow import keras
 
