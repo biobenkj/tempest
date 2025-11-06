@@ -74,11 +74,7 @@ setup(
     package_data={
         'tempest': ['config/*.yaml'],
     },
-    entry_points={
-        'console_scripts': [
-            'tempest=tempest.cli:main',
-        ],
-    },
+    scripts=['bin/tempest'],
     keywords=[
         'bioinformatics',
         'deep learning',

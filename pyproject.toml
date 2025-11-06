@@ -73,9 +73,6 @@ Documentation = "https://github.com/biobenkj/tempest/tree/main/docs"
 Repository = "https://github.com/biobenkj/tempest"
 "Bug Tracker" = "https://github.com/biobenkj/tempest/issues"
 
-[project.scripts]
-tempest = "tempest.cli:main"
-
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["tempest*"]
