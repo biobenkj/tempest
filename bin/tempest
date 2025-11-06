@@ -13,28 +13,28 @@ import importlib.util
 
 
 def find_tempest_cli():
-    """Find the tempest CLI module installation."""
-    # Try to find tempest installation
-    tempest_locations = [
-        # Development install locations (parent directory for development)
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tempest'),
-        # Current directory structure
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tempest'),
-        # Site packages locations
-        *[os.path.join(sp, 'tempest') for sp in site.getsitepackages()],
-        # User site packages
-        os.path.join(site.getusersitepackages(), 'tempest') if site.getusersitepackages() else None,
-    ]
-    # find the cli.py
-    cli_path = None
-    for loc in tempest_locations:
-        if loc and os.path.exists(loc):
-            # Try the new CLI module first
-            cli = os.path.join(loc, 'cli_new.py')
-            if os.path.exists(cli):
-                cli_path = cli
-                break
-    return cli_path
+    """Find the tempest cli.py location."""
+    # check if installed in devel/edit mode
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
+    cli_path = os.path.join(project_root, 'tempest', 'cli.py')
+    if os.path.isfile(cli_path):
+        return cli_path
+    
+    # check site-packages
+    for sp in site.getsitepackages():
+        cli_path = os.path.join(sp, 'tempest', 'cli.py')
+        if os.path.isfile(cli_path):
+            return cli_path
+    
+    # check user site-packages
+    user_site = site.getusersitepackages()
+    if user_site:
+        cli_path = os.path.join(user_site, 'tempest', 'cli.py')
+        if os.path.isfile(cli_path):
+            return cli_path
+    
+    return None
 
 
 def main():
