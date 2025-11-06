@@ -258,11 +258,13 @@ class WhitelistManager:
     
     def __init__(self):
         self.whitelists = {}
+        self.whitelist_ids = {}  # Store index IDs when available
         self.usage_stats = {}
     
     def load_whitelist(self, segment_name: str, filepath: str) -> bool:
         """
         Load sequences from a whitelist file.
+        Supports both single-column (sequence only) and two-column (index_id, sequence) formats.
         
         Args:
             segment_name: Name of the segment
@@ -278,17 +280,50 @@ class WhitelistManager:
                 return False
             
             sequences = []
+            index_ids = []  # Store index IDs if available
+            
             with open(filepath, 'r') as f:
-                for line in f:
-                    seq = line.strip().upper()
-                    # Validate DNA sequence
-                    if seq and all(base in 'ACGTN' for base in seq):
-                        sequences.append(seq)
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line or line.startswith('#'):  # Skip empty lines and comments
+                        continue
+                    
+                    # Try to parse as two-column format (index_id, sequence)
+                    parts = line.split('\t')  # Tab-separated
+                    if len(parts) == 1:
+                        # Try space-separated if no tabs
+                        parts = line.split()
+                    
+                    if len(parts) == 2:
+                        # Two-column format: index_id, sequence
+                        index_id, seq = parts
+                        seq = seq.upper()
+                        # Validate DNA sequence
+                        if seq and all(base in 'ACGTN' for base in seq):
+                            sequences.append(seq)
+                            index_ids.append(index_id)
+                        else:
+                            logger.warning(f"Invalid sequence at line {line_num} in {filepath}: {seq}")
+                    elif len(parts) == 1:
+                        # Single-column format: sequence only
+                        seq = parts[0].upper()
+                        # Validate DNA sequence
+                        if seq and all(base in 'ACGTN' for base in seq):
+                            sequences.append(seq)
+                        else:
+                            logger.warning(f"Invalid sequence at line {line_num} in {filepath}: {seq}")
+                    else:
+                        logger.warning(f"Invalid format at line {line_num} in {filepath}: {line}")
             
             if sequences:
                 self.whitelists[segment_name] = sequences
+                # Store index IDs if available (for future reference/logging)
+                if index_ids:
+                    self.whitelist_ids[segment_name] = index_ids
+                    logger.info(f"Loaded {len(sequences)} sequences with IDs for {segment_name}")
+                else:
+                    logger.info(f"Loaded {len(sequences)} sequences for {segment_name}")
                 self.usage_stats[segment_name] = {'loaded': len(sequences), 'used': 0}
-                logger.info(f"Loaded {len(sequences)} sequences for {segment_name}")
                 return True
             
         except Exception as e:

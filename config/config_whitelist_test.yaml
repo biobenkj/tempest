@@ -1,0 +1,158 @@
+# Tempest Configuration for Testing Whitelist Handling
+# Uses udi_i7.txt, udi_i5.txt, and cbc.txt whitelist files
+
+model:
+  vocab_size: 5  # A=0, C=1, G=2, T=3, N=4
+  embedding_dim: 128
+  
+  # CNN layers
+  use_cnn: true
+  cnn_filters: [64, 128]
+  cnn_kernels: [3, 5]
+  
+  # BiLSTM layers
+  use_bilstm: true
+  lstm_units: 128
+  lstm_layers: 2
+  dropout: 0.3
+  
+  # Output configuration
+  num_labels: 8  # ADAPTER5, UMI, INDEX_i7, ACC, INDEX_i5, CBC, INSERT, ADAPTER3
+  use_crf: true
+  
+  # Length constraints for segments
+  length_constraints:
+    constraints:
+      UMI: [10, 10]
+      INDEX_i7: [8, 8]
+      INDEX_i5: [8, 8]
+      ACC: [9, 9]  # ACC sequences in acc_pwm.txt are 9bp
+      CBC: [6, 6]   # CBC sequences in cbc.txt are 6bp
+      INSERT: [50, 200]
+      ADAPTER5: [34, 34]
+      ADAPTER3: [34, 34]
+
+# Simulation settings with whitelist support
+simulation:
+  # Define the sequence structure
+  sequence_order: ['ADAPTER5', 'UMI', 'INDEX_i7', 'ACC', 'INDEX_i5', 'CBC', 'INSERT', 'ADAPTER3']
+  
+  # Whitelist files for specific segments
+  # These use the two-column format (index_id, sequence)
+  whitelist_files:
+    INDEX_i7: "udi_i7.txt"
+    INDEX_i5: "udi_i5.txt" 
+    CBC: "cbc.txt"
+  
+  # Fixed sequences
+  sequences:
+    ADAPTER5: 'AGATCGGAAGAGCACACGTCTGAACTCCAGTCA'
+    ADAPTER3: 'AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT'
+    UMI: 'random'  # Generate random UMI sequences
+    ACC: 'random'  # Generate random ACC sequences (or load from PWM)
+    INSERT: 'random'  # Generate random insert sequences
+  
+  # ACC configuration (optional - will use PWM if available)
+  acc_priors_file: "acc_pwm.txt"
+  
+  # Segment length parameters
+  umi_length: 10
+  insert_min_length: 50
+  insert_max_length: 200
+  
+  # Simulation parameters
+  num_sequences: 1000  # Generate 1000 sequences for testing
+  error_rate: 0.01  # 1% sequencing error rate
+  random_seed: 42
+  
+  # Error profile
+  error_profile:
+    substitution_rate: 0.008
+    insertion_rate: 0.001
+    deletion_rate: 0.001
+
+# PWM configuration for ACC detection
+pwm:
+  pwm_file: "acc_pwm.txt"
+  use_pwm: true
+  pwm_threshold: 0.7
+  pwm_pseudocount: 0.01
+
+# Training configuration
+training:
+  learning_rate: 0.001
+  optimizer: 'adam'
+  epochs: 20
+  batch_size: 32
+  
+  # Data split
+  train_split: 0.8
+  validation_split: 0.2
+  
+  # Callbacks
+  early_stopping_patience: 5
+  reduce_lr_patience: 3
+  checkpoint_dir: './checkpoints'
+  
+  # Length constraint settings
+  constraint_weight: 5.0
+  constraint_ramp_epochs: 5
+  
+  # Advanced training options
+  use_mixed_precision: false
+  use_xla: false
+  gradient_clip_value: 1.0
+
+# Inference configuration
+inference:
+  batch_size: 64
+  use_ensemble: false
+  confidence_threshold: 0.9
+  
+  # Post-processing
+  apply_length_constraints: true
+  smooth_predictions: true
+  smoothing_window: 3
+
+# Evaluation metrics
+evaluation:
+  metrics: ['accuracy', 'precision', 'recall', 'f1', 'segment_accuracy']
+  per_segment_metrics: true
+  confusion_matrix: true
+  
+  # Focus on whitelist segments
+  focus_segments: ['INDEX_i7', 'INDEX_i5', 'CBC']
+
+# Visualization settings
+visualization:
+  output_format: 'pdf'
+  
+  # Segment colors
+  segment_colors:
+    ADAPTER5: '#FF6B6B'
+    ADAPTER3: '#FF6B6B'
+    UMI: '#4ECDC4'
+    INDEX_i7: '#45B7D1'
+    INDEX_i5: '#96CEB4'
+    CBC: '#FFEAA7'
+    ACC: '#DDA0DD'
+    INSERT: '#95E1D3'
+  
+  # Visualization options
+  show_quality_scores: false
+  show_confidence: true
+  max_sequences_per_page: 10
+
+# Logging configuration
+logging:
+  level: 'INFO'
+  log_dir: './logs'
+  tensorboard: true
+  wandb:
+    enabled: false
+
+# Hardware configuration
+hardware:
+  gpu_memory_growth: true
+  num_gpus: 1
+  mixed_precision: false
