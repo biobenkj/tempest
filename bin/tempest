@@ -26,11 +26,15 @@ def find_tempest_cli():
         os.path.join(site.getusersitepackages(), 'tempest') if site.getusersitepackages() else None,
     ]
     # find the cli.py
-    cli_path = os.path.join(tempest_locations, 'cli.py')
-    if os.path.exists(cli_path):
-        return cli_path
-    else:
-        return None
+    cli_path = None
+    for loc in tempest_locations:
+        if loc and os.path.exists(loc):
+            # Try the new CLI module first
+            cli = os.path.join(loc, 'cli_new.py')
+            if os.path.exists(cli):
+                cli_path = cli
+                break
+    return cli_path
 
 
 def main():
