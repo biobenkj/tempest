@@ -1,142 +1,86 @@
 #!/usr/bin/env python3
 """
-Standalone Tempest CLI - completely outside the package to avoid __init__.py loading.
-This file should be installed as 'tempest' in the bin directory.
+Tempest CLI Entry Point
+
+This script provides the main command-line interface for Tempest,
+with modular subcommands for simulation, training, evaluation, and visualization.
 """
 
 import sys
 import os
+import site
+import importlib.util
 
 
-def show_help():
-    """Display help message without importing any modules."""
-    help_text = """usage: tempest [-h] --config CONFIG [--pwm PWM] [--output-dir OUTPUT_DIR] [--hybrid]
-               [--unlabeled UNLABELED]
-
-Tempest - Modular sequence annotation using length-constrained CRFs
-
-options:
-  -h, --help            show this help message and exit
-  --config CONFIG       Path to configuration YAML file (required)
-  --pwm PWM             Path to PWM file for ACC generation (overrides config)
-  --output-dir OUTPUT_DIR
-                        Output directory for model checkpoints (overrides config)
-  --hybrid              Enable hybrid robustness training mode
-  --unlabeled UNLABELED
-                        Path to unlabeled FASTQ file for pseudo-labeling (hybrid mode only)
-
-TEMPEST OVERVIEW:
------------------
-Tempest is a deep learning framework for sequence annotation that combines:
-  - Conditional Random Fields (CRFs) for structured prediction
-  - Length constraints to enforce biologically meaningful segment sizes
-  - Position Weight Matrix (PWM) priors for incorporating domain knowledge
-  - Hybrid training modes for improved robustness
-
-TRAINING MODES:
----------------
-1. Standard Mode (default):
-   - Basic supervised training with CRF layers
-   - Uses simulated or provided sequence data
-   - Suitable for clean, well-labeled data
-
-2. Hybrid Mode (--hybrid):
-   - Advanced training with invalid sequence handling
-   - Pseudo-label generation for unlabeled data
-   - Improved robustness to noisy real-world sequences
-   - Requires hybrid configuration section in config file
-
-CONFIGURATION:
---------------
-Training is controlled via YAML configuration files:
-  - config.yaml - Standard training configuration
-  - hybrid_config.yaml - Hybrid training with robustness features
-  - config_with_whitelists.yaml - Training with sequence constraints
-
-Example config files are provided in the config/ directory.
-
-EXAMPLES:
----------
-Standard training:
-  tempest --config config/train_config.yaml
-
-Hybrid training with PWM:
-  tempest --config config/hybrid_config.yaml --hybrid --pwm acc_pwm.txt
-
-Training with unlabeled data:
-  tempest --config config/hybrid_config.yaml --hybrid --unlabeled reads.fastq
-
-Custom output directory:
-  tempest --config config/train_config.yaml --output-dir ./my_model
-
-For more information, visit: https://github.com/biobenkj/tempest
-"""
-    print(help_text)
-    sys.exit(0)
-
-
-def main():
-    """Main entry point that checks for help before ANY imports."""
-    # Check for help FIRST, before any imports
-    if '--help' in sys.argv or '-h' in sys.argv:
-        show_help()
-    
-    # Set up TensorFlow suppression before any imports
-    if os.getenv('TEMPEST_DEBUG', '0') != '1':
-        # Suppress TensorFlow C++ logging
-        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-        os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-        os.environ.setdefault('TF_DISABLE_PLUGIN_REGISTRATION', '1')
-        os.environ.setdefault('TF_ENABLE_DEPRECATION_WARNINGS', '0')
-        os.environ.setdefault('TF_TRT_ALLOW_ENGINE_CACHING', '0')
-        
-        # Set up warning filters before imports
-        import warnings
-        warnings.filterwarnings("ignore")
-        
-        # Configure logging
-        import logging
-        logging.getLogger('tensorflow').setLevel(logging.ERROR)
-        logging.getLogger('tensorflow').propagate = False
-    
-    # NOW import and run tempest - we need to find where tempest is installed
-    import site
-    import importlib.util
-    
+def find_tempest_cli():
+    """Find the tempest CLI module installation."""
     # Try to find tempest installation
     tempest_locations = [
-        # Development install locations
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tempest'),
+        # Development install locations (parent directory for development)
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tempest'),
+        # Current directory structure
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tempest'),
         # Site packages locations
         *[os.path.join(sp, 'tempest') for sp in site.getsitepackages()],
         # User site packages
         os.path.join(site.getusersitepackages(), 'tempest') if site.getusersitepackages() else None,
     ]
+    # find the cli.py
+    cli_path = os.path.join(tempest_locations, 'cli.py')
+    if os.path.exists(cli_path):
+        return cli_path
+    else:
+        return None
+
+
+def main():
+    """Main entry point."""
+    # Special handling for help to avoid TensorFlow imports
+    if '--help' in sys.argv or '-h' in sys.argv or len(sys.argv) == 1:
+        # Don't suppress warnings for help
+        pass
+    else:
+        # Check if debug mode is disabled
+        if '--debug' not in sys.argv and os.getenv('TEMPEST_DEBUG', '0') != '1':
+            # Suppress TensorFlow and other warnings before any imports
+            os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+            os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+            os.environ.setdefault('TF_DISABLE_PLUGIN_REGISTRATION', '1')
+            os.environ.setdefault('TF_ENABLE_DEPRECATION_WARNINGS', '0')
+            os.environ.setdefault('TF_TRT_ALLOW_ENGINE_CACHING', '0')
+            
+            # Set up warning filters
+            import warnings
+            warnings.filterwarnings('ignore',
+                                    category=UserWarning,
+                                    module='tensorflow')
+            
+            # Configure logging to suppress TensorFlow messages
+            import logging
+            logging.getLogger('tensorflow').setLevel(logging.ERROR)
+            logging.getLogger('tensorflow').propagate = False
     
-    tempest_main_path = None
-    for loc in tempest_locations:
-        if loc and os.path.exists(loc):
-            main_path = os.path.join(loc, 'main.py')
-            if os.path.exists(main_path):
-                tempest_main_path = main_path
-                break
+    # Find and load the CLI module
+    cli_path = find_tempest_cli()
     
-    if not tempest_main_path:
+    # Shouldn't really ever happen, but here anyway
+    if not cli_path:
         print("Error: Could not find tempest installation!", file=sys.stderr)
-        print("Please install tempest first: pip install tempest-bio", file=sys.stderr)
+        print("Please install tempest first or run from the package directory", file=sys.stderr)
         sys.exit(1)
     
-    # Load main.py directly without going through __init__.py
-    spec = importlib.util.spec_from_file_location("tempest_main", tempest_main_path)
-    tempest_main = importlib.util.module_from_spec(spec)
+    # Load the CLI module directly
+    spec = importlib.util.spec_from_file_location("tempest_cli", cli_path)
+    tempest_cli = importlib.util.module_from_spec(spec)
     
-    # Add tempest directory to path so main.py can find its imports
-    sys.path.insert(0, os.path.dirname(tempest_main_path))
+    # Add tempest directory to path so the CLI can find its imports
+    sys.path.insert(0, os.path.dirname(cli_path))
     
-    spec.loader.exec_module(tempest_main)
+    # Execute the module
+    spec.loader.exec_module(tempest_cli)
     
-    # Run the actual tempest main
-    tempest_main.main()
+    # Run the CLI main function
+    tempest_cli.main()
 
 
 if __name__ == '__main__':
