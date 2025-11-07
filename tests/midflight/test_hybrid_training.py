@@ -431,8 +431,8 @@ class TestLossWeighting:
         weights = []
         
         for epoch in range(epochs):
-            # Linear ramp
-            progress = epoch / epochs
+            # Linear ramp - use (epochs - 1) to reach max at final epoch
+            progress = epoch / (epochs - 1) if epochs > 1 else 1.0
             weight = config.invalid_weight_initial + (
                 config.invalid_weight_max - config.invalid_weight_initial
             ) * progress
@@ -452,12 +452,12 @@ class TestValidationChecks:
         # Get segment labels
         pred_labels = np.argmax(predictions, axis=-1)
         
-        # Count unique segments
-        unique_segments = len(set(pred_labels))
+        # Count unique segments - flatten array for set operation
+        unique_segments = len(set(pred_labels.flatten()))
         
         # Count segment repetitions
         from collections import Counter
-        segment_counts = Counter(pred_labels)
+        segment_counts = Counter(pred_labels.flatten())
         max_repetition = max(segment_counts.values())
         
         is_valid = (

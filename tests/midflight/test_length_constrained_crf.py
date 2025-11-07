@@ -15,15 +15,34 @@ import numpy as np
 import tensorflow as tf
 from unittest.mock import Mock, patch
 import sys
+from pathlib import Path
 
-# Add paths
+# Add paths - need to add before imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.absolute()))  # tempest root
 sys.path.insert(0, '/home/claude/tempest')
 sys.path.insert(0, '/mnt/project')
 
-from length_constrained_crf_vectorized import (
-    ModelWithLengthConstrainedCRF,
-    create_length_constrained_model
-)
+# Now import the module
+try:
+    from length_constrained_crf_vectorized import (
+        ModelWithLengthConstrainedCRF,
+        create_length_constrained_model
+    )
+except ModuleNotFoundError:
+    # If running from different location, try alternative import
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "length_constrained_crf_vectorized", 
+        "/mnt/project/length_constrained_crf_vectorized.py"
+    )
+    if spec and spec.loader:
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["length_constrained_crf_vectorized"] = module
+        spec.loader.exec_module(module)
+        ModelWithLengthConstrainedCRF = module.ModelWithLengthConstrainedCRF
+        create_length_constrained_model = module.create_length_constrained_model
+    else:
+        raise
 
 
 class TestConstraintWeightRamping:
