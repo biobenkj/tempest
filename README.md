@@ -1,7 +1,7 @@
 # Tempest
 
-<p align="center">
-  <img src="tempest_logo.png" alt="TEMPEST Logo" width="600">
+<p align="left">
+  <img src="tempest_logo.png" alt="TEMPEST Logo" width="300">
 </p>
 
 **Modular sequence annotation using length-constrained CRFs with PWM priors and ensemble modeling.**
