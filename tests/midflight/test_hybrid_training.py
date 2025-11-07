@@ -450,15 +450,25 @@ class TestValidationChecks:
     def validate_architecture(self, predictions, min_unique_segments=3, max_segment_repetition=2):
         """Validate predicted architecture."""
         # Get segment labels
-        pred_labels = np.argmax(predictions, axis=-1)
+        pred_labels = np.argmax(predictions, axis=-1).flatten()
         
-        # Count unique segments - flatten array for set operation
-        unique_segments = len(set(pred_labels.flatten()))
+        # Count continuous segments (runs) of each label
+        segments = []
+        if len(pred_labels) > 0:
+            current_label = pred_labels[0]
+            for label in pred_labels[1:]:
+                if label != current_label:
+                    segments.append(current_label)
+                    current_label = label
+            segments.append(current_label)
         
-        # Count segment repetitions
+        # Count unique segment types
+        unique_segments = len(set(segments))
+        
+        # Count how many times each segment type appears
         from collections import Counter
-        segment_counts = Counter(pred_labels.flatten())
-        max_repetition = max(segment_counts.values())
+        segment_counts = Counter(segments)
+        max_repetition = max(segment_counts.values()) if segment_counts else 0
         
         is_valid = (
             unique_segments >= min_unique_segments and
