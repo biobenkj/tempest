@@ -2,7 +2,7 @@
   <img src="tempest_logo.png" alt="TEMPEST Logo" width="300">
 </p>
 
-**Tempest: long read RNA-seq sequence annotation tool**
+## **Tempest: long read RNA-seq sequence annotation tool**
 
 Tempest is inspired by Tranquillyzer, designed for annotating biological sequences (e.g., nanopore reads) with structured elements like adapters, UMIs, barcodes, and inserts using deep learning.
 
