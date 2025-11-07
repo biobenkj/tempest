@@ -1,246 +1,339 @@
-# Unified Tempest Configuration
-# Supports: Whitelists, Transcript cDNA inserts, Variable polyA, Flexible architecture
+# Tempest Hybrid Training Configuration
+# Combines comprehensive hybrid training with full read reverse complement support
 
+# Model Architecture Configuration
 model:
-  vocab_size: 5  # A=0, C=1, G=2, T=3, N=4
+  max_seq_len: 1000
+  num_labels: 6  # ADAPTER5, UMI, ACC, BARCODE, INSERT, ADAPTER3
   embedding_dim: 128
-  
-  # CNN layers
-  use_cnn: true
-  cnn_filters: [64, 128]
-  cnn_kernels: [3, 5]
-  
-  # BiLSTM layers
-  use_bilstm: true
-  lstm_units: 128
+  lstm_units: 256
   lstm_layers: 2
   dropout: 0.3
-  
-  # Output configuration - dynamically set based on sequence_order
-  num_labels: null  # Will be set automatically from sequence_order
-  use_crf: true
-  
-  # Length constraints for segments (optional)
-  length_constraints:
-    constraints: {}  # Will be populated dynamically or manually
+  use_cnn: true
+  use_bilstm: true
+  batch_size: 32
 
-# Simulation settings with full feature support
+# Data Simulation Configuration
 simulation:
-  # FLEXIBLE SEQUENCE ARCHITECTURE
-  # Define any sequence structure you want - not hard-coded!
-  # Examples below - uncomment/modify as needed:
-  
-  # Example 1: Dual-index Illumina with polyA
-  sequence_order: ['ADAPTER5', 'UMI', 'INDEX_i7', 'ACC', 'INDEX_i5', 'INSERT', 'POLYA', 'ADAPTER3']
-  
-  # Example 2: Single-cell 10x-style
-  # sequence_order: ['TSO', 'CBC', 'UMI', 'POLY_T', 'INSERT', 'POLYA', 'ADAPTER3']
-  
-  # Example 3: Oxford Nanopore Direct RNA
-  # sequence_order: ['ADAPTER5', 'BARCODE', 'RT_PRIMER', 'INSERT', 'POLYA', 'RNA_ADAPTER']
-  
-  # Example 4: Custom multiplex
-  # sequence_order: ['CUSTOM_TAG1', 'MOLECULAR_ID', 'SAMPLE_BC', 'INSERT', 'QUALITY_TAG', 'TERMINATOR']
-  
-  # SEGMENT DEFINITIONS
-  # Three ways to define sequences for segments:
-  
-  # 1. Fixed sequences (highest priority)
-  sequences:
-    ADAPTER5: 'AGATCGGAAGAGCACACGTCTGAACTCCAGTCA'
-    ADAPTER3: 'AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT'
-    TSO: 'AAGCAGTGGTATCAACGCAGAGTAC'
-    POLY_T: 'TTTTTTTTTTTTTTTTTTTT'
-    RT_PRIMER: 'ACTCTAATTGGAC'
-    RNA_ADAPTER: 'GGGGGGGG'
-    # Use 'random' to generate random sequence
-    # Use 'transcript' for cDNA from transcript pool
-    # Use 'polya' for polyA tail generation
-    INSERT: 'transcript'  # Special keyword for transcript-based generation
-    POLYA: 'polya'  # Special keyword for polyA tail generation
-  
-  # 2. Whitelist files (second priority)
-  # Maps segment names to whitelist files
-  whitelist_files:
-    INDEX_i7: "whitelists/i7_indices.txt"
-    INDEX_i5: "whitelists/i5_indices.txt"
-    CBC: "whitelists/cell_barcodes.txt"
-    BARCODE: "whitelists/sample_barcodes.txt"
-    UMI: "whitelists/umi_sequences.txt"  # Can even whitelist UMIs if needed
-    CUSTOM_TAG1: "whitelists/custom_tags.txt"
-    MOLECULAR_ID: "whitelists/molecular_ids.txt"
-    SAMPLE_BC: "whitelists/sample_barcodes.txt"
-    ACC: "whitelists/acc_sequences.txt"
-  
-  # 3. Fallback sequences (third priority)
-  # Used if whitelist is empty/missing
-  fallback_sequences:
-    INDEX_i7: ['ATTACTCG', 'TCCGGAGA', 'CGCTCATT', 'GAGATTCC']
-    INDEX_i5: ['TATAGCCT', 'ATAGAGGC', 'CCTATCCT', 'GGCTCTGA']
-    CBC: ['AAACCCAAGAAACCCT', 'AAACCCAAGAAACACT', 'AAACCCAAGAAACCAT']
-    BARCODE: ['ACTGACTGACTGACTG', 'TGACTGACTGACTGAC']
-    ACC: ['GGGGGG', 'AAAAAA', 'CCCCCC', 'TTTTTT']
-  
-  # 4. Generated sequences (lowest priority)
-  # Segments not defined above will be generated based on these rules
-  segment_generation:
-    # Length-based generation for segments
-    lengths:
-      UMI: 12
-      MOLECULAR_ID: 8
-      QUALITY_TAG: 6
-      CUSTOM_TAG1: 10
-      DEFAULT: 20  # Default length for unknown segments
-    
-    # Special generation modes
-    generation_mode:
-      ACC: 'pwm'  # Use PWM-based generation
-      INSERT: 'transcript'  # Use transcript pool
-      POLYA: 'polya'  # Use polyA generator
-      DEFAULT: 'random'  # Random DNA sequence
-  
-  # TRANSCRIPT POOL CONFIGURATION (for cDNA inserts)
-  transcript:
-    fasta_file: "transcripts/reference_transcripts.fasta"
-    min_length: 100  # Minimum transcript length to include
-    max_length: 5000  # Maximum transcript length to include
-    
-    # Fragment sampling from transcripts
-    fragment_min: 200  # Minimum fragment size
-    fragment_max: 800  # Maximum fragment size
-    
-    # Orientation
-    reverse_complement_prob: 0.5  # Probability of antisense strand
-    
-    # Fallback if no transcript file
-    fallback_mode: 'random'  # Generate random sequence if no transcripts
-    fallback_gc_content: 0.5  # GC content for random generation
-  
-  # POLYA TAIL CONFIGURATION
-  polya_tail:
-    # Distribution type: 'normal', 'exponential', 'uniform', 'empirical'
-    distribution: 'normal'
-    
-    # Parameters for normal distribution
-    mean_length: 150
-    std_length: 50
-    
-    # Parameters for exponential distribution
-    lambda_param: 0.01  # Rate parameter
-    
-    # Global bounds
-    min_length: 10
-    max_length: 300
-    
-    # Realism parameters
-    purity: 0.95  # Probability of 'A' vs other bases
-    interruption_bases: ['T', 'G', 'C']  # Bases that can interrupt
-    
-    # Empirical distribution (if available)
-    empirical_file: null  # File with observed polyA lengths
-  
-  # ACC/PWM CONFIGURATION
-  pwm:
-    pwm_file: "data/acc_pwm.txt"
-    use_pwm: true
-    threshold: 0.7
-    pseudocount: 0.01
-    
-    # Alternative: predefined ACC sequences with frequencies
-    acc_sequences: null  # List of sequences
-    acc_frequencies: null  # List of frequencies (must sum to 1)
-    acc_priors_file: null  # TSV file with sequences and frequencies
-  
-  # ERROR SIMULATION
-  error_profile:
-    # Overall error rate
-    error_rate: 0.02
-    
-    # Detailed error model
-    substitution:
-      rate: 0.015
-      matrix:  # A->X transition probabilities (optional)
-        A: {'C': 0.3, 'G': 0.3, 'T': 0.4}
-        C: {'A': 0.3, 'G': 0.4, 'T': 0.3}
-        G: {'A': 0.3, 'C': 0.4, 'T': 0.3}
-        T: {'A': 0.4, 'C': 0.3, 'G': 0.3}
-    
-    insertion:
-      rate: 0.0025
-      max_length: 2  # Maximum insertion length
-    
-    deletion:
-      rate: 0.0025
-      max_length: 2  # Maximum deletion length
-    
-    # Quality score simulation (optional)
-    quality_scores:
-      enabled: false
-      min_qual: 10
-      max_qual: 40
-      error_qual_correlation: -0.8  # Correlation between error and quality
-  
-  # SIMULATION PARAMETERS
+  # Number of sequences to generate
   num_sequences: 10000
+  train_split: 0.8
+  
+  # Additional test/validation splits
+  n_train: 10000
+  n_val: 2000
+  n_test: 2000
+  
+  # Random seed for reproducibility
   random_seed: 42
   
-  # Train/validation split
-  train_split: 0.8
-  validation_split: 0.2
+  # Sequence architecture - define your read structure
+  sequence_order:
+    - ADAPTER5
+    - UMI
+    - ACC
+    - BARCODE
+    - INSERT
+    - ADAPTER3
   
-  # Advanced options
-  parallel_generation: false  # Use multiprocessing
-  num_workers: 4  # Number of parallel workers
-  chunk_size: 1000  # Sequences per chunk
+  # =============================================================================
+  # FULL READ REVERSE COMPLEMENT (NEW FEATURE)
+  # =============================================================================
+  # Set this to 0.5 to reverse complement 50% of reads
+  # This applies to the ENTIRE assembled read, not just individual segments
+  # Use this for realistic bidirectional sequencing simulation
+  full_read_reverse_complement_prob: 0.5
+  
+  # Fixed sequences for adapters
+  sequences:
+    ADAPTER5: "CTACACGACGCTCTTCCGATCT"
+    ADAPTER3: "AGATCGGAAGAGCACACGTCTG"
+    INSERT: "transcript"  # Use transcript pool
+    # ACC: Will be generated via segment_generation or whitelist
+    # UMI and BARCODE: Will be generated randomly
+  
+  # Segment generation parameters
+  segment_generation:
+    lengths:
+      ADAPTER5: 22  # Fixed length matches sequence above
+      UMI: 12
+      ACC: 100       # Average length for ACC
+      BARCODE: 8
+      INSERT: 300    # Average insert length when not using transcript
+      ADAPTER3: 22   # Fixed length matches sequence above
+    
+    # Generation mode for each segment
+    generation_mode:
+      ADAPTER5: "fixed"      # Use sequences defined above
+      UMI: "random"
+      ACC: "pwm"             # Use PWM if available, else random
+      BARCODE: "random"
+      INSERT: "transcript"   # Use transcript pool
+      ADAPTER3: "fixed"      # Use sequences defined above
+  
+  # Segment length ranges (for variable-length segments)
+  sequence_lengths:
+    ADAPTER5:
+      min: 22
+      max: 22
+    UMI:
+      min: 12
+      max: 12
+    ACC:
+      min: 50
+      max: 150
+    BARCODE:
+      min: 8
+      max: 8
+    INSERT:
+      min: 100
+      max: 400
+    ADAPTER3:
+      min: 22
+      max: 22
+  
+  # Fallback sequences (used if whitelist/transcript not available)
+  fallback_sequences:
+    ACC: "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+  
+  # Transcript configuration for INSERT segments
+  transcript:
+    fasta_file: null  # Path to transcript FASTA file (set to your file)
+    min_length: 100
+    max_length: 400
+    fragment_min: 100
+    fragment_max: 400
+    # IMPORTANT: Set to 0 when using full_read_reverse_complement_prob
+    # This ensures only full reads are RC'd, not individual inserts
+    reverse_complement_prob: 0.0
+    fallback_mode: "random"
+    fallback_gc_content: 0.5
+  
+  # PolyA tail configuration (optional, if adding POLYA to sequence_order)
+  polya_tail:
+    distribution: "normal"
+    mean_length: 100
+    std_length: 30
+    min_length: 20
+    max_length: 250
+  
+  # Error profile configuration
+  error_profile:
+    error_rate: 0.01
+    substitution:
+      rate: 0.006
+      matrix:
+        A: {G: 0.5, C: 0.25, T: 0.25}
+        C: {T: 0.5, A: 0.25, G: 0.25}
+        G: {A: 0.5, C: 0.25, T: 0.25}
+        T: {C: 0.5, A: 0.25, G: 0.25}
+    insertion:
+      rate: 0.002
+      max_length: 2
+    deletion:
+      rate: 0.002
+      max_length: 2
+  
+  # Whitelist files for specific segments (optional)
+  whitelist_files: {}
+    # Example:
+    # BARCODE: "/path/to/barcode_whitelist.txt"
+    # UMI: "/path/to/umi_whitelist.txt"
 
-# Training configuration
+# Training Configuration
 training:
+  epochs: 50
   learning_rate: 0.001
-  optimizer: 'adam'
-  epochs: 30
-  batch_size: 32
-  
-  # Length constraint settings
-  use_length_constraints: true
-  constraint_weight: 5.0
-  constraint_ramp_epochs: 5
-  
-  # Dynamic label detection
-  auto_detect_labels: true  # Automatically detect labels from sequence_order
-  
-  # Class weights (optional)
-  use_class_weights: true
-  class_weight_mode: 'balanced'  # or 'manual'
-  manual_class_weights: {}  # Specify if mode is 'manual'
+  early_stopping_patience: 10
+  reduce_lr_patience: 5
+  checkpoint_dir: ./checkpoints
+  save_best_only: true
+  monitor: val_loss
 
-# Evaluation configuration
-evaluation:
-  metrics: ['accuracy', 'precision', 'recall', 'f1', 'segment_accuracy']
-  per_segment_metrics: true
-  confusion_matrix: true
+# Hybrid Training Configuration
+hybrid:
+  enabled: true
   
-  # Focus on specific segments (optional)
-  focus_segments: []  # Empty = evaluate all segments
+  # =============================================================================
+  # TRAINING PHASES
+  # =============================================================================
+  # Phase 1: Warmup - Train on clean, valid reads
+  warmup_epochs: 5
+  
+  # Phase 2: Discriminator - Train with invalid reads + discriminator
+  discriminator_epochs: 10
+  
+  # Phase 3: Pseudo-label - Fine-tune with pseudo-labeled real data
+  pseudolabel_epochs: 10
+  
+  # =============================================================================
+  # INVALID READ GENERATION
+  # =============================================================================
+  # Proportion of invalid reads to mix with training data
+  invalid_ratio: 0.15
+  
+  # Invalid read types and their probabilities
+  segment_loss_prob: 0.3      # Missing segments
+  segment_dup_prob: 0.3       # Duplicated segments
+  truncation_prob: 0.2        # Truncated reads
+  chimeric_prob: 0.1          # Chimeric reads (multiple templates)
+  scrambled_prob: 0.1         # Scrambled segment order
+  
+  # =============================================================================
+  # LOSS WEIGHTS
+  # =============================================================================
+  # Weight for invalid read loss (gradually increased during training)
+  invalid_weight_initial: 0.1
+  invalid_weight_max: 0.3
+  
+  # Weight for adversarial loss from discriminator
+  adversarial_weight: 0.1
+  
+  # =============================================================================
+  # PSEUDO-LABELING PARAMETERS
+  # =============================================================================
+  # Minimum confidence for accepting pseudo-labels
+  confidence_threshold: 0.85
+  
+  # Confidence threshold decay per epoch (0.95 = 5% decrease per epoch)
+  confidence_decay: 0.95
+  
+  # Weight for pseudo-labeled examples in loss
+  pseudo_weight: 0.5
+  
+  # =============================================================================
+  # DIRECTORY PROCESSING (for pseudo-labeling from FASTQ directories)
+  # =============================================================================
+  # Maximum pseudo-labels to generate per FASTQ file
+  max_pseudo_per_file: 1000
+  
+  # Maximum total pseudo-labels across all files
+  max_pseudo_total: 10000
+  
+  # Backward compatibility alias
+  max_pseudo_examples: 10000
+  
+  # =============================================================================
+  # DISCRIMINATOR SETTINGS
+  # =============================================================================
+  # Learning rate factor for discriminator (relative to main model)
+  discriminator_lr_factor: 0.1
+  
+  # Hidden dimension for discriminator network
+  discriminator_hidden_dim: 64
+  
+  # =============================================================================
+  # ARCHITECTURE VALIDATION
+  # =============================================================================
+  # Validate that predicted architectures are biologically plausible
+  validate_architecture: true
+  
+  # Minimum number of unique segments required
+  min_unique_segments: 3
+  
+  # Maximum times a segment can be repeated
+  max_segment_repetition: 2
 
-# Output configuration
-output:
-  save_format: ['json', 'tsv', 'pickle']
-  visualization: true
-  
-  # Visualization settings
-  max_sequences_to_plot: 20
-  color_scheme: 'auto'  # Automatically assign colors to segments
-  
-  # Custom colors (optional)
-  segment_colors: {}  # Will be auto-generated if not specified
+# Ensemble Configuration (optional)
+ensemble:
+  enabled: false  # Set to true to use ensemble
+  n_models: 3
+  voting_method: soft  # 'soft' (average probabilities) or 'hard' (majority vote)
+  confidence_threshold: 0.8
+  diversity_weight: 0.1  # Weight for diversity loss during ensemble training
 
-# Logging
+# Inference Configuration
+inference:
+  batch_size: 128
+  input_format: fastq  # 'fastq' or 'fasta'
+  
+  # Barcode correction
+  apply_barcode_correction: true
+  barcode_correction_distance: 1
+  
+  # Deduplication
+  deduplicate: true
+  dedup_strategy: umi  # 'umi', 'sequence', or 'both'
+  
+  # Output configuration
+  output_format: json  # 'json', 'tsv', 'gff', or 'bed'
+  min_confidence: 0.8
+  include_metadata: true
+  
+  # Handle reverse complement reads in inference
+  detect_orientation: true  # Auto-detect and report read orientation
+
+# PWM Configuration (for ACC generation)
+pwm:
+  pwm_file: null  # Path to PWM file for ACC generation (e.g., "./acc_pwm.txt")
+  min_score: 0.7
+  scan_reverse_complement: true  # Scan both strands when generating
+
+# Logging Configuration
 logging:
-  level: 'INFO'
-  log_dir: './logs'
-  tensorboard: true
-  
-  # Detailed logging
   log_generation_stats: true
   log_whitelist_usage: true
-  log_error_injection: true
+  log_invalid_reads: true
+  log_discriminator_metrics: true
+  log_pseudo_label_stats: true
+  log_level: INFO  # DEBUG, INFO, WARNING, ERROR
+  log_file: ./logs/tempest.log
+  save_predictions: false  # Save all predictions for debugging
+
+# Advanced Options
+advanced:
+  # Memory optimization
+  use_mixed_precision: false
+  gradient_accumulation_steps: 1
+  
+  # Reproducibility
+  deterministic: true
+  benchmark: false
+  
+  # Multi-GPU training
+  use_multi_gpu: false
+  gpu_ids: [0]
+  
+  # Data loading
+  num_workers: 4
+  prefetch_factor: 2
+  pin_memory: true
+  
+  # Model checkpointing
+  save_frequency: 5  # Save checkpoint every N epochs
+  keep_n_checkpoints: 3  # Keep only the N best checkpoints
+
+# =============================================================================
+# USAGE NOTES
+# =============================================================================
+# 
+# 1. FULL READ REVERSE COMPLEMENT
+#    - Set simulation.full_read_reverse_complement_prob to 0.5 for bidirectional
+#    - Set simulation.transcript.reverse_complement_prob to 0.0 to avoid double RC
+#    - RC status tracked in read.metadata['is_reverse_complement']
+#
+# 2. HYBRID TRAINING
+#    - Phase 1 (warmup): Standard training on valid reads
+#    - Phase 2 (discriminator): Robustness training with invalid reads
+#    - Phase 3 (pseudo-label): Fine-tuning on unlabeled real data
+#
+# 3. PSEUDO-LABELING FROM DIRECTORIES
+#    - Set unlabeled_path to directory containing FASTQ files
+#    - Adjust max_pseudo_per_file and max_pseudo_total for dataset size
+#    - Higher confidence_threshold = higher quality but fewer examples
+#
+# 4. TRANSCRIPT FILES
+#    - Set simulation.transcript.fasta_file to your transcript FASTA
+#    - Or use fallback_mode: "random" for synthetic generation
+#
+# 5. ARCHITECTURE CUSTOMIZATION
+#    - Modify sequence_order to match your sequencing protocol
+#    - Adjust sequence_lengths for each segment
+#    - Add/remove segments as needed
+#
+# 6. PERFORMANCE TUNING
+#    - Increase model.batch_size for faster training (if GPU memory allows)
+#    - Adjust advanced.num_workers for data loading speed
+#    - Enable advanced.use_mixed_precision for faster training
+#
+# =============================================================================

@@ -654,6 +654,49 @@ class SequenceSimulator:
         
         return ''.join(result), error_types
     
+    def _reverse_complement_read(self, sequence: str, labels: List[str], 
+                                 label_regions: Dict[str, List[Tuple[int, int]]]) -> Tuple[str, List[str], Dict[str, List[Tuple[int, int]]]]:
+        """
+        Reverse complement entire read including labels and regions.
+        
+        This reverses the full read architecture, not just individual segments.
+        Updates sequence, labels, and all label region positions.
+        
+        Args:
+            sequence: DNA sequence
+            labels: List of labels (one per base)
+            label_regions: Dict of segment -> [(start, end), ...]
+            
+        Returns:
+            Tuple of (rc_sequence, rc_labels, rc_label_regions)
+        """
+        # Reverse complement sequence
+        complement = {'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C', 'N': 'N'}
+        rc_sequence = ''.join(complement.get(b, 'N') for b in sequence[::-1])
+        
+        # Reverse labels
+        rc_labels = labels[::-1]
+        
+        # Update label regions to reflect reversed positions
+        seq_len = len(sequence)
+        rc_label_regions = {}
+        
+        for segment, regions in label_regions.items():
+            rc_regions = []
+            for start, end in regions:
+                # Convert to reverse complement coordinates
+                # Position i in forward becomes (seq_len - i - 1) in reverse
+                # So region [start, end) becomes [seq_len - end, seq_len - start)
+                rc_start = seq_len - end
+                rc_end = seq_len - start
+                rc_regions.append((rc_start, rc_end))
+            
+            # Sort regions by start position (in case there are multiple)
+            rc_regions.sort(key=lambda x: x[0])
+            rc_label_regions[segment] = rc_regions
+        
+        return rc_sequence, rc_labels, rc_label_regions
+    
     def generate_read(self) -> SimulatedRead:
         """
         Generate a single simulated read.
@@ -700,6 +743,17 @@ class SequenceSimulator:
             
             current_pos += seg_len
         
+        # Apply full read reverse complement if configured
+        full_read_rc_prob = self.sim_config.get('full_read_reverse_complement_prob', 0.0)
+        is_reverse_complement = False
+        
+        if full_read_rc_prob > 0 and self.random_state.random() < full_read_rc_prob:
+            full_sequence, labels, label_regions = self._reverse_complement_read(
+                full_sequence, labels, label_regions
+            )
+            is_reverse_complement = True
+            logger.debug("Applied full read reverse complement")
+        
         # Inject errors
         error_config = self.sim_config.get('error_profile', {})
         if error_config.get('error_rate', 0) > 0:
@@ -723,6 +777,7 @@ class SequenceSimulator:
             'final_length': len(full_sequence),
             'has_errors': len(original_sequence) != len(full_sequence),
             'error_rate': error_config.get('error_rate', 0),
+            'is_reverse_complement': is_reverse_complement,
         }
         
         # Add segment-specific metadata
