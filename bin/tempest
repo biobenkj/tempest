@@ -219,12 +219,76 @@ EXAMPLES:
   # Compare multiple runs
   tempest visualize --type summary --compare run1.json,run2.json,run3.json
 """,
+    
+    'compare': """usage: tempest compare [options]
+
+Compare multiple trained models on test data
+
+OPTIONS:
+  --models-dir DIR         Directory containing models to compare
+                          (default: ./trained_models)
+  --models FILES          Comma-separated list of model files/directories
+                          (alternative to --models-dir)
+  --test-data DATA        Path to test data file (required)
+                          Should be pickled dict with X_test and y_test
+  --config CONFIG         Configuration file 
+                          (optional, uses model config if not specified)
+  --output-dir DIR        Output directory for comparison results
+                          (default: ./evaluation_results)
+  
+  # Comparison options
+  --metrics METRICS       Comma-separated metrics to evaluate
+                          Options: accuracy, f1, precision, recall, constraints, robustness
+                          (default: all)
+  --no-plots              Skip generating visualization plots
+  --no-report             Skip generating markdown report
+  
+  # Advanced options
+  --batch-size N          Batch size for evaluation (default: 32)
+  --error-types TYPES     Comma-separated error types to test robustness
+                          Options: missing_segment, duplicated_segment, truncated, noisy
+                          (default: all)
+  --ensemble-metrics      Include ensemble-specific metrics
+  
+COMPARISON OUTPUTS:
+  - model_comparison.csv: Tabular comparison of all metrics
+  - evaluation_report.json: Detailed results in JSON format
+  - evaluation_report.md: Human-readable markdown report
+  - comprehensive_evaluation.png: Multi-metric visualization
+  
+METRICS EVALUATED:
+  • Basic performance: accuracy, precision, recall, F1 score
+  • Segment-level: per-label accuracy and transition detection
+  • Constraints: satisfaction rates for length constraints
+  • Robustness: performance under various error conditions
+  • Efficiency: inference time measurements
+  • Ensemble: model agreement and prediction uncertainty
+
+EXAMPLES:
+  # Basic comparison of models in directory
+  tempest compare --models-dir ./trained_models --test-data test_data.pkl
+  
+  # Compare specific models
+  tempest compare --models standard.h5,hybrid.h5,ensemble/ --test-data test.pkl
+  
+  # Custom configuration and output
+  tempest compare --models-dir ./models --test-data test.pkl \\
+                 --config config.yaml --output-dir ./comparison
+  
+  # Evaluate specific metrics only
+  tempest compare --models-dir ./models --test-data test.pkl \\
+                 --metrics accuracy,f1,constraints
+  
+  # Quick comparison without plots/reports
+  tempest compare --models-dir ./models --test-data test.pkl \\
+                 --no-plots --no-report
+""",
 }
 
 
 def show_quick_help():
     """Display quick help message without importing any modules."""
-    help_text = """usage: tempest [-h] [--verbose] [--debug] {simulate,train,evaluate,visualize} ...
+    help_text = """usage: tempest [-h] [--verbose] [--debug] {simulate,train,evaluate,compare,visualize} ...
 
 Tempest - Modular sequence annotation using length-constrained CRFs
 
@@ -233,6 +297,7 @@ COMMANDS:
   simulate              Generate synthetic sequence data for training
   train                 Train a Tempest model (standard or hybrid mode)
   evaluate              Evaluate a trained model on test data
+  compare               Compare multiple trained models
   visualize             Create visualizations of results
 
 QUICK EXAMPLES:
@@ -248,6 +313,9 @@ QUICK EXAMPLES:
 
   # Evaluate model on test data
   tempest evaluate --model model_final.h5 --test-data test_reads.txt
+  
+  # Compare multiple models
+  tempest compare --models-dir ./trained_models --test-data test_data.pkl
 
   # Visualize training history
   tempest visualize --type training --input training_history.csv --output curves.png
@@ -269,6 +337,7 @@ Examples:
   tempest train --help      # Show all training options
   tempest simulate --help   # Show data generation options
   tempest evaluate --help   # Show evaluation options
+  tempest compare --help    # Show model comparison options
   tempest visualize --help  # Show visualization options
 
 CONFIGURATION FILES:
@@ -298,7 +367,7 @@ def show_subcommand_help(subcommand):
         print(SUBCOMMAND_HELP[subcommand])
     else:
         print(f"Error: Unknown command '{subcommand}'", file=sys.stderr)
-        print("\nAvailable commands: simulate, train, evaluate, visualize", file=sys.stderr)
+        print("\nAvailable commands: simulate, train, evaluate, compare, visualize", file=sys.stderr)
         sys.exit(1)
     sys.exit(0)
 

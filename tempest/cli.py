@@ -530,6 +530,51 @@ def visualize_command(args):
     logger.info("Visualization complete!")
 
 
+def compare_command(args):
+    """
+    Compare multiple trained models on test data.
+    
+    This command evaluates and compares different model approaches
+    (standard, hybrid, ensemble) to help select the best model
+    for production use.
+    """
+    from tempest.compare import compare_models
+    
+    logger.info("="*80)
+    logger.info(" " * 25 + "TEMPEST MODEL COMPARISON")
+    logger.info("="*80)
+    
+    # Run comparison
+    try:
+        framework = compare_models(
+            models_dir=args.models_dir,
+            test_data_path=args.test_data,
+            config_path=args.config,
+            output_dir=args.output_dir
+        )
+        
+        # Print summary to console
+        print("\n" + "="*80)
+        print("MODEL COMPARISON SUMMARY")
+        print("="*80)
+        comparison_df = framework.compare_models()
+        print(comparison_df.to_string())
+        
+        print("\n" + "="*80)
+        print("EVALUATION COMPLETE")
+        print("="*80)
+        print(f"Results saved to: {args.output_dir}")
+        print("\nKey outputs:")
+        print(f"  - Model comparison table: {args.output_dir}/model_comparison.csv")
+        print(f"  - Detailed report: {args.output_dir}/evaluation_report.json")
+        print(f"  - Markdown summary: {args.output_dir}/evaluation_report.md")
+        print(f"  - Visualizations: {args.output_dir}/comprehensive_evaluation.png")
+        
+    except Exception as e:
+        logger.error(f"Model comparison failed: {e}")
+        raise
+
+
 def create_parser():
     """Create the argument parser with subcommands."""
     parser = argparse.ArgumentParser(
@@ -824,6 +869,80 @@ EXAMPLES:
         help='DPI for output image (default: 150)'
     )
     parser_visualize.set_defaults(func=visualize_command)
+    
+    # ============ COMPARE COMMAND ============
+    parser_compare = subparsers.add_parser(
+        'compare',
+        help='Compare multiple trained models',
+        description='Evaluate and compare different model approaches (standard, hybrid, ensemble)',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+COMPARISON METRICS:
+  - Basic metrics: accuracy, precision, recall, F1
+  - Segment-level performance per label type
+  - Length constraint satisfaction rates
+  - Robustness to errors (missing/duplicated segments)
+  - Computational efficiency (inference time)
+  - Ensemble-specific metrics (uncertainty, agreement)
+
+EXAMPLES:
+  # Compare models in a directory
+  tempest compare --models-dir ./trained_models --test-data test_data.pkl
+  
+  # Compare with custom configuration
+  tempest compare --models-dir ./models --test-data test.pkl --config config.yaml
+  
+  # Save results to specific directory
+  tempest compare --models-dir ./models --test-data test.pkl -o ./comparison_results
+  
+  # Compare specific model files
+  tempest compare --models model1.h5,model2.h5,ensemble/ --test-data test.pkl
+        """
+    )
+    parser_compare.add_argument(
+        '--models-dir',
+        type=str,
+        default='./trained_models',
+        help='Directory containing trained models to compare'
+    )
+    parser_compare.add_argument(
+        '--models',
+        type=str,
+        help='Comma-separated list of model files/directories (alternative to --models-dir)'
+    )
+    parser_compare.add_argument(
+        '--test-data',
+        type=str,
+        required=True,
+        help='Path to test data file (pickled X_test, y_test)'
+    )
+    parser_compare.add_argument(
+        '--config', '-c',
+        type=str,
+        help='Configuration file (uses model config if not specified)'
+    )
+    parser_compare.add_argument(
+        '--output-dir', '-o',
+        type=str,
+        default='./evaluation_results',
+        help='Output directory for comparison results'
+    )
+    parser_compare.add_argument(
+        '--metrics',
+        type=str,
+        help='Comma-separated list of metrics to evaluate (default: all)'
+    )
+    parser_compare.add_argument(
+        '--no-plots',
+        action='store_true',
+        help='Skip generating visualization plots'
+    )
+    parser_compare.add_argument(
+        '--no-report',
+        action='store_true',
+        help='Skip generating markdown report'
+    )
+    parser_compare.set_defaults(func=compare_command)
     
     return parser
 
