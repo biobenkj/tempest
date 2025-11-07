@@ -220,6 +220,85 @@ EXAMPLES:
   tempest visualize --type summary --compare run1.json,run2.json,run3.json
 """,
     
+    'combine': """usage: tempest combine [options]
+
+Combine multiple models using Bayesian Model Averaging (BMA) or weighted voting
+
+OPTIONS:
+  --models-dir DIR         Directory containing models to combine
+  --models FILES          Comma-separated list of [name:]path pairs for models
+  --method METHOD         Combination method: bma or weighted (default: bma)
+  --validation-data FILE  Validation data for computing BMA weights (required for BMA)
+  --test-data FILE        Test data for evaluating combination (optional)
+  --output-dir DIR        Output directory for results (default: ./combine_results)
+
+  # BMA-specific options
+  --prior-type TYPE       Prior type: uniform, performance, complexity (default: uniform)
+  --temperature T         Temperature for posterior scaling (default: 1.0)
+  --use-bic              Use BIC approximation instead of full marginal likelihood
+  --no-complexity-penalty Disable complexity penalties in BMA
+
+  # Weighted voting options  
+  --weights WEIGHTS       Custom weights (format: name1:weight1,name2:weight2)
+
+COMBINATION METHODS:
+==================
+  Bayesian Model Averaging (BMA):
+    • Weights learned from validation data
+    • Accounts for model complexity (Occam's razor)
+    • Provides uncertainty quantification
+    • Principled probabilistic framework
+    • P(M|D) ∝ P(D|M) × P(M)
+  
+  Weighted Voting:
+    • Fixed weights (user-specified or uniform)
+    • Simple and fast
+    • Full control over ensemble behavior
+    • No uncertainty quantification
+
+BMA DETAILS:
+===========
+  True BMA computes posterior probabilities for each model:
+    - P(M_k|D): Posterior probability of model k
+    - P(D|M_k): Marginal likelihood (model evidence)
+    - P(M_k): Prior probability of model k
+  
+  Benefits over simple averaging:
+    - Data-driven weight selection
+    - Automatic model selection
+    - Penalizes overly complex models
+    - Provides calibrated uncertainties
+    - Theoretically optimal combination
+
+OUTPUTS:
+========
+  - model_weights.json: Computed weights for each model
+  - model_evidences.json: Log evidences for each model (BMA only)
+  - combine_config.yaml: Configuration used for combination
+  - combination_summary.json: Summary statistics and metrics
+  - combination_evaluation.json: Test set performance (if evaluated)
+
+EXAMPLES:
+  # BMA with validation data
+  tempest combine --models-dir ./models --method bma --validation-data val.pkl
+
+  # Custom weighted voting
+  tempest combine --models model1.h5:0.3,model2.h5:0.4,model3.h5:0.3 --method weighted
+
+  # BMA with BIC approximation and evaluation
+  tempest combine --models-dir ./models --method bma --use-bic \
+                 --validation-data val.pkl --test-data test.pkl
+
+  # Named models with BMA
+  tempest combine --models standard:std.h5,hybrid:hyb.h5,constrained:lc.h5 \
+                 --method bma --validation-data val.pkl
+
+  # BMA with custom prior and temperature
+  tempest combine --models-dir ./models --method bma \
+                 --prior-type complexity --temperature 0.5 \
+                 --validation-data val.pkl
+""",
+    
     'compare': """usage: tempest compare [options]
 
 Compare multiple trained models on test data
@@ -288,7 +367,7 @@ EXAMPLES:
 
 def show_quick_help():
     """Display quick help message without importing any modules."""
-    help_text = """usage: tempest [-h] [--verbose] [--debug] {simulate,train,evaluate,compare,visualize} ...
+    help_text = """usage: tempest [-h] [--verbose] [--debug] {simulate,train,evaluate,compare,combine,visualize} ...
 
 Tempest - Modular sequence annotation using length-constrained CRFs
 
@@ -298,6 +377,7 @@ COMMANDS:
   train                 Train a Tempest model (standard or hybrid mode)
   evaluate              Evaluate a trained model on test data
   compare               Compare multiple trained models
+  combine               Combine models using BMA or weighted voting
   visualize             Create visualizations of results
 
 QUICK EXAMPLES:
@@ -316,6 +396,9 @@ QUICK EXAMPLES:
   
   # Compare multiple models
   tempest compare --models-dir ./trained_models --test-data test_data.pkl
+  
+  # Combine models using BMA
+  tempest combine --models-dir ./models --method bma --validation-data val.pkl
 
   # Visualize training history
   tempest visualize --type training --input training_history.csv --output curves.png
@@ -367,7 +450,7 @@ def show_subcommand_help(subcommand):
         print(SUBCOMMAND_HELP[subcommand])
     else:
         print(f"Error: Unknown command '{subcommand}'", file=sys.stderr)
-        print("\nAvailable commands: simulate, train, evaluate, compare, visualize", file=sys.stderr)
+        print("\nAvailable commands: simulate, train, evaluate, compare, combine, visualize", file=sys.stderr)
         sys.exit(1)
     sys.exit(0)
 

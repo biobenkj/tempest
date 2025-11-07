@@ -575,6 +575,126 @@ def compare_command(args):
         raise
 
 
+def combine_command(args):
+    """
+    Combine multiple models using BMA or weighted voting.
+    
+    This command implements model combination strategies including
+    true Bayesian Model Averaging and simple weighted voting.
+    """
+    from tempest.inference.combine import ModelCombiner, CombineConfig
+    from pathlib import Path
+    import json
+    import pickle
+    
+    logger.info("="*80)
+    logger.info(" " * 25 + "TEMPEST MODEL COMBINATION")
+    logger.info("="*80)
+    
+    # Parse model paths
+    model_paths = {}
+    if args.models:
+        # Parse comma-separated list of name:path pairs
+        for item in args.models.split(','):
+            item = item.strip()
+            if ':' in item:
+                name, path = item.split(':', 1)
+                model_paths[name] = path
+            else:
+                # Auto-generate name
+                name = Path(item).stem
+                model_paths[name] = item
+    elif args.models_dir:
+        # Find all models in directory
+        models_dir = Path(args.models_dir)
+        for pattern in ['*.h5', '*.keras']:
+            for p in models_dir.glob(pattern):
+                model_paths[p.stem] = str(p)
+        
+        # Check for ensemble directories
+        for item in models_dir.iterdir():
+            if item.is_dir() and (item / 'ensemble_metadata.json').exists():
+                model_paths[item.name] = str(item)
+    else:
+        logger.error("No models specified. Use --models or --models-dir")
+        return
+    
+    if not model_paths:
+        logger.error("No models found to combine")
+        return
+    
+    logger.info(f"Found {len(model_paths)} models to combine:")
+    for name, path in model_paths.items():
+        logger.info(f"  - {name}: {path}")
+    
+    # Create combine configuration
+    config = CombineConfig(
+        method=args.method,
+        prior_type=args.prior_type if args.method == 'bma' else 'uniform',
+        temperature=args.temperature,
+        use_bic=args.use_bic,
+        complexity_penalty=not args.no_complexity_penalty,
+        output_dir=args.output_dir
+    )
+    
+    # Parse weights for weighted voting
+    if args.method == 'weighted' and args.weights:
+        weights_dict = {}
+        for item in args.weights.split(','):
+            if ':' in item:
+                name, weight = item.split(':')
+                weights_dict[name.strip()] = float(weight)
+        config.weights = weights_dict
+        logger.info(f"Using custom weights: {weights_dict}")
+    
+    # Create combiner
+    combiner = ModelCombiner(config)
+    
+    # Load models
+    logger.info("Loading models...")
+    combiner.load_models(model_paths)
+    
+    # Compute weights
+    if args.validation_data:
+        logger.info(f"Computing {args.method.upper()} weights using validation data...")
+        combiner.compute_weights(args.validation_data)
+    else:
+        logger.warning("No validation data provided. Using default weights.")
+        combiner._setup_weighted_voting()
+    
+    # Save results
+    logger.info("Saving combination results...")
+    combiner.save_results(args.output_dir)
+    
+    # Evaluate if test data provided
+    if args.test_data:
+        logger.info("Evaluating combined model on test data...")
+        metrics = combiner.evaluate_combination(args.test_data)
+        
+        logger.info("\nCombination Performance:")
+        logger.info(f"  Combined Accuracy: {metrics['combined_accuracy']:.4f}")
+        logger.info(f"  Mean Entropy: {metrics['mean_entropy']:.4f}")
+        logger.info(f"  Model Disagreement: {metrics['mean_model_disagreement']:.4f}")
+        
+        if args.method == 'bma':
+            logger.info("\nBMA Statistics:")
+            logger.info(f"  Effective Models: {metrics.get('effective_models', 0)}")
+            logger.info(f"  Uncertainty-Error Correlation: {metrics.get('uncertainty_error_correlation', 0):.4f}")
+        
+        # Save evaluation results
+        eval_file = Path(args.output_dir) / "combination_evaluation.json"
+        with open(eval_file, 'w') as f:
+            json.dump(metrics, f, indent=2)
+        logger.info(f"Evaluation saved to: {eval_file}")
+    
+    logger.info(f"\nCombination complete. Results saved to: {args.output_dir}")
+    
+    # Print summary
+    logger.info("\nModel Weights Summary:")
+    for name, weight in combiner.model_weights.items():
+        logger.info(f"  {name}: {weight:.4f}")
+
+
 def create_parser():
     """Create the argument parser with subcommands."""
     parser = argparse.ArgumentParser(
@@ -943,6 +1063,103 @@ EXAMPLES:
         help='Skip generating markdown report'
     )
     parser_compare.set_defaults(func=compare_command)
+    
+    # ============ COMBINE COMMAND ============
+    parser_combine = subparsers.add_parser(
+        'combine',
+        help='Combine multiple models using BMA or weighted voting',
+        description='Combine model predictions using Bayesian Model Averaging or weighted voting',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+COMBINATION METHODS:
+  - BMA (Bayesian Model Averaging): Data-driven weights based on model evidence
+  - Weighted: Fixed weights specified by user or uniform weights
+  
+BMA ADVANTAGES:
+  - Weights learned from validation data
+  - Accounts for model complexity (Occam's razor)
+  - Provides uncertainty quantification
+  - Principled probabilistic framework
+  
+EXAMPLES:
+  # Combine using BMA with validation data
+  tempest combine --models-dir ./models --method bma --validation-data val.pkl
+  
+  # Combine with custom weights
+  tempest combine --models model1.h5:0.3,model2.h5:0.4,model3.h5:0.3 --method weighted
+  
+  # BMA with BIC approximation
+  tempest combine --models-dir ./models --method bma --use-bic --validation-data val.pkl
+  
+  # Evaluate combination on test data
+  tempest combine --models-dir ./models --method bma --validation-data val.pkl --test-data test.pkl
+  
+  # Combine specific named models
+  tempest combine --models standard:model1.h5,hybrid:model2.h5 --method bma --validation-data val.pkl
+        """
+    )
+    parser_combine.add_argument(
+        '--models-dir',
+        type=str,
+        help='Directory containing models to combine'
+    )
+    parser_combine.add_argument(
+        '--models',
+        type=str,
+        help='Comma-separated list of [name:]path pairs for models to combine'
+    )
+    parser_combine.add_argument(
+        '--method',
+        type=str,
+        choices=['bma', 'weighted'],
+        default='bma',
+        help='Combination method: bma (Bayesian Model Averaging) or weighted (default: bma)'
+    )
+    parser_combine.add_argument(
+        '--validation-data',
+        type=str,
+        help='Validation data for computing BMA weights (required for BMA)'
+    )
+    parser_combine.add_argument(
+        '--test-data',
+        type=str,
+        help='Test data for evaluating combination (optional)'
+    )
+    parser_combine.add_argument(
+        '--weights',
+        type=str,
+        help='Custom weights for weighted method (format: name1:weight1,name2:weight2)'
+    )
+    parser_combine.add_argument(
+        '--prior-type',
+        type=str,
+        choices=['uniform', 'performance', 'complexity'],
+        default='uniform',
+        help='Prior type for BMA: uniform, performance-based, or complexity-based (default: uniform)'
+    )
+    parser_combine.add_argument(
+        '--temperature',
+        type=float,
+        default=1.0,
+        help='Temperature for BMA posterior scaling (default: 1.0)'
+    )
+    parser_combine.add_argument(
+        '--use-bic',
+        action='store_true',
+        help='Use BIC approximation for BMA instead of full marginal likelihood'
+    )
+    parser_combine.add_argument(
+        '--no-complexity-penalty',
+        action='store_true',
+        help='Disable complexity penalties in BMA'
+    )
+    parser_combine.add_argument(
+        '--output-dir', '-o',
+        type=str,
+        default='./combine_results',
+        help='Output directory for combination results (default: ./combine_results)'
+    )
+    parser_combine.set_defaults(func=combine_command)
     
     return parser
 

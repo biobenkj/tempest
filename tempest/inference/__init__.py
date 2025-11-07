@@ -23,6 +23,12 @@ from .inference_utils import (
     batch_process_fasta
 )
 
+# Import combination module
+from .combine import (
+    ModelCombiner,
+    CombineConfig
+)
+
 # Import visualization components (with graceful fallback)
 _HAS_VISUALIZATION = False
 TempestInferenceVisualizer = None
@@ -105,6 +111,10 @@ __all__ = [
     'encode_sequences',
     'decode_sequences',
     'batch_process_fasta',
+    
+    # Combination module
+    'ModelCombiner',
+    'CombineConfig',
     
     # Classes
     'SequencePredictor',
