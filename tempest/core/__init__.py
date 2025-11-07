@@ -34,6 +34,11 @@ from .pwm import (
     compute_pwm_from_sequences
 )
 
+from .pwm_probabilistic import (
+    ProbabilisticPWMGenerator,
+    create_acc_pwm_from_pattern
+)
+
 __all__ = [
     'build_cnn_bilstm_crf',
     'build_model_with_length_constraints', 
@@ -48,5 +53,7 @@ __all__ = [
     'create_hybrid_model',
     'PWMScorer',
     'generate_acc_from_pwm',
-    'compute_pwm_from_sequences'
+    'compute_pwm_from_sequences',
+    'ProbabilisticPWMGenerator',
+    'create_acc_pwm_from_pattern'
 ]

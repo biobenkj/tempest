@@ -10,8 +10,10 @@ from .simulator import (
     TranscriptPool,
     PolyATailGenerator,
     WhitelistManager,
+    ErrorSimulator,
     reads_to_arrays,
-    create_simulator_from_config
+    create_simulator_from_config,
+    demonstrate_probabilistic_generation
 )
 
 from .invalid_generator import (
@@ -24,7 +26,9 @@ __all__ = [
     'TranscriptPool',
     'PolyATailGenerator',
     'WhitelistManager',
+    'ErrorSimulator',
     'reads_to_arrays',
     'create_simulator_from_config',
+    'demonstrate_probabilistic_generation',
     'InvalidReadGenerator'
 ]

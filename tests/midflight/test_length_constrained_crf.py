@@ -19,7 +19,10 @@ from pathlib import Path
 
 # Add tempest package to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.absolute()))  # tempest root
-sys.path.insert(0, '/home/claude/tempest')
+import os
+import sys
+# Add parent directory to path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 # Import from the tempest package
 from tempest.core.length_crf import (

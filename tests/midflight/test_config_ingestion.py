@@ -17,7 +17,10 @@ from pathlib import Path
 import sys
 
 # Add tempest to path (adjust as needed for your environment)
-sys.path.insert(0, '/home/claude/tempest')
+import os
+import sys
+# Add parent directory to path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from tempest.utils.config import (
     TempestConfig, ModelConfig, SimulationConfig, TrainingConfig,

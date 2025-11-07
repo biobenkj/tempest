@@ -6,6 +6,7 @@ This script supports:
 1. Passing a directory of FASTQ files for pseudo-label training
 2. Flexible input handling (single file or directory)
 3. Configurable batch processing parameters
+4. Probabilistic PWM-based ACC generation
 
 Usage:
     # Train with single FASTQ file for pseudo-labels
@@ -19,6 +20,9 @@ Usage:
                    --unlabeled-dir /path/to/fastq_directory/ \
                    --max-pseudo-per-file 500 \
                    --max-pseudo-total 5000
+    
+    # Train with specific PWM file for ACC generation
+    python main.py --config config.yaml --pwm /path/to/pwm_file.txt
 """
 
 import argparse
@@ -32,9 +36,15 @@ from tensorflow import keras
 # Import Tempest modules
 from tempest.utils.config import load_config, TempestConfig
 from tempest.utils.io import ensure_dir
-from tempest.data.simulator import DataSimulator, SimulatedRead, reads_to_arrays
+from tempest.data.simulator import (
+    SequenceSimulator, 
+    SimulatedRead, 
+    reads_to_arrays,
+    TranscriptPool,
+    PolyATailGenerator,
+    WhitelistManager
+)
 from tempest.data.invalid_generator import InvalidReadGenerator
-from tempest.utils.acc import ACCGenerator
 from tempest.training.hybrid_trainer import (
     HybridTrainer,
     build_model_from_config,
@@ -104,7 +114,7 @@ def parse_unlabeled_input(path_string: str) -> Union[str, Path]:
 
 def prepare_data(config: TempestConfig, pwm_file: Optional[str] = None) -> Tuple:
     """
-    Prepare training and validation data.
+    Prepare training and validation data with probabilistic PWM support.
     
     Args:
         config: Tempest configuration
@@ -117,24 +127,84 @@ def prepare_data(config: TempestConfig, pwm_file: Optional[str] = None) -> Tuple
     logger.info("DATA PREPARATION")
     logger.info("="*80)
     
-    # Initialize ACC generator if PWM provided
-    acc_generator = None
-    if pwm_file and Path(pwm_file).exists():
-        try:
-            acc_generator = ACCGenerator(pwm_file)
-            logger.info(f"Loaded ACC generator from PWM: {pwm_file}")
-        except Exception as e:
-            logger.warning(f"Could not load PWM file: {e}")
+    # Convert TempestConfig to dict for SequenceSimulator
+    config_dict = config.to_dict() if hasattr(config, 'to_dict') else {}
     
-    # Initialize data simulator
-    simulator = DataSimulator(config, acc_generator=acc_generator)
+    # Update PWM configuration if PWM file provided
+    if pwm_file and Path(pwm_file).exists():
+        logger.info(f"Configuring PWM-based ACC generation from: {pwm_file}")
+        
+        # Ensure pwm section exists in config
+        if 'pwm' not in config_dict:
+            config_dict['pwm'] = {}
+        
+        # Set PWM file and parameters
+        config_dict['pwm']['pwm_file'] = pwm_file
+        
+        # Use temperature for diversity control (replaces old threshold approach)
+        if 'temperature' not in config_dict['pwm']:
+            config_dict['pwm']['temperature'] = 1.0  # Default temperature
+        if 'min_entropy' not in config_dict['pwm']:
+            config_dict['pwm']['min_entropy'] = 0.1  # Minimum diversity
+        
+        logger.info(f"PWM temperature: {config_dict['pwm']['temperature']}")
+        logger.info(f"PWM min_entropy: {config_dict['pwm']['min_entropy']}")
+    
+    # Ensure simulation section exists
+    if 'simulation' not in config_dict:
+        config_dict['simulation'] = {}
+    
+    # Set simulation parameters from config
+    sim_config = config_dict['simulation']
+    sim_config['n_train'] = getattr(config.simulation, 'n_train', 10000)
+    sim_config['n_val'] = getattr(config.simulation, 'n_val', 2000)
+    sim_config['random_seed'] = getattr(config.simulation, 'random_seed', 42)
+    
+    # Set sequence architecture if not present
+    if 'sequence_order' not in sim_config:
+        sim_config['sequence_order'] = getattr(
+            config.simulation, 
+            'sequence_order', 
+            ['ADAPTER5', 'UMI', 'ACC', 'BARCODE', 'INSERT', 'ADAPTER3']
+        )
+    
+    # Initialize sequence simulator with probabilistic ACC support
+    simulator = SequenceSimulator(config=config_dict)
+    
+    # Log ACC generator status
+    if simulator.acc_generator:
+        logger.info("Probabilistic ACC generator initialized successfully")
+        if hasattr(simulator.acc_generator, 'temperature'):
+            logger.info(f"  Temperature: {simulator.acc_generator.temperature}")
+        if hasattr(simulator.acc_generator, 'min_entropy'):
+            logger.info(f"  Min entropy: {simulator.acc_generator.min_entropy}")
+    else:
+        logger.info("ACC sequences will be generated randomly or from fixed patterns")
     
     # Generate training data
-    logger.info(f"Generating {config.simulation.n_train} training reads...")
-    train_reads = simulator.generate_reads(config.simulation.n_train)
+    logger.info(f"Generating {sim_config['n_train']} training reads...")
+    train_reads = simulator.generate_batch(
+        n=sim_config['n_train'],
+        diversity_schedule='random',  # Use random diversity for training variety
+        include_quality=False  # Can enable if quality scores needed
+    )
     
-    logger.info(f"Generating {config.simulation.n_val} validation reads...")
-    val_reads = simulator.generate_reads(config.simulation.n_val)
+    logger.info(f"Generating {sim_config['n_val']} validation reads...")
+    val_reads = simulator.generate_batch(
+        n=sim_config['n_val'],
+        diversity_schedule=None,  # Default diversity for validation
+        include_quality=False
+    )
+    
+    # Analyze ACC diversity if ACC sequences present
+    if any('ACC' in read.label_regions for read in train_reads[:100]):
+        logger.info("Analyzing ACC diversity in generated reads...")
+        diversity_metrics = simulator.analyze_acc_diversity(train_reads[:1000])
+        if 'error' not in diversity_metrics:
+            logger.info(f"  Unique ACC sequences: {diversity_metrics.get('unique_sequences', 'N/A')}")
+            logger.info(f"  Uniqueness ratio: {diversity_metrics.get('uniqueness_ratio', 0):.3f}")
+            if 'mean_pwm_score' in diversity_metrics:
+                logger.info(f"  Mean PWM score: {diversity_metrics['mean_pwm_score']:.3f}")
     
     # Convert to arrays
     logger.info("Converting reads to arrays...")
@@ -279,9 +349,9 @@ def train_hybrid(config: TempestConfig, train_reads: List[SimulatedRead],
 
 
 def main():
-    """Main training pipeline with directory support."""
+    """Main training pipeline with directory support and probabilistic PWM."""
     parser = argparse.ArgumentParser(
-        description='Train Tempest sequence annotation model with directory support',
+        description='Train Tempest sequence annotation model with probabilistic ACC generation',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
@@ -298,7 +368,13 @@ def main():
         '--pwm',
         type=str,
         default=None,
-        help='Path to PWM file for ACC generation (overrides config)'
+        help='Path to PWM file for probabilistic ACC generation (overrides config)'
+    )
+    parser.add_argument(
+        '--temperature',
+        type=float,
+        default=None,
+        help='Temperature for PWM diversity (lower=more conservative, higher=more diverse)'
     )
     parser.add_argument(
         '--output-dir',
@@ -348,8 +424,9 @@ def main():
     # Print header
     print("\n" + "="*80)
     print(" "*25 + "TEMPEST TRAINING PIPELINE")
+    print(" "*20 + "with Probabilistic PWM ACC Generation")
     if args.hybrid:
-        print(" "*20 + "(HYBRID ROBUSTNESS MODE WITH DIRECTORY SUPPORT)")
+        print(" "*15 + "(HYBRID ROBUSTNESS MODE WITH DIRECTORY SUPPORT)")
     print("="*80 + "\n")
     
     # Setup GPU
@@ -364,15 +441,21 @@ def main():
         config.training.checkpoint_dir = args.output_dir
         logger.info(f"Output directory overridden to: {args.output_dir}")
     
-    # Determine PWM file
+    # Determine PWM file and temperature
     pwm_file = args.pwm
-    if pwm_file is None and config.pwm and config.pwm.pwm_file:
+    if pwm_file is None and hasattr(config, 'pwm') and hasattr(config.pwm, 'pwm_file'):
         pwm_file = config.pwm.pwm_file
     
     if pwm_file:
         logger.info(f"Using PWM file: {pwm_file}")
+        if args.temperature is not None:
+            logger.info(f"PWM temperature override: {args.temperature}")
+            if not hasattr(config, 'pwm'):
+                config.pwm = type('obj', (object,), {'temperature': args.temperature})()
+            else:
+                config.pwm.temperature = args.temperature
     else:
-        logger.info("No PWM file specified - ACC sequences will be random or from priors")
+        logger.info("No PWM file specified - ACC sequences will be generated randomly or from patterns")
     
     # Handle unlabeled data path
     unlabeled_path = args.unlabeled or args.unlabeled_dir
@@ -394,7 +477,7 @@ def main():
     
     # Run pipeline
     try:
-        # Prepare data
+        # Prepare data with probabilistic PWM support
         X_train, y_train, X_val, y_val, label_to_idx, train_reads, val_reads = prepare_data(config, pwm_file)
         
         # Train based on mode
@@ -419,6 +502,11 @@ def main():
             print(f"  - model_best.h5: Best model based on validation loss")
             print(f"  - model_final.h5 or model_hybrid_final.h5: Final trained model")
             print(f"  - training_history.csv: Training metrics")
+            
+            if args.pwm:
+                print(f"\nProbabilistic ACC generation used PWM from: {args.pwm}")
+                if args.temperature:
+                    print(f"  Temperature: {args.temperature}")
             
             if args.hybrid and unlabeled_path:
                 path_obj = Path(unlabeled_path)
