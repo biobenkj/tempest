@@ -26,7 +26,8 @@ from .inference_utils import (
 # Import combination module
 from .combine import (
     ModelCombiner,
-    CombineConfig
+    BMAConfig,
+    EnsembleConfig
 )
 
 # Import visualization components (with graceful fallback)
@@ -114,7 +115,8 @@ __all__ = [
     
     # Combination module
     'ModelCombiner',
-    'CombineConfig',
+    'BMAConfig',
+    'EnsembleConfig',
     
     # Classes
     'SequencePredictor',
