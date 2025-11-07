@@ -1,10 +1,8 @@
-# Tempest
-
 <p align="left">
   <img src="tempest_logo.png" alt="TEMPEST Logo" width="300">
 </p>
 
-**Modular sequence annotation using length-constrained CRFs with PWM priors and ensemble modeling.**
+**Tempest: long read RNA-seq sequence annotation tool**
 
 Tempest is inspired by Tranquillyzer, designed for annotating biological sequences (e.g., nanopore reads) with structured elements like adapters, UMIs, barcodes, and inserts using deep learning.
 
