@@ -391,8 +391,8 @@ class TempestSystemTest:
             seq_len = 50
             num_states = 5
             
-            # Unary potentials (emission scores)
-            unary = tf.random.normal([batch_size, seq_len, num_states])
+            # Unary potentials (emission scores) - use Variable for gradient tracking
+            unary = tf.Variable(tf.random.normal([batch_size, seq_len, num_states]))
             
             # Transition matrix
             transitions = tf.random.normal([num_states, num_states])
@@ -401,10 +401,6 @@ class TempestSystemTest:
             print_info(f"Transition matrix shape: {transitions.shape}")
             
             self.record_test("CRF tensor creation", True)
-            
-            # Test Viterbi-like operations
-            # Compute forward scores
-            forward = tf.reduce_logsumexp(unary, axis=2)
             
             # Test segment length constraints
             min_length = 3
@@ -420,13 +416,25 @@ class TempestSystemTest:
             print_info(f"Length constraints: min={min_length}, max={max_length}")
             self.record_test("Length constraint masks", True)
             
-            # Test gradient flow
+            # Test gradient flow through CRF operations
             with tf.GradientTape() as tape:
-                tape.watch(unary)
+                # Compute forward scores inside tape context
+                forward = tf.reduce_logsumexp(unary, axis=2)
+                # Compute a loss-like score
                 score = tf.reduce_sum(forward)
             
+            # Compute gradients
             grad = tape.gradient(score, unary)
-            self.record_test("CRF gradient computation", grad is not None)
+            
+            # Check gradient is valid
+            if grad is not None:
+                grad_valid = not tf.reduce_any(tf.math.is_nan(grad))
+                print_info(f"Gradient shape: {grad.shape}")
+                print_info(f"Gradient range: [{tf.reduce_min(grad):.4f}, {tf.reduce_max(grad):.4f}]")
+                self.record_test("CRF gradient computation", grad_valid, 
+                               f"Valid gradients computed")
+            else:
+                self.record_test("CRF gradient computation", False, "Gradient is None")
             
         except Exception as e:
             self.record_test("Length constraints", False, str(e))

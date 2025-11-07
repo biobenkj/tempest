@@ -267,20 +267,24 @@ def test_end_to_end():
     
     print("Running inference on sample sequences...")
     sample_sequences = X_test[:5]
-    predictions = model.predict(sample_sequences, verbose=0)
+    sample_predictions = model.predict(sample_sequences, verbose=0)
     
     print(f"\nInference Results:")
     print(f"  Input shape:  {sample_sequences.shape}")
-    print(f"  Output shape: {predictions.shape}")
+    print(f"  Output shape: {sample_predictions.shape}")
     
-    # Analyze predictions
-    predicted_labels = np.argmax(predictions, axis=-1)
+    # Show sample prediction
+    sample_predicted_labels = np.argmax(sample_predictions, axis=-1)
     
     print("\nSample prediction (first sequence):")
     print(f"  True labels:      {y_test[0][:50]}")
-    print(f"  Predicted labels: {predicted_labels[0][:50]}")
+    print(f"  Predicted labels: {sample_predicted_labels[0][:50]}")
     
-    # Calculate per-label accuracy
+    # Calculate per-label accuracy on full test set
+    print("\nRunning inference on full test set for accuracy calculation...")
+    all_predictions = model.predict(X_test, verbose=0)
+    predicted_labels = np.argmax(all_predictions, axis=-1)
+    
     print("\nPer-segment accuracy:")
     for i, label_name in enumerate(simulator.label_names):
         mask = y_test == i
@@ -297,10 +301,10 @@ def test_end_to_end():
     print(f"  - Data generation: ✓")
     print(f"  - Model building: ✓")
     print(f"  - Training: ✓ (test accuracy: {test_acc:.2%})")
-    print(f"  - Inference: ✓")
+    print(f"  - Inference: ✓ (on {len(X_test)} test sequences)")
     
     if test_acc > 0.5:
-        print(f"\n✓ Model achieved reasonable accuracy ({test_acc:.2%})")
+        print(f"\n✓ Model achieved good accuracy ({test_acc:.2%})")
         print("  System is ready for full training on real data!")
     else:
         print(f"\n⚠ Model accuracy is low ({test_acc:.2%})")
