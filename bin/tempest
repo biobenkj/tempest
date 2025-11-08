@@ -71,7 +71,7 @@ def main():
     """Main entry point that loads and runs the Tempest CLI."""
     # Check for version or help early
     if '--version' in sys.argv:
-        print("Tempest version 2.0.0")
+        print("Tempest version 0.2.0")
         sys.exit(0)
     
     if len(sys.argv) == 1 or (len(sys.argv) == 2 and sys.argv[1] in ['--help', '-h']):

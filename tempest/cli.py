@@ -127,7 +127,7 @@ def evaluate_command(args):
     """
     Evaluate trained models on test data.
     """
-    from tempest.inference.evaluate import ModelEvaluator
+    from tempest.compare.evaluate import ModelEvaluator
     from tempest.utils import load_config
     
     logger.info("="*80)
