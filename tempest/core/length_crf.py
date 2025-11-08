@@ -13,6 +13,25 @@ import tensorflow as tf
 import numpy as np
 from tf2crf import CRF
 from tensorflow_addons.text.crf import crf_log_likelihood
+from typing import Dict, Any
+
+# Import the model builder from main, but re-expose it locally
+try:
+    from tempest.main import build_model as _build_model
+except ImportError:
+    _build_model = None
+
+def build_model(config: Dict[str, Any]) -> tf.keras.Model:
+    """
+    Shim for building a Tempest model within the core.length_crf context.
+
+    This delegates to tempest.main.build_model if available, allowing
+    internal tests (and create_length_constrained_model) to patch or
+    override it directly.
+    """
+    if _build_model is None:
+        raise ImportError("Could not import tempest.main.build_model")
+    return _build_model(config)
 
 
 class LengthConstrainedCRF(CRF):

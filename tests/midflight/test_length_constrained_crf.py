@@ -483,20 +483,21 @@ class TestReproducibility:
 
 class TestConvenienceFunction:
     """Test the convenience function for model creation."""
-    
+
     def test_create_length_constrained_model(self):
         """Test the create_length_constrained_model function."""
         # Mock necessary components
+        mock_base_model = Mock()
+        mock_crf_layer = MockCRF(units=5)
+        mock_base_model.layers = [mock_crf_layer]
+
+        mock_label_binarizer = Mock()
+        mock_label_binarizer.classes_ = ['ADAPTER', 'UMI', 'ACC']
+
+        # Patch the internal builder inside length_crf
         with patch('tempest.core.length_crf.build_model') as mock_build:
-            mock_base_model = Mock()
-            mock_crf_layer = MockCRF(units=5)
-            mock_base_model.layers = [mock_crf_layer]
             mock_build.return_value = mock_base_model
-            
-            mock_label_binarizer = Mock()
-            mock_label_binarizer.classes_ = ['ADAPTER', 'UMI', 'ACC']
-            
-            # Create model using convenience function
+
             model = create_length_constrained_model(
                 model_config={'some': 'config'},
                 label_binarizer=mock_label_binarizer,
@@ -504,7 +505,7 @@ class TestConvenienceFunction:
                 constraint_weight=5.0,
                 constraint_ramp_epochs=10
             )
-            
+
             assert model is not None
             assert isinstance(model, ModelWithLengthConstrainedCRF)
 
