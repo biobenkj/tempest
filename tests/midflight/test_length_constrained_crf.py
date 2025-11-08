@@ -22,8 +22,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.absolute()))  # tempest root
 import os
 import sys
-# Add parent directory to path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 # Import from the tempest package
 from tempest.core.length_crf import (
@@ -33,6 +31,12 @@ from tempest.core.length_crf import (
 )
 from tempest.training.hybrid_trainer import pad_sequences
 
+# small helper
+def pad_pred(preds, model):
+    padded, _ = pad_sequences(np.array(preds),
+                              np.array(preds),
+                              max_length=model.max_seq_len)
+    return tf.convert_to_tensor(padded, dtype=tf.int32)
 
 # Mock CRF class for testing
 class MockCRF(CRF):
@@ -205,16 +209,15 @@ class TestLengthPenaltyComputation:
         
         # Create predictions with correct lengths
         # UMI: 8 positions (correct)
-        predictions = np.array([
+        predictions = tf.constant([
             [1, 1, 1, 1, 1, 1, 1, 1,  # 8 UMI (correct)
              2, 2, 2, 2, 2, 2,         # 6 ACC (correct)
              3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,  # 12 BARCODE (correct, within 10-20)
              0, 0, 0, 0, 0],           # 5 ADAPTER (no constraint)
-        ], dtype=np.int32)
+        ], dtype=tf.int32)
 
         # Pad to model.max_seq_len
-        padded_predictions, _ = pad_sequences(predictions, predictions, max_length=model.max_seq_len)
-        predictions = tf.convert_to_tensor(padded_predictions, dtype=tf.int32)
+        predictions = pad_pred(predictions, model)
 
         penalty = model.compute_length_penalty(predictions)
         
@@ -239,8 +242,7 @@ class TestLengthPenaltyComputation:
         ], dtype=tf.int32)
         
         # Pad to model.max_seq_len
-        padded_predictions, _ = pad_sequences(predictions, predictions, max_length=model.max_seq_len)
-        predictions = tf.constant(padded_predictions, dtype=tf.int32)
+        predictions = pad_pred(predictions, model)
 
         penalty = model.compute_length_penalty(predictions)
         
@@ -260,16 +262,15 @@ class TestLengthPenaltyComputation:
         
         # Create predictions with BARCODE too long
         barcode_positions = [3] * 25  # 25 positions (exceeds max of 20)
-        predictions = np.array([
+        predictions = tf.constant([
             [1, 1, 1, 1, 1, 1, 1, 1] +  # 8 UMI (correct)
             [2, 2, 2, 2, 2, 2] +         # 6 ACC (correct)
             barcode_positions +           # 25 BARCODE (too long, max is 20)
             [0, 0, 0],                    # 3 ADAPTER
-        ], dtype=np.int32)
+        ], dtype=tf.int32)
         
         # Pad to model.max_seq_len
-        padded_predictions, _ = pad_sequences(predictions, predictions, max_length=model.max_seq_len)
-        predictions = tf.convert_to_tensor(padded_predictions, dtype=tf.int32)
+        predictions = pad_pred(predictions, model)
 
         penalty = model.compute_length_penalty(predictions)
         
@@ -302,15 +303,14 @@ class TestSegmentDetection:
         )
         
         # Create simple prediction pattern
-        predictions = np.array([
+        predictions = tf.constant([
             [0, 0, 0, 0, 0,  # ADAPTER
              1, 1, 1, 1, 1, 1, 1, 1,  # UMI
              2, 2, 2, 2, 2, 2, 2],     # ACC
-        ], dtype=np.int32)
+        ], dtype=tf.int32)
         
         # Pad to model.max_seq_len
-        padded_predictions, _ = pad_sequences(predictions, predictions, max_length=model.max_seq_len)
-        predictions = tf.convert_to_tensor(padded_predictions, dtype=tf.int32)
+        predictions = pad_pred(predictions, model)
 
         # Compute segments (this tests the internal segment detection logic)
         penalty = model.compute_length_penalty(predictions)
@@ -330,17 +330,16 @@ class TestSegmentDetection:
         )
         
         # Pattern with multiple UMI segments (non-consecutive)
-        predictions = np.array([
+        predictions = tf.constant([
             [1, 1, 1, 1, 1, 1, 1, 1,  # First UMI segment (8)
              0, 0, 0, 0, 0,            # ADAPTER
              1, 1, 1, 1,               # Second UMI segment (4)
              2, 2, 2, 2, 2, 2,         # ACC
              1, 1, 1],                 # Third UMI segment (3)
-        ], dtype=np.int32)
+        ], dtype=tf.int32)
         
         # Pad to model.max_seq_len
-        padded_predictions, _ = pad_sequences(predictions, predictions, max_length=model.max_seq_len)
-        predictions = tf.convert_to_tensor(padded_predictions, dtype=tf.int32)
+        predictions = pad_pred(predictions, model)
 
         penalty = model.compute_length_penalty(predictions)
         
@@ -399,7 +398,7 @@ class TestVectorizedOperations:
         )
         
         # Create test function
-        @tf.function(jit_compile=True)  # Force XLA compilation
+        @tf.function  # Force XLA compilation
         def test_fn(predictions):
             return model.compute_length_penalty(predictions)
         
@@ -577,6 +576,7 @@ class TestEdgeCases:
         )
         
         predictions = tf.constant([[0, 1, 2, 0, 1, 2]], dtype=tf.int32)
+        predictions = pad_pred(predictions, model)
         penalty = model.compute_length_penalty(predictions)
         
         # Should be zero penalty when no constraints
@@ -604,7 +604,7 @@ class TestEdgeCases:
         predictions = tf.constant([
             [0, 0, 1, 1, 1, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0]  # UMI has 3, should have 5
         ], dtype=tf.int32)
-        
+        predictions = pad_pred(predictions, model)
         penalty = model.compute_length_penalty(predictions)
         assert float(penalty) > 0.0, "Should penalize incorrect UMI length"
     
@@ -630,7 +630,7 @@ class TestEdgeCases:
         predictions = tf.constant([
             [1, 0, 1, 0, 1, 0, 1, 0, 1, 0]  # B appears 5 times but never 3 consecutive
         ], dtype=tf.int32)
-        
+        predictions = pad_pred(predictions, model)
         penalty = model.compute_length_penalty(predictions)
         # Each single B occurrence violates the constraint
         assert float(penalty) > 0.0, "Should penalize non-consecutive B segments"
