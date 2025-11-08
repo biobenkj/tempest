@@ -1,8 +1,8 @@
 """
-Pytest configuration for Tempest tests with GPU support.
+Pytest configuration for Tempest tests with 11-segment architecture support.
 
-This module provides shared fixtures, GPU detection, and configuration
-for all test modules in the Tempest test suite.
+Provides fixtures and configuration for testing the complex read structure:
+p7, i7, RP2, UMI, ACC, cDNA, polyA, CBC, RP1, i5, p5
 """
 
 import pytest
