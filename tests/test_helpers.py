@@ -25,7 +25,7 @@ def mock_missing_imports():
     """
     mocked_components = []
     real_components = []
-    
+
     # The main missing function: load_model_from_checkpoint (needed by demux.py)
     try:
         from tempest.core.models import load_model_from_checkpoint
@@ -34,26 +34,26 @@ def mock_missing_imports():
     except (ImportError, AttributeError):
         logger.info("Mocking MISSING: load_model_from_checkpoint")
         import tempest.core.models as models
-        
+
         def mock_load_model_from_checkpoint(checkpoint_path):
             """Mock function to load model from checkpoint."""
             # Return a mock model with the expected interface
             mock_model = MagicMock()
-            
+
             # Add expected methods
             mock_model.predict = Mock(return_value=np.random.rand(32, 1500, 11))  # 11 labels
             mock_model.evaluate = Mock(return_value={'loss': 0.5, 'accuracy': 0.9})
             mock_model.summary = Mock()
             mock_model.get_config = Mock(return_value={'num_labels': 11})
-            
+
             # Add layers attribute for model inspection
             mock_model.layers = [Mock(name=f'layer_{i}') for i in range(5)]
-            
+
             return mock_model
-        
+
         models.load_model_from_checkpoint = mock_load_model_from_checkpoint
         mocked_components.append('tempest.core.models.load_model_from_checkpoint')
-    
+
     # Check if inference module exists and has needed components
     try:
         from tempest.inference import ModelEvaluator
@@ -64,13 +64,13 @@ def mock_missing_imports():
             import tempest
             if not hasattr(tempest, 'inference'):
                 tempest.inference = type('Module', (), {})()
-            
+
             class MockModelEvaluator:
                 """Mock evaluator for testing."""
                 def __init__(self, model=None, config=None):
                     self.model = model
                     self.config = config
-                    
+
                 def evaluate(self, test_data, test_labels=None):
                     """Mock evaluation."""
                     return {
@@ -85,19 +85,19 @@ def mock_missing_imports():
                             'i5': 0.96, 'p5': 0.99
                         }
                     }
-                
+
                 def predict(self, sequences):
                     """Mock prediction for 11-segment architecture."""
                     batch_size = len(sequences)
                     seq_len = 1500  # Max sequence length
                     num_labels = 11  # 11 segments
                     return np.random.rand(batch_size, seq_len, num_labels)
-                    
+
             tempest.inference.ModelEvaluator = MockModelEvaluator
             mocked_components.append('tempest.inference.ModelEvaluator')
         except Exception as e:
             logger.warning(f"Could not create ModelEvaluator mock: {e}")
-    
+
     # Check for StandardTrainer (might be ModelTrainer in new version)
     try:
         from tempest.training import StandardTrainer
@@ -113,11 +113,11 @@ def mock_missing_imports():
         except:
             logger.info("Mocking MISSING: StandardTrainer")
             import tempest.training
-            
+
             class MockStandardTrainer:
                 def __init__(self, config):
                     self.config = config
-                    
+
                 def build_model(self):
                     """Build a mock 11-label model."""
                     model = tf.keras.Sequential([
@@ -126,7 +126,7 @@ def mock_missing_imports():
                         tf.keras.layers.Dense(11, activation='softmax')
                     ])
                     return model
-                
+
                 def train(self, train_data, val_data, epochs=10):
                     """Mock training."""
                     history = {
@@ -136,31 +136,32 @@ def mock_missing_imports():
                         'val_accuracy': list(np.linspace(0.48, 0.90, epochs))
                     }
                     return history
-            
+
             tempest.training.StandardTrainer = MockStandardTrainer
             mocked_components.append('tempest.training.StandardTrainer')
-    
+
     # Check CLI commands that might not be fully implemented
     cli_commands = ['visualize_command', 'compare_command', 'combine_command']
     for cmd in cli_commands:
         try:
-            from tempest.cli import eval(cmd)
+            cli_module = importlib.import_module('tempest.cli')
+            getattr(cli_module, cmd)
             real_components.append(f'tempest.cli.{cmd}')
         except (ImportError, AttributeError, NameError):
             logger.info(f"Mocking MISSING CLI command: {cmd}")
             import tempest.cli
-            
+
             def mock_command(args):
                 logger.info(f"Mock {cmd} executed with args: {args}")
                 return True
-            
+
             setattr(tempest.cli, cmd, mock_command)
             mocked_components.append(f'tempest.cli.{cmd}')
-    
+
     # Summary
     logger.info(f"\n✓ Using {len(real_components)} real implementations")
     logger.info(f"⚠ Created {len(mocked_components)} mocks for missing components")
-    
+
     return {
         'real': real_components,
         'mocked': mocked_components
@@ -186,7 +187,7 @@ def create_test_config_11_segments():
             'train_split': 0.8,
             'random_seed': 42,
             'sequence_order': [
-                'p7', 'i7', 'RP2', 'UMI', 'ACC', 
+                'p7', 'i7', 'RP2', 'UMI', 'ACC',
                 'cDNA', 'polyA', 'CBC', 'RP1', 'i5', 'p5'
             ],
             'sequences': {
@@ -267,48 +268,48 @@ def generate_mock_11_segment_sequence():
         'i5': 'GCTAGCTA',  # 8bp
         'p5': 'GTGTAGATCTCGGTGGTCGCCGTATCATT'
     }
-    
+
     # Generate random UMI
     import random
     bases = ['A', 'C', 'G', 'T']
     segments['UMI'] = ''.join(random.choices(bases, k=8))
-    
+
     # Concatenate all segments
     full_sequence = ''.join(segments.values())
-    
+
     # Create labels (segment boundaries)
     labels = []
     current_pos = 0
     segment_order = ['p7', 'i7', 'RP2', 'UMI', 'ACC', 'cDNA', 'polyA', 'CBC', 'RP1', 'i5', 'p5']
-    
+
     for i, segment_name in enumerate(segment_order):
         segment_len = len(segments[segment_name])
         labels.extend([i] * segment_len)
         current_pos += segment_len
-    
+
     return full_sequence, labels, segments
 
 
 def get_mock_status():
     """Get status of what's mocked vs real."""
     status = mock_missing_imports()
-    
+
     print("\n" + "="*60)
     print("TEMPEST TEST COMPONENT STATUS")
     print("="*60)
-    
+
     if status['real']:
         print(f"\n✓ Real Implementations ({len(status['real'])} found):")
         for comp in status['real']:
             print(f"  • {comp}")
-    
+
     if status['mocked']:
         print(f"\n⚠ Mocked Components ({len(status['mocked'])} created):")
         for comp in status['mocked']:
             print(f"  • {comp}")
-    
+
     print("\n" + "="*60)
-    
+
     if not status['mocked']:
         print("✅ ALL COMPONENTS FOUND - Using 100% real implementations!")
     elif not status['real']:
@@ -316,9 +317,9 @@ def get_mock_status():
     else:
         real_pct = len(status['real']) / (len(status['real']) + len(status['mocked'])) * 100
         print(f"📊 Using {real_pct:.0f}% real implementations")
-    
+
     print("="*60 + "\n")
-    
+
     return status
 
 
