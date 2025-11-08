@@ -18,7 +18,7 @@ import json
 from datetime import datetime
 
 from tempest.data.simulator import SimulatedRead, reads_to_arrays
-from tempest.utils.config import TempestConfig
+from tempest.config import TempestConfig
 from tempest.utils.io import ensure_dir
 from tempest.training.hybrid_trainer import (
     build_model_from_config,

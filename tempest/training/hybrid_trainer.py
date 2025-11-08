@@ -21,7 +21,7 @@ from tqdm import tqdm
 # Import from proper tempest modules
 from tempest.data.simulator import SimulatedRead, reads_to_arrays
 from tempest.data.invalid_generator import InvalidReadGenerator
-from tempest.utils.config import TempestConfig
+from tempest.config import TempestConfig
 from tempest.utils.io import load_fastq, ensure_dir
 
 logger = logging.getLogger(__name__)
