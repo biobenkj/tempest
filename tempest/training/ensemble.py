@@ -495,20 +495,32 @@ class BMAPredictor:
         """Load ensemble models and metadata."""
         # Load metadata
         metadata_path = self.ensemble_dir / "ensemble_metadata.json"
-        with open(metadata_path, 'r') as f:
+        with open(metadata_path, "r") as f:
             metadata = json.load(f)
-        
-        num_models = metadata['num_models']
-        self.model_weights = metadata['model_weights']
-        self.label_to_idx = metadata['label_to_idx']
-        self.idx_to_label = {str(k): v for k, v in metadata['idx_to_label'].items()}
-        
+
+        num_models = metadata.get("num_models", 1)
+
+        # Gracefully handle missing or empty model_weights
+        if "model_weights" in metadata and metadata["model_weights"]:
+            self.model_weights = np.array(metadata["model_weights"], dtype=np.float32)
+        else:
+            # Default: uniform weights
+            self.model_weights = np.ones(num_models, dtype=np.float32) / num_models
+            logger.warning(
+                "No model_weights found in ensemble metadata — using uniform weights."
+            )
+
+        self.label_to_idx = metadata.get("label_to_idx", {})
+        self.idx_to_label = {
+            str(k): v for k, v in metadata.get("idx_to_label", {}).items()
+        }
+
         # Load models
         for i in range(num_models):
             model_path = self.ensemble_dir / f"ensemble_model_{i}.h5"
             model = keras.models.load_model(str(model_path))
             self.models.append(model)
-        
+
         logger.info(f"Loaded {num_models} models for BMA prediction")
     
     def predict(self, sequences: List[str]) -> Tuple[List[List[str]], np.ndarray]:
@@ -550,7 +562,7 @@ class BMAPredictor:
         for i in range(len(sequences)):
             seq_len = len(sequences[i])
             labels = [self.idx_to_label.get(str(pred_classes[i, j]), 'UNKNOWN') 
-                     for j in range(seq_len)]
+                      for j in range(seq_len)]
             scores = [np.max(weighted_predictions[i, j]) for j in range(seq_len)]
             
             predicted_labels.append(labels)
