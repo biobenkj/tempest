@@ -27,32 +27,31 @@ from tempest.utils.io import load_fastq, ensure_dir
 logger = logging.getLogger(__name__)
 
 
-def pad_sequences(sequences: np.ndarray, labels: np.ndarray, max_length: int) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Pad sequences to max_length.
-    
-    Args:
-        sequences: Input sequences array [batch, seq_len]
-        labels: Label array [batch, seq_len]
-        max_length: Target length for padding
-        
-    Returns:
-        Tuple of padded sequences and labels
-    """
-    num_sequences = sequences.shape[0]
-    current_length = sequences.shape[1]
-    
-    if current_length == max_length:
+ArrayLike = Union[np.ndarray, tf.Tensor]
+
+def pad_sequences(sequences: ArrayLike, labels: ArrayLike, max_length: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Pad sequences and labels to max_length, handling both NumPy and TensorFlow inputs."""
+    # Convert to NumPy if TensorFlow tensors
+    if isinstance(sequences, tf.Tensor):
+        sequences = sequences.numpy()
+    if isinstance(labels, tf.Tensor):
+        labels = labels.numpy()
+
+    # Ensure NumPy-compatible dtypes
+    seq_dtype = getattr(sequences.dtype, "as_numpy_dtype", sequences.dtype)
+    lab_dtype = getattr(labels.dtype, "as_numpy_dtype", labels.dtype)
+
+    n, curr_len = sequences.shape
+    if curr_len == max_length:
         return sequences, labels
-    
-    padded_sequences = np.zeros((num_sequences, max_length), dtype=sequences.dtype)
-    padded_labels = np.zeros((num_sequences, max_length), dtype=labels.dtype)
-    
-    copy_length = min(current_length, max_length)
-    padded_sequences[:, :copy_length] = sequences[:, :copy_length]
-    padded_labels[:, :copy_length] = labels[:, :copy_length]
-    
-    return padded_sequences, padded_labels
+
+    pad_len = min(curr_len, max_length)
+    padded_seq = np.zeros((n, max_length), dtype=seq_dtype)
+    padded_lab = np.zeros((n, max_length), dtype=lab_dtype)
+
+    padded_seq[:, :pad_len] = sequences[:, :pad_len]
+    padded_lab[:, :pad_len] = labels[:, :pad_len]
+    return padded_seq, padded_lab
 
 
 def convert_labels_to_categorical(labels: np.ndarray, num_classes: int) -> np.ndarray:
