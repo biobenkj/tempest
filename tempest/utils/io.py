@@ -12,6 +12,7 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 import json
+import tensorflow as tf
 
 
 def load_pwm(pwm_file: str) -> np.ndarray:
@@ -299,3 +300,63 @@ def get_index_to_base() -> Dict[int, str]:
         Dictionary mapping indices to bases
     """
     return {0: 'A', 1: 'C', 2: 'G', 3: 'T', 4: 'N'}
+
+def load_model_from_checkpoint(checkpoint_dir: str | Path | None, model_name: str | None = None, verbose: bool = True):
+    """
+    Load a Keras model from the latest or specified checkpoint.
+
+    Parameters
+    ----------
+    checkpoint_dir : str, Path, or None
+        Directory containing model checkpoint files. If None or invalid,
+        exits immediately with an informative error.
+    model_name : str, optional
+        Specific checkpoint filename to load (e.g. "model_05_0.1234.h5").
+        If not provided, the most recent checkpoint is loaded.
+    verbose : bool, default=True
+        Whether to print status messages.
+
+    Returns
+    -------
+    model : tf.keras.Model
+        The loaded Keras model instance.
+
+    Raises
+    ------
+    SystemExit
+        If no valid checkpoint directory or model file is found.
+    """
+    if not checkpoint_dir:
+        sys.exit("[ERROR] No checkpoint directory specified — cannot load model.")
+
+    checkpoint_dir = Path(checkpoint_dir)
+    if not checkpoint_dir.exists() or not checkpoint_dir.is_dir():
+        sys.exit(f"[ERROR] Checkpoint directory not found: {checkpoint_dir}")
+
+    checkpoint_files = sorted(
+        checkpoint_dir.glob("model_*.h5"),
+        key=lambda f: f.stat().st_mtime,
+        reverse=True
+    )
+
+    if not checkpoint_files:
+        sys.exit(f"[ERROR] No checkpoint files found in {checkpoint_dir}")
+
+    if model_name:
+        candidate = checkpoint_dir / model_name
+        if not candidate.exists():
+            sys.exit(f"[ERROR] Specified checkpoint not found: {candidate}")
+        checkpoint_path = candidate
+    else:
+        checkpoint_path = checkpoint_files[0]
+
+    if verbose:
+        print(f"[INFO] Loading model from checkpoint: {checkpoint_path}")
+
+    try:
+        model = tf.keras.models.load_model(checkpoint_path, compile=False)
+        if verbose:
+            print(f"[INFO] Model loaded successfully from {checkpoint_path.name}")
+        return model
+    except Exception as e:
+        sys.exit(f"[ERROR] Failed to load model from {checkpoint_path}: {e}")

@@ -11,11 +11,20 @@ import os
 import logging
 import numpy as np
 import tensorflow as tf
+import importlib
+import pytest
+from pathlib import Path
 
 # Add tempest to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 logger = logging.getLogger(__name__)
+
+# Import the real model loader for testing
+try:
+    from tempest.utils.io import load_model_from_checkpoint
+except ImportError:
+    load_model_from_checkpoint = None
 
 
 def mock_missing_imports():
@@ -28,8 +37,8 @@ def mock_missing_imports():
 
     # The main missing function: load_model_from_checkpoint (needed by demux.py)
     try:
-        from tempest.core.models import load_model_from_checkpoint
-        real_components.append('tempest.core.models.load_model_from_checkpoint')
+        from tempest.utils.io import load_model_from_checkpoint
+        real_components.append('tempest.utils.io.load_model_from_checkpoint')
         logger.info("Using REAL: load_model_from_checkpoint")
     except (ImportError, AttributeError):
         logger.info("Mocking MISSING: load_model_from_checkpoint")
@@ -106,7 +115,6 @@ def mock_missing_imports():
         # Try ModelTrainer instead
         try:
             from tempest.training import ModelTrainer
-            # Alias it as StandardTrainer for compatibility
             import tempest.training
             tempest.training.StandardTrainer = tempest.training.ModelTrainer
             real_components.append('tempest.training.ModelTrainer (aliased as StandardTrainer)')
@@ -173,7 +181,7 @@ def create_test_config_11_segments():
     config = {
         'model': {
             'max_seq_len': 1500,
-            'num_labels': 11,  # p7, i7, RP2, UMI, ACC, cDNA, polyA, CBC, RP1, i5, p5
+            'num_labels': 11,
             'embedding_dim': 128,
             'lstm_units': 256,
             'lstm_layers': 2,
@@ -257,27 +265,24 @@ def generate_mock_11_segment_sequence():
     """Generate a mock sequence with 11 segments."""
     segments = {
         'p7': 'CAAGCAGAAGACGGCATACGAGAT',
-        'i7': 'ATCGATCG',  # 8bp
+        'i7': 'ATCGATCG',
         'RP2': 'GTGACTGGAGTTCAGACGTGTGCTCTTCCGATCT',
-        'UMI': 'NNNNNNNN',  # 8bp random
-        'ACC': 'ACCGTG',  # 6bp from PWM
-        'cDNA': 'A' * 500,  # Simplified cDNA
-        'polyA': 'A' * 30,  # PolyA tail
-        'CBC': 'ATCGAT',  # 6bp barcode
+        'UMI': 'NNNNNNNN',
+        'ACC': 'ACCGTG',
+        'cDNA': 'A' * 500,
+        'polyA': 'A' * 30,
+        'CBC': 'ATCGAT',
         'RP1': 'AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT',
-        'i5': 'GCTAGCTA',  # 8bp
+        'i5': 'GCTAGCTA',
         'p5': 'GTGTAGATCTCGGTGGTCGCCGTATCATT'
     }
 
-    # Generate random UMI
     import random
     bases = ['A', 'C', 'G', 'T']
     segments['UMI'] = ''.join(random.choices(bases, k=8))
 
-    # Concatenate all segments
     full_sequence = ''.join(segments.values())
 
-    # Create labels (segment boundaries)
     labels = []
     current_pos = 0
     segment_order = ['p7', 'i7', 'RP2', 'UMI', 'ACC', 'cDNA', 'polyA', 'CBC', 'RP1', 'i5', 'p5']
@@ -293,23 +298,18 @@ def generate_mock_11_segment_sequence():
 def get_mock_status():
     """Get status of what's mocked vs real."""
     status = mock_missing_imports()
-
     print("\n" + "="*60)
     print("TEMPEST TEST COMPONENT STATUS")
     print("="*60)
-
     if status['real']:
         print(f"\n✓ Real Implementations ({len(status['real'])} found):")
         for comp in status['real']:
             print(f"  • {comp}")
-
     if status['mocked']:
         print(f"\n⚠ Mocked Components ({len(status['mocked'])} created):")
         for comp in status['mocked']:
             print(f"  • {comp}")
-
     print("\n" + "="*60)
-
     if not status['mocked']:
         print("✅ ALL COMPONENTS FOUND - Using 100% real implementations!")
     elif not status['real']:
@@ -317,10 +317,46 @@ def get_mock_status():
     else:
         real_pct = len(status['real']) / (len(status['real']) + len(status['mocked'])) * 100
         print(f"📊 Using {real_pct:.0f}% real implementations")
-
     print("="*60 + "\n")
-
     return status
+
+
+# --- New: Tests for load_model_from_checkpoint --- #
+
+def test_load_valid_checkpoint(tmp_path):
+    """Ensure that a valid checkpoint file can be loaded."""
+    if load_model_from_checkpoint is None:
+        pytest.skip("load_model_from_checkpoint not available")
+    model = tf.keras.Sequential([tf.keras.layers.Dense(1, input_shape=(1,))])
+    ckpt_path = tmp_path / "model_01_0.1234.h5"
+    model.save(ckpt_path)
+    loaded_model = load_model_from_checkpoint(tmp_path)
+    assert isinstance(loaded_model, tf.keras.Model)
+
+
+def test_missing_checkpoint(tmp_path):
+    """Verify that missing checkpoints trigger SystemExit."""
+    if load_model_from_checkpoint is None:
+        pytest.skip("load_model_from_checkpoint not available")
+    with pytest.raises(SystemExit):
+        load_model_from_checkpoint(tmp_path)
+
+
+def test_none_checkpoint_dir():
+    """Verify that None as checkpoint_dir triggers immediate SystemExit."""
+    if load_model_from_checkpoint is None:
+        pytest.skip("load_model_from_checkpoint not available")
+    with pytest.raises(SystemExit):
+        load_model_from_checkpoint(None)
+
+
+def test_nonexistent_checkpoint_dir(tmp_path):
+    """Verify that non-existent directories fail fast."""
+    if load_model_from_checkpoint is None:
+        pytest.skip("load_model_from_checkpoint not available")
+    bad_dir = tmp_path / "not_a_dir"
+    with pytest.raises(SystemExit):
+        load_model_from_checkpoint(bad_dir)
 
 
 # Auto-mock on import

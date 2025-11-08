@@ -22,9 +22,8 @@ from tqdm import tqdm
 import Levenshtein
 
 # Import Tempest modules
-from tempest.utils import load_config, ensure_dir
-from tempest.utils.io import load_barcodes
-from tempest.core.models import load_model_from_checkpoint
+from tempest.config import load_config
+from tempest.utils.io import load_barcodes, load_model_from_checkpoint, ensure_dir
 
 logger = logging.getLogger(__name__)
 
