@@ -13,6 +13,7 @@ Tests cover:
 import pytest
 import numpy as np
 import tensorflow as tf
+from tf2crf import CRF
 from unittest.mock import Mock, MagicMock, patch
 import sys
 from pathlib import Path
@@ -30,13 +31,15 @@ from tempest.core.length_crf import (
     create_length_constrained_model,
     LengthConstrainedCRF
 )
+from tempest.training.hybrid_trainer import pad_sequences
 
 
 # Mock CRF class for testing
-class MockCRF:
-    """Mock CRF layer for testing."""
+class MockCRF(CRF):
+    """Mock CRF layer for testing length-constrained CRF logic."""
     def __init__(self, units=5, **kwargs):
-        self.units = units
+        # Don’t call CRF.__init__ — avoids heavy graph initialization
+        super().__init__(units, **kwargs)
         self.transitions = tf.Variable(
             tf.random.normal([units, units]), trainable=True
         )
@@ -202,13 +205,17 @@ class TestLengthPenaltyComputation:
         
         # Create predictions with correct lengths
         # UMI: 8 positions (correct)
-        predictions = tf.constant([
+        predictions = np.array([
             [1, 1, 1, 1, 1, 1, 1, 1,  # 8 UMI (correct)
              2, 2, 2, 2, 2, 2,         # 6 ACC (correct)
              3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,  # 12 BARCODE (correct, within 10-20)
              0, 0, 0, 0, 0],           # 5 ADAPTER (no constraint)
-        ], dtype=tf.int32)
-        
+        ], dtype=np.int32)
+
+        # Pad to model.max_seq_len
+        padded_predictions, _ = pad_sequences(predictions, predictions, max_length=model.max_seq_len)
+        predictions = tf.convert_to_tensor(padded_predictions, dtype=tf.int32)
+
         penalty = model.compute_length_penalty(predictions)
         
         assert float(penalty) == 0.0, f"Expected no penalty for correct lengths, got {float(penalty)}"
@@ -231,6 +238,10 @@ class TestLengthPenaltyComputation:
              0, 0, 0, 0, 0, 0, 0, 0],  # 8 ADAPTER
         ], dtype=tf.int32)
         
+        # Pad to model.max_seq_len
+        padded_predictions, _ = pad_sequences(predictions, predictions, max_length=model.max_seq_len)
+        predictions = tf.constant(padded_predictions, dtype=tf.int32)
+
         penalty = model.compute_length_penalty(predictions)
         
         # Should have penalty > 0 for violating UMI constraint
@@ -249,13 +260,17 @@ class TestLengthPenaltyComputation:
         
         # Create predictions with BARCODE too long
         barcode_positions = [3] * 25  # 25 positions (exceeds max of 20)
-        predictions = tf.constant([
+        predictions = np.array([
             [1, 1, 1, 1, 1, 1, 1, 1] +  # 8 UMI (correct)
             [2, 2, 2, 2, 2, 2] +         # 6 ACC (correct)
             barcode_positions +           # 25 BARCODE (too long, max is 20)
             [0, 0, 0],                    # 3 ADAPTER
-        ], dtype=tf.int32)
+        ], dtype=np.int32)
         
+        # Pad to model.max_seq_len
+        padded_predictions, _ = pad_sequences(predictions, predictions, max_length=model.max_seq_len)
+        predictions = tf.convert_to_tensor(padded_predictions, dtype=tf.int32)
+
         penalty = model.compute_length_penalty(predictions)
         
         # Should have penalty > 0 for exceeding BARCODE max constraint
@@ -287,12 +302,16 @@ class TestSegmentDetection:
         )
         
         # Create simple prediction pattern
-        predictions = tf.constant([
+        predictions = np.array([
             [0, 0, 0, 0, 0,  # ADAPTER
              1, 1, 1, 1, 1, 1, 1, 1,  # UMI
              2, 2, 2, 2, 2, 2, 2],     # ACC
-        ], dtype=tf.int32)
+        ], dtype=np.int32)
         
+        # Pad to model.max_seq_len
+        padded_predictions, _ = pad_sequences(predictions, predictions, max_length=model.max_seq_len)
+        predictions = tf.convert_to_tensor(padded_predictions, dtype=tf.int32)
+
         # Compute segments (this tests the internal segment detection logic)
         penalty = model.compute_length_penalty(predictions)
         
@@ -311,14 +330,18 @@ class TestSegmentDetection:
         )
         
         # Pattern with multiple UMI segments (non-consecutive)
-        predictions = tf.constant([
+        predictions = np.array([
             [1, 1, 1, 1, 1, 1, 1, 1,  # First UMI segment (8)
              0, 0, 0, 0, 0,            # ADAPTER
              1, 1, 1, 1,               # Second UMI segment (4)
              2, 2, 2, 2, 2, 2,         # ACC
              1, 1, 1],                 # Third UMI segment (3)
-        ], dtype=tf.int32)
+        ], dtype=np.int32)
         
+        # Pad to model.max_seq_len
+        padded_predictions, _ = pad_sequences(predictions, predictions, max_length=model.max_seq_len)
+        predictions = tf.convert_to_tensor(padded_predictions, dtype=tf.int32)
+
         penalty = model.compute_length_penalty(predictions)
         
         # Should have penalties for the second and third UMI segments

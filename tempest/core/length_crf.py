@@ -212,7 +212,7 @@ class ModelWithLengthConstrainedCRF(tf.keras.Model):
         
         return viterbi_sequence, sequence_length, total_loss, crf_loss, length_penalty, current_weight
     
-    @tf.function(jit_compile=True)
+    @tf.function
     def _compute_length_penalty_vectorized(self, viterbi_sequence, sequence_lengths, weight):
         """
         Vectorized computation of length penalty.
@@ -318,6 +318,31 @@ class ModelWithLengthConstrainedCRF(tf.keras.Model):
         weighted_penalty = weight * mean_penalty
         
         return weighted_penalty
+    
+    def compute_length_penalty(self, predictions, sequence_lengths=None):
+        """
+        Public wrapper for computing length penalties on predicted label sequences.
+
+        Args:
+            predictions: [batch_size, max_seq_len] integer tensor of predicted labels
+            sequence_lengths: optional [batch_size] tensor of actual sequence lengths.
+                          If None, uses full max_seq_len for all.
+
+        Returns:
+            Scalar penalty tensor (weighted mean penalty across batch)
+        """
+        if sequence_lengths is None:
+            sequence_lengths = tf.fill([tf.shape(predictions)[0]], self.max_seq_len)
+
+        # Compute current constraint weight based on epoch ramping
+        weight = self.compute_constraint_weight()
+
+        # Call the vectorized implementation
+        return self._compute_length_penalty_vectorized(
+            viterbi_sequence=predictions,
+            sequence_lengths=sequence_lengths,
+            weight=weight,
+        )
     
     def train_step(self, data):
         """Custom training step with length penalty and constraint ramping."""
@@ -437,7 +462,7 @@ def create_length_constrained_model(base_model, length_constraints,
 
 # Example usage:
 """
-from length_constrained_crf_vectorized import create_length_constrained_model
+from length_crf import create_length_constrained_model
 
 # Define constraints
 length_constraints = {

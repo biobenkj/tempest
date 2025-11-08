@@ -65,8 +65,8 @@ def mock_missing_imports():
 
     # Check if inference module exists and has needed components
     try:
-        from tempest.inference import ModelEvaluator
-        real_components.append('tempest.inference.ModelEvaluator')
+        from tempest.compare import ModelEvaluator
+        real_components.append('tempest.compare.ModelEvaluator')
     except (ImportError, AttributeError):
         logger.info("Mocking MISSING: ModelEvaluator")
         try:
