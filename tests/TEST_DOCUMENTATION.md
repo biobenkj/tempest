@@ -1,8 +1,8 @@
-# Tempest Test Suite Documentation
+# Tempest Test Suite Documentation (TensorFlow GPU Support)
 
 ## Overview
 
-This document describes the comprehensive pytest test suite for Tempest, including GPU-accelerated testing capabilities for all subcommands. The test suite is designed to ensure reliability, performance, and correctness across all Tempest functionality.
+This document describes the comprehensive pytest test suite for Tempest, featuring TensorFlow-based GPU acceleration for all subcommands. The test suite is designed to ensure reliability, performance, and correctness across all Tempest functionality using TensorFlow as the sole deep learning framework.
 
 ## Test Structure
 
@@ -32,9 +32,21 @@ tests/
 
 ### GPU Requirements
 - NVIDIA GPU with CUDA support (optional but recommended)
-- CUDA 12.2+ and cuDNN 8.9+
+- CUDA 12.2+ and cuDNN 8.9+ 
 - Minimum 4GB GPU memory for full test suite
-- TensorFlow GPU drivers properly installed
+- TensorFlow 2.15.1+ with GPU support
+- NVIDIA drivers compatible with TensorFlow GPU requirements
+
+To install TensorFlow with GPU support:
+```bash
+pip install tensorflow[and-cuda]
+```
+
+To verify TensorFlow GPU installation:
+```python
+import tensorflow as tf
+print("GPUs Available: ", tf.config.list_physical_devices('GPU'))
+```
 
 ## Running Tests
 
@@ -196,19 +208,27 @@ pytest -q   # Quiet
 ## GPU Testing Details
 
 ### GPU Detection
-The test suite automatically detects available GPUs using both TensorFlow and PyTorch backends. GPU information is logged at the start of test runs.
+The test suite automatically detects available GPUs using TensorFlow. GPU information is logged at the start of test runs, including device names and available memory.
 
 ### GPU Memory Management
 Tests monitor GPU memory usage to ensure efficient resource utilization:
-- Memory growth is enabled by default
+- Memory growth is enabled by default to prevent TensorFlow from allocating all GPU memory
 - Tests verify memory usage stays within reasonable limits
 - Memory monitoring fixtures track usage per test
+- Virtual device configuration can limit memory per test
 
 ### GPU Test Markers
 Tests requiring GPU are marked with `@pytest.mark.gpu` and will be skipped if no GPU is available.
 
 ### Multi-GPU Testing
-If multiple GPUs are available, specific tests will utilize multi-GPU strategies for distributed training and inference.
+If multiple GPUs are available, specific tests will utilize TensorFlow's MirroredStrategy for distributed training and inference.
+
+### TensorFlow GPU Configuration
+The test suite configures TensorFlow GPU settings automatically:
+- Memory growth enabled to allocate GPU memory as needed
+- Optional memory limits per test to prevent OOM errors
+- Device placement logging for debugging
+- Automatic fallback to CPU when GPU unavailable
 
 ## Test Fixtures
 

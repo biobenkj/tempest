@@ -13,7 +13,6 @@ import tempfile
 from pathlib import Path
 import yaml
 import tensorflow as tf
-import torch
 import numpy as np
 import warnings
 from typing import Dict, Any, Optional
@@ -31,16 +30,16 @@ logger = logging.getLogger(__name__)
 
 # GPU Configuration and Detection
 class GPUConfig:
-    """GPU configuration and detection utilities."""
+    """GPU configuration and detection utilities for TensorFlow."""
     
     @staticmethod
     def detect_gpus():
-        """Detect available GPUs using both TensorFlow and PyTorch."""
+        """Detect available GPUs using TensorFlow."""
         gpu_info = {
             'available': False,
             'count': 0,
             'devices': [],
-            'framework': None,
+            'framework': 'tensorflow',
             'memory_info': []
         }
         
@@ -50,44 +49,30 @@ class GPUConfig:
             if tf_gpus:
                 gpu_info['available'] = True
                 gpu_info['count'] = len(tf_gpus)
-                gpu_info['framework'] = 'tensorflow'
                 
                 for gpu in tf_gpus:
-                    gpu_info['devices'].append({
+                    gpu_details = {
                         'name': gpu.name,
-                        'device_type': 'GPU',
-                        'framework': 'tensorflow'
-                    })
+                        'device_type': gpu.device_type
+                    }
                     
-                    # Get memory info if possible
+                    # Get detailed GPU info if available
                     try:
-                        memory_info = tf.config.experimental.get_memory_info(gpu)
+                        # Try to get memory info
+                        memory_info = tf.config.experimental.get_memory_info(gpu.name)
+                        gpu_details['memory'] = memory_info
                         gpu_info['memory_info'].append(memory_info)
-                    except:
+                    except Exception:
+                        # Memory info might not be available in all configurations
                         pass
+                    
+                    gpu_info['devices'].append(gpu_details)
+                    
+                logger.info(f"Detected {len(tf_gpus)} TensorFlow GPU(s)")
+            else:
+                logger.info("No GPUs detected by TensorFlow")
         except Exception as e:
             logger.warning(f"TensorFlow GPU detection failed: {e}")
-        
-        # Check PyTorch GPUs (if needed for certain components)
-        try:
-            if torch.cuda.is_available():
-                gpu_info['available'] = True
-                cuda_count = torch.cuda.device_count()
-                if cuda_count > gpu_info['count']:
-                    gpu_info['count'] = cuda_count
-                
-                for i in range(cuda_count):
-                    props = torch.cuda.get_device_properties(i)
-                    gpu_info['devices'].append({
-                        'name': props.name,
-                        'device_type': 'CUDA',
-                        'framework': 'pytorch',
-                        'total_memory': props.total_memory,
-                        'major': props.major,
-                        'minor': props.minor
-                    })
-        except Exception as e:
-            logger.warning(f"PyTorch GPU detection failed: {e}")
         
         return gpu_info
     
@@ -113,6 +98,25 @@ class GPUConfig:
                 logger.error(f"GPU configuration failed: {e}")
                 return False
         return False
+    
+    @staticmethod
+    def get_gpu_memory_usage():
+        """Get current GPU memory usage from TensorFlow."""
+        gpus = tf.config.list_physical_devices('GPU')
+        if gpus:
+            memory_info = []
+            for gpu in gpus:
+                try:
+                    info = tf.config.experimental.get_memory_info(gpu.name)
+                    memory_info.append({
+                        'device': gpu.name,
+                        'current': info.get('current', 0),
+                        'peak': info.get('peak', 0)
+                    })
+                except Exception:
+                    pass
+            return memory_info
+        return []
 
 
 # Pytest Fixtures
@@ -254,42 +258,77 @@ def mock_model_path(temp_dir):
 
 @pytest.fixture
 def gpu_memory_monitor():
-    """Monitor GPU memory usage during tests."""
+    """Monitor GPU memory usage during tests using TensorFlow."""
     class GPUMemoryMonitor:
         def __init__(self):
             self.initial_memory = None
             self.peak_memory = None
+            self.gpus = tf.config.list_physical_devices('GPU')
             
         def start(self):
             """Start monitoring GPU memory."""
-            if tf.config.list_physical_devices('GPU'):
+            if self.gpus:
                 try:
                     # Force garbage collection
                     import gc
                     gc.collect()
                     
-                    # Get initial memory usage
-                    gpu = tf.config.list_physical_devices('GPU')[0]
-                    self.initial_memory = tf.config.experimental.get_memory_info(gpu)
-                except:
-                    pass
+                    # Clear TensorFlow session
+                    tf.keras.backend.clear_session()
+                    
+                    # Get initial memory usage for all GPUs
+                    self.initial_memory = {}
+                    for gpu in self.gpus:
+                        try:
+                            memory_info = tf.config.experimental.get_memory_info(gpu.name)
+                            self.initial_memory[gpu.name] = memory_info
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.warning(f"Could not start memory monitoring: {e}")
         
         def stop(self):
             """Stop monitoring and return memory usage."""
-            if tf.config.list_physical_devices('GPU'):
+            if self.gpus and self.initial_memory:
                 try:
-                    gpu = tf.config.list_physical_devices('GPU')[0]
-                    final_memory = tf.config.experimental.get_memory_info(gpu)
+                    memory_stats = []
                     
-                    if self.initial_memory and final_memory:
-                        memory_used = final_memory['current'] - self.initial_memory['current']
+                    for gpu in self.gpus:
+                        if gpu.name in self.initial_memory:
+                            try:
+                                final_memory = tf.config.experimental.get_memory_info(gpu.name)
+                                initial = self.initial_memory[gpu.name]
+                                
+                                memory_used = final_memory.get('current', 0) - initial.get('current', 0)
+                                peak = final_memory.get('peak', 0)
+                                
+                                stats = {
+                                    'device': gpu.name,
+                                    'memory_used_bytes': memory_used,
+                                    'memory_used_mb': memory_used / (1024 * 1024),
+                                    'peak_memory_bytes': peak,
+                                    'peak_memory_mb': peak / (1024 * 1024)
+                                }
+                                memory_stats.append(stats)
+                            except Exception:
+                                pass
+                    
+                    # Return aggregated stats if multiple GPUs
+                    if memory_stats:
+                        total_used = sum(s['memory_used_bytes'] for s in memory_stats)
+                        max_peak = max(s['peak_memory_bytes'] for s in memory_stats)
+                        
                         return {
-                            'memory_used_bytes': memory_used,
-                            'memory_used_mb': memory_used / (1024 * 1024),
-                            'peak_memory': final_memory.get('peak', None)
+                            'devices': memory_stats,
+                            'total_memory_used_bytes': total_used,
+                            'total_memory_used_mb': total_used / (1024 * 1024),
+                            'max_peak_memory_bytes': max_peak,
+                            'max_peak_memory_mb': max_peak / (1024 * 1024),
+                            'num_gpus': len(memory_stats)
                         }
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Could not get final memory stats: {e}")
+            
             return None
     
     return GPUMemoryMonitor()

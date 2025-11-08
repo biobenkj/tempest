@@ -38,18 +38,32 @@ class TestRunner:
         self.results_dir.mkdir(exist_ok=True)
         
     def check_gpu_availability(self):
-        """Check if GPU is available for testing."""
+        """Check if GPU is available for testing using TensorFlow."""
         try:
             import tensorflow as tf
             gpus = tf.config.list_physical_devices('GPU')
             if gpus:
-                logger.info(f"Found {len(gpus)} GPU(s) available for testing")
+                logger.info(f"Found {len(gpus)} TensorFlow GPU(s) available for testing")
                 for gpu in gpus:
-                    logger.info(f"  - {gpu.name}")
+                    logger.info(f"  - {gpu.name} ({gpu.device_type})")
+                    
+                    # Try to get memory info
+                    try:
+                        memory_info = tf.config.experimental.get_memory_info(gpu.name)
+                        if memory_info:
+                            current_mb = memory_info.get('current', 0) / (1024 * 1024)
+                            peak_mb = memory_info.get('peak', 0) / (1024 * 1024)
+                            logger.info(f"    Memory - Current: {current_mb:.1f} MB, Peak: {peak_mb:.1f} MB")
+                    except:
+                        pass
+                        
                 return True
             else:
                 logger.warning("No GPUs found. GPU tests will be skipped.")
                 return False
+        except ImportError:
+            logger.error("TensorFlow not installed. Cannot check GPU availability.")
+            return False
         except Exception as e:
             logger.error(f"Error checking GPU availability: {e}")
             return False
