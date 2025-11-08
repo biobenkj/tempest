@@ -1,415 +1,502 @@
 #!/usr/bin/env python3
 """
-Standalone Tempest CLI - completely outside the package to avoid __init__.py loading.
-This file should be installed as 'tempest' in the bin directory.
+Standalone Tempest CLI - UPDATED VERSION
+Complete command-line interface with all configuration options exposed.
 """
 
 import sys
 import os
 
 
-# Define subcommand help texts
+# Define subcommand help texts with all new options
 SUBCOMMAND_HELP = {
     'simulate': """usage: tempest simulate [options]
 
-Generate synthetic sequence data for testing and training
+Generate synthetic sequence data with advanced features
 
-OPTIONS:
-  --config CONFIG             Path to configuration YAML file (required)
-  --output OUTPUT             Output directory for generated data
-                             (default: tempest_simulated_data)
-  --num-sequences N          Number of sequences to generate (default: 1000)
-  --split                    Create train/validation split (80/20)
-  --train-ratio RATIO        Training data ratio when splitting (default: 0.8)
-  --seed SEED                Random seed for reproducibility
-  --whitelists               Generate whitelists for allowed state sequences
-  --pwm PWM_FILE             Include PWM file for motif generation
-  --noise-level LEVEL        Add noise to sequences (0.0-1.0, default: 0.0)
-  --variable-length          Generate sequences with variable lengths
-  --min-length N             Minimum sequence length (default: 100)
-  --max-length N             Maximum sequence length (default: 500)
-  
+REQUIRED OPTIONS:
+  --config CONFIG           Path to configuration YAML file (required)
+
+OUTPUT OPTIONS:
+  --output OUTPUT           Output file for single dataset
+  --output-dir DIR          Output directory for split datasets
+  --split                   Create train/validation split (80/20)
+  --train-fraction RATIO    Training data ratio when splitting (default: 0.8)
+  --save-stats              Save detailed simulation statistics
+
+GENERATION OPTIONS:
+  --num-sequences N         Number of sequences to generate (overrides config)
+  --seed SEED              Random seed for reproducibility
+  --full-rc-prob PROB      Probability of full read reverse complement (0.0-1.0)
+
+PWM OPTIONS (for ACC generation):
+  --pwm PWM_FILE           PWM file for motif generation
+  --pwm-temperature T      Temperature for probabilistic sampling (default: 1.2)
+                          Lower = more conservative, Higher = more diverse
+  --pwm-min-entropy E      Minimum entropy at each position (default: 0.1)
+
+WHITELIST OPTIONS:
+  --whitelist-i7 FILE      Whitelist file for i7 indices
+  --whitelist-i5 FILE      Whitelist file for i5 indices
+  --whitelist-cbc FILE     Whitelist file for cell barcodes
+
+TRANSCRIPT OPTIONS (for cDNA):
+  --transcript-fasta FILE  FASTA file for transcript-based cDNA generation
+  --fragment-mode          Enable transcript fragmentation
+  --fragment-min N         Minimum fragment length (default: 200)
+  --fragment-max N         Maximum fragment length (default: 1000)
+
+ERROR INJECTION:
+  --enable-errors          Enable sequencing error simulation
+  --substitution-rate R    Substitution error rate (default: 0.001)
+  --insertion-rate R       Insertion error rate (default: 0.0001)
+  --deletion-rate R        Deletion error rate (default: 0.0001)
+
 EXAMPLES:
-  # Generate basic training data
-  tempest simulate --config config.yaml --num-sequences 10000
+  # Basic generation with config
+  tempest simulate --config config.yaml --num-sequences 10000 --output reads.txt
   
   # Generate with train/validation split
-  tempest simulate --config config.yaml --num-sequences 10000 --split
+  tempest simulate --config config.yaml --num-sequences 10000 --split --output-dir data/
   
-  # Generate with PWM motifs and noise
-  tempest simulate --config config.yaml --pwm acc_pwm.txt --noise-level 0.1
+  # Generate with probabilistic PWM
+  tempest simulate --config config.yaml --pwm acc_pwm.txt --pwm-temperature 1.5
   
-  # Generate variable length sequences
-  tempest simulate --config config.yaml --variable-length --min-length 50 --max-length 300
+  # Generate with transcripts and errors
+  tempest simulate --config config.yaml --transcript-fasta gencode.fa.gz \\
+                   --fragment-mode --enable-errors --substitution-rate 0.002
+  
+  # Generate with whitelists
+  tempest simulate --config config.yaml --whitelist-i7 i7_indices.txt \\
+                   --whitelist-i5 i5_indices.txt --whitelist-cbc barcodes.txt
 """,
     
     'train': """usage: tempest train [options]
 
-Train a Tempest model using length-constrained CRFs
+Train Tempest models with standard, hybrid, or ensemble approaches
 
-OPTIONS:
-  --config CONFIG            Path to configuration YAML file (required)
-  --train-data DIR          Training data directory
-                            (default: tempest_simulated_data/train)
-  --val-data DIR            Validation data directory
-                            (default: tempest_simulated_data/val)
-  --output-dir DIR          Output directory for models and logs
-                            (default: tempest_training_output)
-  --epochs N                Number of training epochs (default: 100)
-  --batch-size N            Batch size for training (default: 32)
-  --learning-rate LR        Initial learning rate (default: 0.001)
-  --optimizer OPT           Optimizer: adam, sgd, rmsprop (default: adam)
+REQUIRED OPTIONS:
+  --config CONFIG          Path to configuration YAML file (required)
+
+MODEL ARCHITECTURE:
+  --max-seq-len N          Maximum sequence length (default: from config)
+  --embedding-dim N        Embedding dimension (default: 128)
+  --lstm-units N           Number of LSTM units (default: 256)
+  --lstm-layers N          Number of LSTM layers (default: 2)
+  --dropout RATE           Dropout rate (default: 0.3)
+  --use-cnn                Add CNN layers before LSTM
+  --use-bilstm             Use bidirectional LSTM
+
+TRAINING PARAMETERS:
+  --epochs N               Number of training epochs (default: 50)
+  --batch-size N           Batch size (default: 32)
+  --learning-rate LR       Initial learning rate (default: 0.001)
+  --optimizer OPT          Optimizer: adam, sgd, rmsprop (default: adam)
+  --use-class-weights      Compute and use class weights for imbalanced data
+
+HYBRID TRAINING MODE:
+  --hybrid                 Enable hybrid training with constraints
   
-  # Model architecture options
-  --hidden-units N          Number of hidden units (default: 256)
-  --num-layers N            Number of RNN layers (default: 2)
-  --dropout RATE            Dropout rate (default: 0.2)
-  --l2-reg LAMBDA          L2 regularization strength (default: 0.01)
+  Constrained Decoding:
+  --constrained-decoding   Enable constrained decoding during training
+  --decoding-method M      Method: beam_search, viterbi, greedy (default: beam_search)
+  --beam-width N           Beam width for beam search (default: 5)
   
-  # Hybrid training options
-  --hybrid                  Enable hybrid training mode
-  --pwm PWM_FILE           PWM file for hybrid constraints
-  --unlabeled PATH         Path to unlabeled FASTQ file or directory for pseudo-labeling
-  --unlabeled-dir DIR      Directory containing FASTQ files for pseudo-labeling
-  --max-pseudo-per-file N  Max pseudo-labels per FASTQ file (default: 1000)
-  --max-pseudo-total N     Max total pseudo-labels across all files (default: 10000)
-  --confidence-threshold T  Min confidence for pseudo-labels (default: 0.85)
-  --constraint-weight W     Weight for constraint loss (default: 1.0)
-  --hard-constraints        Use hard constraints instead of soft
-  --temperature T           Temperature for soft constraints (default: 1.0)
+  Constraints:
+  --enforce-length-constraints      Enforce segment length constraints
+  --enforce-whitelist-constraints   Enforce whitelist constraints for i7/i5/CBC
   
-  # Checkpoint and monitoring
-  --checkpoint-freq N       Save checkpoint every N epochs (default: 10)
-  --early-stopping          Enable early stopping
-  --patience N              Early stopping patience (default: 10)
-  --tensorboard             Enable TensorBoard logging
-  --wandb                   Enable Weights & Biases logging
-  --wandb-project NAME      W&B project name
+  PWM Constraints:
+  --pwm PWM_FILE                   PWM file for ACC constraints
+  --use-probabilistic-pwm          Use probabilistic scoring (recommended)
+  --pwm-scoring-method M           Scoring: log_likelihood, geometric_mean, min_probability
+  --pwm-min-score S                Minimum score threshold (default: -10.0)
+  --pwm-score-weight W             Weight in loss function (default: 0.5)
+
+ENSEMBLE TRAINING:
+  --ensemble                       Train ensemble of models
+  --num-models N                   Number of models (default: 3)
+  --ensemble-voting-method M       Method: bayesian_model_averaging, weighted_average, voting
   
-  # Performance options
-  --mixed-precision         Enable mixed precision training
-  --num-workers N           Number of data loading workers (default: 4)
-  --prefetch N              Number of batches to prefetch (default: 2)
+  BMA Configuration:
+  --bma-prior-type T               Prior: uniform, informative, adaptive
+  --bma-approximation A            Approximation: bic, laplace, variational, cross_validation
+  --bma-temperature T              Temperature for posterior scaling (default: 1.0)
   
+  Model Diversity:
+  --enforce-diversity              Enforce diversity across ensemble models
+  --diversity-metric M             Metric: disagreement, correlation, kl_divergence
+  --vary-architecture              Vary architecture parameters across models
+  --vary-initialization            Use different random seeds for initialization
+  
+  Calibration:
+  --enable-calibration             Calibrate ensemble predictions
+  --calibration-method M           Method: isotonic, platt, temperature_scaling, beta
+
+PSEUDO-LABELING (for hybrid):
+  --unlabeled FILE                 Single unlabeled FASTQ file
+  --unlabeled-dir DIR              Directory of unlabeled FASTQ files
+  --max-pseudo-per-file N          Max pseudo-labels per file (default: 1000)
+  --max-pseudo-total N             Max total pseudo-labels (default: 10000)
+
+CHECKPOINTING & MONITORING:
+  --checkpoint-dir DIR             Save model checkpoints
+  --save-best-only                 Only save best model checkpoint
+  --early-stopping                 Enable early stopping
+  --patience N                     Early stopping patience (default: 10)
+  --tensorboard                    Enable TensorBoard logging
+  --log-dir DIR                    TensorBoard log directory
+
+OUTPUT:
+  --output-dir DIR                 Output directory for all artifacts
+
 EXAMPLES:
-  # Basic training
-  tempest train --config config.yaml --epochs 100
+  # Standard CRF training
+  tempest train --config config.yaml --epochs 100 --use-bilstm
   
   # Hybrid training with PWM constraints
-  tempest train --config config.yaml --hybrid --pwm acc_pwm.txt
+  tempest train --config config.yaml --hybrid --pwm acc_pwm.txt \\
+                --use-probabilistic-pwm --pwm-scoring-method log_likelihood
   
-  # Hybrid training with single unlabeled FASTQ file
-  tempest train --config config.yaml --hybrid --unlabeled unlabeled.fastq
+  # Hybrid with pseudo-labeling from directory
+  tempest train --config config.yaml --hybrid \\
+                --unlabeled-dir /data/fastq_files/ \\
+                --max-pseudo-per-file 500 --max-pseudo-total 5000
   
-  # Hybrid training with directory of FASTQ files
-  tempest train --config config.yaml --hybrid --unlabeled-dir /data/fastq_files/
+  # Ensemble with BMA
+  tempest train --config config.yaml --ensemble --num-models 5 \\
+                --ensemble-voting-method bayesian_model_averaging \\
+                --bma-approximation laplace --enable-calibration
   
-  # Hybrid training with directory and custom limits
-  tempest train --config config.yaml --hybrid \
-                --unlabeled-dir /data/fastq_files/ \
-                --max-pseudo-per-file 500 \
-                --max-pseudo-total 5000
-  
-  # Training with early stopping and checkpointing
-  tempest train --config config.yaml --early-stopping --patience 15 --checkpoint-freq 5
-  
-  # Advanced training with custom architecture
-  tempest train --config config.yaml --hidden-units 512 --num-layers 3 --dropout 0.3
+  # Ensemble with diversity
+  tempest train --config config.yaml --ensemble --num-models 3 \\
+                --enforce-diversity --vary-architecture --vary-initialization
 """,
     
     'evaluate': """usage: tempest evaluate [options]
 
-Evaluate a trained Tempest model on test data
+Comprehensive model evaluation with multiple metrics
 
-OPTIONS:
-  --model MODEL             Path to trained model file (required)
-                           Accepts: .h5, .keras, or checkpoint directory
-  --test-data DATA         Path to test data file or directory (required)
-  --config CONFIG          Configuration file (optional, uses model config if not specified)
-  --output-dir DIR         Output directory for results
-                           (default: tempest_evaluation_results)
+REQUIRED OPTIONS:
+  --model MODEL            Path to trained model file (.h5, .keras, or ensemble/)
+  --test-data DATA         Path to test data file (.pkl, .txt, or directory)
+
+OPTIONAL OPTIONS:
+  --config CONFIG          Configuration file (uses model config if not specified)
+  --output-dir DIR         Output directory for results (default: ./evaluation_results)
   --batch-size N           Batch size for evaluation (default: 32)
-  
-  # Evaluation metrics
-  --metrics METRICS        Comma-separated metrics to compute
-                          Options: accuracy, f1, precision, recall, auc, confusion_matrix
-                          (default: all)
-  --per-class              Compute per-class metrics
-  --segment-level          Evaluate at segment level (not token level)
-  
-  # Visualization options  
-  --plot-confusion         Save confusion matrix plot
-  --plot-predictions N     Plot first N prediction examples (default: 10)
+
+EVALUATION METRICS:
+  --per-segment-metrics    Compute metrics for each segment type
+  --confusion-matrix       Generate confusion matrix
+  --boundary-accuracy      Evaluate segment boundary detection accuracy
+  --edit-distance          Compute sequence edit distance metrics
+  --bootstrap N            Bootstrap samples for confidence intervals
+
+ANALYSIS OPTIONS:
   --save-predictions       Save all predictions to file
-  
-  # Analysis options
-  --analyze-lengths        Analyze prediction lengths vs ground truth
-  --analyze-transitions    Analyze state transition patterns
+  --plot-confusion         Generate confusion matrix visualization
   --error-analysis         Perform detailed error analysis
-  --bootstrap N            Number of bootstrap samples for CI (default: 0)
-  
+  --num-error-samples N    Number of samples for error analysis (default: 100)
+  --acc-evaluation         Perform ACC-specific evaluation (diversity, entropy)
+
 EXAMPLES:
   # Basic evaluation
-  tempest evaluate --model model_final.h5 --test-data test_data/
+  tempest evaluate --model model_final.h5 --test-data test_data.pkl
   
-  # Evaluation with specific metrics
-  tempest evaluate --model model_final.h5 --test-data test.txt --metrics accuracy,f1
+  # Comprehensive evaluation with all metrics
+  tempest evaluate --model ensemble/ --test-data test.pkl \\
+                   --per-segment-metrics --confusion-matrix \\
+                   --boundary-accuracy --edit-distance
   
-  # Full analysis with visualizations
-  tempest evaluate --model checkpoint/ --test-data test/ --plot-confusion --error-analysis
+  # Evaluation with bootstrap confidence intervals
+  tempest evaluate --model model.h5 --test-data test.pkl \\
+                   --bootstrap 1000 --save-predictions
   
-  # Bootstrap confidence intervals
-  tempest evaluate --model model.h5 --test-data test.txt --bootstrap 1000
+  # Error analysis with visualizations
+  tempest evaluate --model model.h5 --test-data test.pkl \\
+                   --error-analysis --plot-confusion --num-error-samples 200
+  
+  # ACC-specific evaluation
+  tempest evaluate --model model.h5 --test-data test.pkl \\
+                   --acc-evaluation --output-dir acc_results/
 """,
     
     'visualize': """usage: tempest visualize [options]
 
-Create visualizations of Tempest results and models
+Create comprehensive visualizations of models and results
 
-OPTIONS:
-  --type TYPE              Visualization type (required)
-                          Options: training, predictions, weights, embeddings, 
-                                  confusion, lengths, transitions, summary
-  --input INPUT            Input file(s) or directory (required)
-  --output OUTPUT          Output file or directory for plots
-                          (default: tempest_visualizations/)
+REQUIRED OPTIONS:
+  --type TYPE              Visualization type (see list below)
+  --input INPUT            Input file or directory
+
+VISUALIZATION TYPES:
+  training                 Training history curves (loss, accuracy)
+  predictions              Sequence predictions with labels
+  attention                Attention weights heatmap
+  embeddings               Embedding space visualization (t-SNE, UMAP, PCA)
+  segment_performance      Per-segment performance metrics
+  length_distribution      Segment length distributions
+  model_comparison         Compare multiple model performances
+  acc_pwm                  ACC PWM heatmap and sequence logo
+
+GENERAL OPTIONS:
+  --output-dir DIR         Output directory (default: ./visualizations)
+  --model MODEL            Model file (required for attention/embeddings)
   --format FORMAT          Output format: png, pdf, svg, html (default: png)
-  --dpi DPI               Resolution for raster formats (default: 300)
+  --dpi DPI                Resolution for raster formats (default: 150)
+  --style STYLE            Plot style: default, paper, presentation
+
+TYPE-SPECIFIC OPTIONS:
+  # For predictions
+  --num-samples N          Number of samples to visualize (default: 10)
+  --show-confidence        Show prediction confidence scores
   
-  # Training visualization options (--type training)
-  --metrics METRICS        Comma-separated metrics to plot
-                          (default: loss,accuracy)
-  --smooth WINDOW         Smoothing window size (default: 1)
-  --log-scale             Use log scale for y-axis
+  # For training curves
+  --smoothing N            Smoothing window size
   
-  # Prediction visualization options (--type predictions)
-  --num-examples N         Number of examples to visualize (default: 10)
-  --show-probabilities     Show prediction probabilities
-  --show-ground-truth      Show ground truth alongside predictions
-  --colormap CMAP         Colormap for state visualization (default: tab10)
+  # For embeddings
+  --embedding-method M     Method: tsne, umap, pca (default: tsne)
   
-  # Weight visualization options (--type weights)
-  --layer LAYER           Specific layer to visualize (default: all)
-  --normalize             Normalize weights for visualization
-  --top-k K               Show only top K weights by magnitude
-  
-  # Embedding visualization options (--type embeddings)  
-  --method METHOD         Reduction method: tsne, umap, pca (default: tsne)
-  --perplexity P          t-SNE perplexity (default: 30)
-  --n-neighbors N         UMAP n_neighbors (default: 15)
-  --labels                Color points by labels
-  
-  # Summary statistics (--type summary)
-  --compare FILES         Compare multiple result files
-  --statistical-tests     Run statistical significance tests
-  
+  # For ACC PWM
+  --pwm-file FILE          PWM file for visualization
+
 EXAMPLES:
   # Visualize training history
-  tempest visualize --type training --input training_history.csv --output curves.png
+  tempest visualize --type training --input history.json \\
+                    --smoothing 5 --format pdf
   
-  # Visualize predictions
-  tempest visualize --type predictions --input predictions.pkl --num-examples 20
+  # Visualize predictions with confidence
+  tempest visualize --type predictions --input predictions.pkl \\
+                    --num-samples 20 --show-confidence
   
-  # Create confusion matrix
-  tempest visualize --type confusion --input eval_results.json --output confusion.pdf
+  # Visualize attention weights
+  tempest visualize --type attention --model model.h5 \\
+                    --input test_sequences.txt
   
-  # Visualize model weights
-  tempest visualize --type weights --input model.h5 --layer lstm_1 --normalize
+  # Visualize embeddings with UMAP
+  tempest visualize --type embeddings --model model.h5 \\
+                    --embedding-method umap --style paper
   
-  # Compare multiple runs
-  tempest visualize --type summary --compare run1.json,run2.json,run3.json
-""",
-    
-    'combine': """usage: tempest combine [options]
-
-Combine multiple models using Bayesian Model Averaging (BMA) or weighted voting
-
-OPTIONS:
-  --models-dir DIR         Directory containing models to combine
-  --models FILES          Comma-separated list of [name:]path pairs for models
-  --method METHOD         Combination method: bma or weighted (default: bma)
-  --validation-data FILE  Validation data for computing BMA weights (required for BMA)
-  --test-data FILE        Test data for evaluating combination (optional)
-  --output-dir DIR        Output directory for results (default: ./combine_results)
-
-  # BMA-specific options
-  --prior-type TYPE       Prior type: uniform, performance, complexity (default: uniform)
-  --temperature T         Temperature for posterior scaling (default: 1.0)
-  --use-bic              Use BIC approximation instead of full marginal likelihood
-  --no-complexity-penalty Disable complexity penalties in BMA
-
-  # Weighted voting options  
-  --weights WEIGHTS       Custom weights (format: name1:weight1,name2:weight2)
-
-COMBINATION METHODS:
-==================
-  Bayesian Model Averaging (BMA):
-    • Weights learned from validation data
-    • Accounts for model complexity (Occam's razor)
-    • Provides uncertainty quantification
-    • Principled probabilistic framework
-    • P(M|D) ∝ P(D|M) × P(M)
+  # Visualize ACC PWM
+  tempest visualize --type acc_pwm --pwm-file acc_pwm.txt \\
+                    --format svg --dpi 300
   
-  Weighted Voting:
-    • Fixed weights (user-specified or uniform)
-    • Simple and fast
-    • Full control over ensemble behavior
-    • No uncertainty quantification
-
-BMA DETAILS:
-===========
-  True BMA computes posterior probabilities for each model:
-    - P(M_k|D): Posterior probability of model k
-    - P(D|M_k): Marginal likelihood (model evidence)
-    - P(M_k): Prior probability of model k
-  
-  Benefits over simple averaging:
-    - Data-driven weight selection
-    - Automatic model selection
-    - Penalizes overly complex models
-    - Provides calibrated uncertainties
-    - Theoretically optimal combination
-
-OUTPUTS:
-========
-  - model_weights.json: Computed weights for each model
-  - model_evidences.json: Log evidences for each model (BMA only)
-  - combine_config.yaml: Configuration used for combination
-  - combination_summary.json: Summary statistics and metrics
-  - combination_evaluation.json: Test set performance (if evaluated)
-
-EXAMPLES:
-  # BMA with validation data
-  tempest combine --models-dir ./models --method bma --validation-data val.pkl
-
-  # Custom weighted voting
-  tempest combine --models model1.h5:0.3,model2.h5:0.4,model3.h5:0.3 --method weighted
-
-  # BMA with BIC approximation and evaluation
-  tempest combine --models-dir ./models --method bma --use-bic \
-                 --validation-data val.pkl --test-data test.pkl
-
-  # Named models with BMA
-  tempest combine --models standard:std.h5,hybrid:hyb.h5,constrained:lc.h5 \
-                 --method bma --validation-data val.pkl
-
-  # BMA with custom prior and temperature
-  tempest combine --models-dir ./models --method bma \
-                 --prior-type complexity --temperature 0.5 \
-                 --validation-data val.pkl
+  # Model comparison
+  tempest visualize --type model_comparison --input comparison_results.json \\
+                    --style presentation
 """,
     
     'compare': """usage: tempest compare [options]
 
-Compare multiple trained models on test data
+Compare multiple trained models comprehensively
 
-OPTIONS:
-  --models-dir DIR         Directory containing models to compare
-                          (default: ./trained_models)
-  --models FILES          Comma-separated list of model files/directories
-                          (alternative to --models-dir)
-  --test-data DATA        Path to test data file (required)
-                          Should be pickled dict with X_test and y_test
-  --config CONFIG         Configuration file 
-                          (optional, uses model config if not specified)
-  --output-dir DIR        Output directory for comparison results
-                          (default: ./evaluation_results)
+REQUIRED OPTIONS:
+  --test-data DATA         Path to test data file (.pkl format)
   
-  # Comparison options
-  --metrics METRICS       Comma-separated metrics to evaluate
-                          Options: accuracy, f1, precision, recall, constraints, robustness
-                          (default: all)
-  --no-plots              Skip generating visualization plots
-  --no-report             Skip generating markdown report
-  
-  # Advanced options
-  --batch-size N          Batch size for evaluation (default: 32)
-  --error-types TYPES     Comma-separated error types to test robustness
-                          Options: missing_segment, duplicated_segment, truncated, noisy
-                          (default: all)
-  --ensemble-metrics      Include ensemble-specific metrics
-  
-COMPARISON OUTPUTS:
-  - model_comparison.csv: Tabular comparison of all metrics
-  - evaluation_report.json: Detailed results in JSON format
-  - evaluation_report.md: Human-readable markdown report
-  - comprehensive_evaluation.png: Multi-metric visualization
-  
-METRICS EVALUATED:
-  • Basic performance: accuracy, precision, recall, F1 score
-  • Segment-level: per-label accuracy and transition detection
-  • Constraints: satisfaction rates for length constraints
-  • Robustness: performance under various error conditions
-  • Efficiency: inference time measurements
-  • Ensemble: model agreement and prediction uncertainty
+  # Specify models using one of:
+  --models-dir DIR         Directory containing all models to compare
+  --models LIST            Comma-separated list of model paths
+
+OPTIONAL OPTIONS:
+  --config CONFIG          Configuration file
+  --output-dir DIR         Output directory (default: ./comparison_results)
+  --dpi DPI                DPI for plots (default: 150)
+
+METRICS OPTIONS:
+  --metrics LIST           Comma-separated metrics to evaluate
+                          (default: accuracy,precision,recall,f1,segment_accuracy,
+                           edit_distance,boundary_accuracy)
+  --include-ensemble-metrics    Include diversity, uncertainty, agreement metrics
+  --pairwise-agreement          Compute pairwise model agreement
+  --bootstrap N                 Bootstrap samples for confidence intervals
+
+OUTPUT OPTIONS:
+  --no-plots               Skip visualization generation
+  --no-report              Skip markdown report generation
+  --profile-performance    Profile inference speed and memory usage
 
 EXAMPLES:
-  # Basic comparison of models in directory
-  tempest compare --models-dir ./trained_models --test-data test_data.pkl
+  # Compare all models in directory
+  tempest compare --models-dir ./trained_models --test-data test.pkl
   
   # Compare specific models
-  tempest compare --models standard.h5,hybrid.h5,ensemble/ --test-data test.pkl
+  tempest compare --models model1.h5,model2.h5,ensemble/ \\
+                  --test-data test.pkl --output-dir comparison/
   
-  # Custom configuration and output
+  # Comprehensive comparison with ensemble metrics
   tempest compare --models-dir ./models --test-data test.pkl \\
-                 --config config.yaml --output-dir ./comparison
+                  --include-ensemble-metrics --pairwise-agreement \\
+                  --bootstrap 1000
   
-  # Evaluate specific metrics only
+  # Performance profiling
   tempest compare --models-dir ./models --test-data test.pkl \\
-                 --metrics accuracy,f1,constraints
+                  --profile-performance --output-dir perf_comparison/
   
-  # Quick comparison without plots/reports
+  # Quick comparison without visualizations
   tempest compare --models-dir ./models --test-data test.pkl \\
-                 --no-plots --no-report
+                  --no-plots --no-report --metrics accuracy,f1
+""",
+    
+    'combine': """usage: tempest combine [options]
+
+Combine models using advanced ensemble methods
+
+MODEL SPECIFICATION:
+  # Use one of:
+  --models-dir DIR         Directory containing models to combine
+  --models LIST            Comma-separated list of [name:]path pairs
+
+COMBINATION METHOD:
+  --method METHOD          Method: bayesian_model_averaging (bma), 
+                          weighted_average, voting, stacking
+                          (default: bayesian_model_averaging)
+
+BMA CONFIGURATION:
+  --approximation A        BMA approximation method:
+                          bic: Fast Bayesian Information Criterion
+                          laplace: Laplace approximation with Hessian
+                          variational: Variational inference with ELBO
+                          cross_validation: K-fold CV-based evidence
+                          (default: bic)
+  
+  --prior-type TYPE        Prior distribution:
+                          uniform: Equal prior for all models
+                          informative: User-specified weights
+                          adaptive: Complexity-based adaptive prior
+                          (default: uniform)
+  
+  --prior-weights W        Prior weights for informative prior
+                          Format: model1:0.5,model2:0.3,model3:0.2
+  
+  --temperature T          Temperature for posterior scaling (default: 1.0)
+  --bic-penalty-factor F   BIC penalty factor (default: 1.0)
+
+CALIBRATION:
+  --calibrate              Enable prediction calibration
+  --calibration-method M   Method: isotonic, platt, temperature_scaling, beta
+                          (default: isotonic)
+  --calibration-data FILE  Separate calibration data (uses validation if not specified)
+
+DATA:
+  --validation-data FILE   Validation data for weight computation (required for BMA)
+  --test-data FILE         Test data for final evaluation (optional)
+
+WEIGHTED AVERAGE:
+  --weights W              Custom weights (format: model1:0.6,model2:0.4)
+  --weighted-optimization  Optimization: fixed, grid_search, 
+                          differential_evolution, bayesian_optimization
+                          (default: fixed)
+
+CONFIGURATION:
+  --ensemble-config FILE   YAML file with full ensemble configuration
+
+OUTPUT:
+  --output-dir DIR         Output directory (default: ./combine_results)
+  --plot-uncertainty       Generate uncertainty distribution plots
+
+EXAMPLES:
+  # BMA with BIC approximation
+  tempest combine --models-dir ./models --method bma \\
+                  --approximation bic --validation-data val.pkl
+  
+  # BMA with Laplace approximation and calibration
+  tempest combine --models-dir ./models --method bma \\
+                  --approximation laplace --validation-data val.pkl \\
+                  --calibrate --calibration-method isotonic
+  
+  # BMA with informative prior
+  tempest combine --models model1.h5,model2.h5,model3.h5 \\
+                  --method bma --prior-type informative \\
+                  --prior-weights model1:0.5,model2:0.3,model3:0.2 \\
+                  --validation-data val.pkl
+  
+  # Weighted average with optimization
+  tempest combine --models-dir ./models --method weighted_average \\
+                  --weighted-optimization grid_search \\
+                  --validation-data val.pkl
+  
+  # Full configuration from YAML
+  tempest combine --models-dir ./models \\
+                  --ensemble-config ensemble_config.yaml \\
+                  --validation-data val.pkl --test-data test.pkl \\
+                  --plot-uncertainty
 """,
 }
 
 
 def show_quick_help():
     """Display quick help message without importing any modules."""
-    help_text = """usage: tempest [-h] [--verbose] [--debug] {simulate,train,evaluate,compare,combine,visualize} ...
+    help_text = """usage: tempest [-h] [--version] [--log-level LEVEL] [--debug] {simulate,train,evaluate,compare,combine,visualize} ...
 
-Tempest - Modular sequence annotation using length-constrained CRFs
+Tempest - Advanced sequence annotation with length-constrained CRFs
+Version 2.0.0
 
 COMMANDS:
 =========
-  simulate              Generate synthetic sequence data for training
-  train                 Train a Tempest model (standard or hybrid mode)
-  evaluate              Evaluate a trained model on test data
+  simulate              Generate synthetic sequence data with configurable architecture
+  train                 Train models (standard CRF, hybrid, or ensemble with BMA)
+  evaluate              Comprehensive model evaluation with multiple metrics
   compare               Compare multiple trained models
-  combine               Combine models using BMA or weighted voting
-  visualize             Create visualizations of results
+  combine               Combine models using Bayesian Model Averaging or voting
+  visualize             Create comprehensive visualizations
 
-QUICK EXAMPLES:
+KEY FEATURES:
+=============
+• Length-constrained CRFs     - Enforce biologically meaningful segment sizes
+• Probabilistic PWM integration - Generate diverse ACC sequences with controlled variation
+• Hybrid training modes        - Combine supervised learning with constraints
+• Bayesian Model Averaging     - Principled ensemble combination with uncertainty
+• Pseudo-labeling             - Leverage unlabeled FASTQ data
+• Comprehensive evaluation    - Per-segment metrics, bootstrap CIs, error analysis
+
+QUICK START:
+============
+  # 1. Generate training data with PWM-based ACC sequences
+  tempest simulate --config config.yaml --num-sequences 10000 --split \\
+                   --pwm acc_pwm.txt --pwm-temperature 1.2
+
+  # 2. Train hybrid model with constraints
+  tempest train --config config.yaml --hybrid --pwm acc_pwm.txt \\
+                --use-probabilistic-pwm --enforce-length-constraints
+
+  # 3. Train ensemble with BMA
+  tempest train --config config.yaml --ensemble --num-models 5 \\
+                --ensemble-voting-method bayesian_model_averaging
+
+  # 4. Evaluate model
+  tempest evaluate --model model_final.h5 --test-data test.pkl \\
+                   --per-segment-metrics --confusion-matrix
+
+  # 5. Compare models
+  tempest compare --models-dir ./models --test-data test.pkl \\
+                  --include-ensemble-metrics
+
+  # 6. Combine models with BMA
+  tempest combine --models-dir ./models --method bma \\
+                  --approximation laplace --validation-data val.pkl
+
+CONFIGURATION:
+==============
+Tempest uses YAML configuration files to control:
+  • Model architecture (LSTM layers, units, dropout, CNN, BiLSTM)
+  • Simulation parameters (sequence structure, lengths, error rates)
+  • Training settings (epochs, batch size, optimizer, early stopping)
+  • Hybrid constraints (length, whitelist, PWM)
+  • Ensemble configuration (BMA, diversity, calibration)
+
+Example configurations are provided in the config/ directory:
+  • config.yaml                    - Standard configuration
+  • hybrid_config.yaml             - Hybrid training with constraints
+  • ensemble_config.yaml           - Ensemble with BMA
+  • custom_tempest_config_probabilistic.yaml - Your custom configuration
+
+GLOBAL OPTIONS:
 ===============
-  # Generate training data with train/val split
-  tempest simulate --config config.yaml --num-sequences 10000 --split
-
-  # Train a model (standard mode)
-  tempest train --config config.yaml --epochs 100
-  
-  # Train with hybrid robustness mode
-  tempest train --config config.yaml --hybrid --pwm acc_pwm.txt
-
-  # Evaluate model on test data
-  tempest evaluate --model model_final.h5 --test-data test_reads.txt
-  
-  # Compare multiple models
-  tempest compare --models-dir ./trained_models --test-data test_data.pkl
-  
-  # Combine models using BMA
-  tempest combine --models-dir ./models --method bma --validation-data val.pkl
-
-  # Visualize training history
-  tempest visualize --type training --input training_history.csv --output curves.png
-
-TEMPEST OVERVIEW:
-=================
-Tempest is a deep learning framework for sequence annotation that combines:
-  - Conditional Random Fields (CRFs) for structured prediction
-  - Length constraints to enforce biologically meaningful segment sizes
-  - Position Weight Matrix (PWM) priors for incorporating domain knowledge
-  - Hybrid training modes for improved robustness
+  --version              Show version information
+  --log-level LEVEL      Set logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  --log-file FILE        Log to file in addition to console
+  --debug                Enable debug mode with verbose output
 
 DETAILED HELP:
 ==============
@@ -417,28 +504,20 @@ For detailed help on any command, use:
   tempest <command> --help
 
 Examples:
-  tempest train --help      # Show all training options
-  tempest simulate --help   # Show data generation options
-  tempest evaluate --help   # Show evaluation options
-  tempest compare --help    # Show model comparison options
-  tempest visualize --help  # Show visualization options
+  tempest simulate --help   # Data generation options
+  tempest train --help      # Training configurations
+  tempest evaluate --help   # Evaluation metrics
+  tempest combine --help    # BMA and ensemble options
 
-CONFIGURATION FILES:
-====================
-Training is controlled via YAML configuration files:
-  - config.yaml - Standard training configuration
-  - hybrid_config.yaml - Hybrid training with robustness features
-  - config_with_whitelists.yaml - Training with sequence constraints
+DOCUMENTATION:
+==============
+For complete documentation, tutorials, and examples:
+  https://github.com/yourusername/tempest
 
-Example config files are provided in the config/ directory.
+Report issues:
+  https://github.com/yourusername/tempest/issues
 
-GLOBAL OPTIONS:
-===============
-  --verbose, -v         Enable verbose output
-  --debug               Show all warnings and TensorFlow output
-  --log-level LEVEL     Set logging level (DEBUG, INFO, WARNING, ERROR)
-
-For more information, visit: https://github.com/biobenkj/tempest
+© 2024 Tempest - Advanced Sequence Annotation Framework
 """
     print(help_text)
     sys.exit(0)
@@ -458,16 +537,19 @@ def show_subcommand_help(subcommand):
 def main():
     """Main entry point that checks for help before ANY imports."""
     # Check for quick help FIRST, before any imports
-    # Show quick help if: no args, or -h/--help without a subcommand
     if len(sys.argv) == 1:
         show_quick_help()
     
-    # Check if help is requested at top level (not for a subcommand)
+    # Check if help is requested at top level
     if ('--help' in sys.argv or '-h' in sys.argv) and len(sys.argv) == 2:
         show_quick_help()
     
+    # Check for version
+    if '--version' in sys.argv:
+        print("Tempest version 2.0.0")
+        sys.exit(0)
+    
     # Check for subcommand help requests
-    # This handles cases like: tempest simulate --help
     if len(sys.argv) >= 3:
         # Get the potential subcommand
         subcommand = None
@@ -487,7 +569,6 @@ def main():
         os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
         os.environ.setdefault('TF_DISABLE_PLUGIN_REGISTRATION', '1')
         os.environ.setdefault('TF_ENABLE_DEPRECATION_WARNINGS', '0')
-        os.environ.setdefault('TF_TRT_ALLOW_ENGINE_CACHING', '0')
         
         # Set up warning filters before imports
         import warnings
@@ -498,13 +579,13 @@ def main():
         logging.getLogger('tensorflow').setLevel(logging.ERROR)
         logging.getLogger('tensorflow').propagate = False
     
-    # NOW import and run tempest - we need to find where tempest is installed
+    # NOW import and run tempest
     import site
     import importlib.util
     
     # Try to find tempest installation
     tempest_locations = [
-        # Development install locations (parent directory for development)
+        # Development install locations
         os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tempest'),
         # Current directory structure
         os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tempest'),
@@ -517,8 +598,8 @@ def main():
     cli_path = None
     for loc in tempest_locations:
         if loc and os.path.exists(loc):
-            # Try different CLI module names
-            for cli_name in ['cli.py']:
+            # Try to find the CLI module
+            for cli_name in ['cli.py', 'cli_updated.py']:
                 potential_cli = os.path.join(loc, cli_name)
                 if os.path.exists(potential_cli):
                     cli_path = potential_cli
@@ -529,6 +610,7 @@ def main():
     if not cli_path:
         print("Error: Could not find tempest CLI module!", file=sys.stderr)
         print("Please ensure tempest is properly installed.", file=sys.stderr)
+        print("\nTry: pip install -e .", file=sys.stderr)
         sys.exit(1)
     
     # Load the CLI module directly

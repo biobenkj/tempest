@@ -1,45 +1,26 @@
 #!/usr/bin/env python3
 """
-Tempest Training Pipeline with Directory Support for Pseudo-Labeling.
+Tempest main execution - UPDATED VERSION
 
-Enhanced to work seamlessly with the improved CLI and BMA functionality.
-
-This script supports:
-1. Passing a directory of FASTQ files for pseudo-label training
-2. Flexible input handling (single file or directory)
-3. Configurable batch processing parameters
-4. Probabilistic PWM-based ACC generation
-5. Integration with enhanced ensemble training
-
-Usage:
-    # Train with single FASTQ file for pseudo-labels
-    python main.py --config config.yaml --hybrid --unlabeled /path/to/file.fastq
-    
-    # Train with directory of FASTQ files for pseudo-labels
-    python main.py --config config.yaml --hybrid --unlabeled-dir /path/to/fastq_directory/
-    
-    # Train with custom limits for directory processing
-    python main.py --config config.yaml --hybrid \
-                   --unlabeled-dir /path/to/fastq_directory/ \
-                   --max-pseudo-per-file 500 \
-                   --max-pseudo-total 5000
-    
-    # Train with specific PWM file for ACC generation
-    python main.py --config config.yaml --pwm /path/to/pwm_file.txt
-    
-    # Train for ensemble with model diversity
-    python main.py --config config.yaml --ensemble --num-models 3 \
-                   --vary-initialization --vary-architecture
+Comprehensive training module supporting:
+- Standard CRF training
+- Hybrid training with constraints
+- Ensemble training with BMA
+- Pseudo-labeling from unlabeled data
+- PWM integration with probabilistic generation
 """
 
 import argparse
 import sys
 import logging
-from pathlib import Path
-from typing import Union, Optional, List, Tuple
-import numpy as np
-from tensorflow import keras
 import json
+import pickle
+from pathlib import Path
+from typing import Union, Optional, List, Tuple, Dict, Any
+import numpy as np
+import tensorflow as tf
+from tensorflow import keras
+import yaml
 
 # Import Tempest modules
 from tempest.utils.config import load_config, TempestConfig
@@ -60,6 +41,9 @@ from tempest.training.hybrid_trainer import (
     pad_sequences,
     convert_labels_to_categorical
 )
+from tempest.training.ensemble import EnsembleTrainer
+from tempest.core.pwm_probabilistic import ProbabilisticPWM
+from tempest.inference.combine import ModelCombiner, EnsembleConfig, BMAConfig
 
 # Configure logging
 logging.basicConfig(
@@ -71,8 +55,6 @@ logger = logging.getLogger(__name__)
 
 def setup_gpu():
     """Configure GPU settings for TensorFlow."""
-    import tensorflow as tf
-    
     # List available GPUs
     gpus = tf.config.list_physical_devices('GPU')
     if gpus:
@@ -107,583 +89,840 @@ def parse_unlabeled_input(path_string: str) -> Union[str, Path]:
         logger.warning(f"Path does not exist: {path_string}")
     elif path.is_dir():
         logger.info(f"Unlabeled input is a directory: {path}")
-        # Check for FASTQ files
-        fastq_files = list(path.glob("*.fastq")) + list(path.glob("*.fastq.gz")) + \
-                      list(path.glob("*.fq")) + list(path.glob("*.fq.gz"))
-        logger.info(f"Found {len(fastq_files)} FASTQ files in directory")
-    elif path.is_file():
-        logger.info(f"Unlabeled input is a single file: {path}")
-    
+        # Find FASTQ files
+        fastq_files = list(path.glob("*.fastq")) + list(path.glob("*.fq")) + \
+                     list(path.glob("*.fastq.gz")) + list(path.glob("*.fq.gz"))
+        logger.info(f"Found {len(fastq_files)} FASTQ files")
+    else:
+        logger.info(f"Unlabeled input is a file: {path}")
+        
     return path
 
 
-def prepare_data(config: TempestConfig, pwm_file: Optional[str] = None) -> tuple:
+def load_or_generate_data(config: TempestConfig, args: argparse.Namespace) -> Tuple[Any, Any, Any]:
     """
-    Prepare training and validation data with PWM support.
+    Load existing data or generate synthetic data based on configuration.
     
     Args:
         config: Tempest configuration
-        pwm_file: Optional PWM file path
+        args: Command line arguments
         
     Returns:
-        Tuple of training and validation data
+        Tuple of (X_train, y_train, label_encoder)
     """
-    logger.info("Preparing training data...")
+    data_dir = Path(args.data_dir if args.data_dir else "./tempest_data")
     
-    # Initialize simulator with PWM if provided
-    simulator = SequenceSimulator(config.simulation, pwm_file=pwm_file)
+    # Check if data already exists
+    train_file = data_dir / "train_data.pkl"
+    if train_file.exists() and not args.regenerate_data:
+        logger.info(f"Loading existing training data from {train_file}")
+        with open(train_file, 'rb') as f:
+            data = pickle.load(f)
+        return data['X_train'], data['y_train'], data['label_encoder']
     
-    # Generate training and validation reads
-    train_reads, val_reads = simulator.generate_train_val_split(
-        total_reads=config.simulation.num_sequences,
-        train_fraction=0.8
-    )
+    # Generate synthetic data
+    logger.info("Generating synthetic training data...")
     
-    logger.info(f"Generated {len(train_reads)} training and {len(val_reads)} validation sequences")
+    # Initialize simulator with enhanced configuration
+    sim_config = config.simulation
+    
+    # Apply command-line overrides
+    if args.num_sequences:
+        sim_config.num_sequences = args.num_sequences
+    
+    # Initialize PWM if configured
+    pwm = None
+    if hasattr(sim_config, 'pwm') and sim_config.pwm.get('pwm_file'):
+        pwm_file = sim_config.pwm['pwm_file']
+        if args.pwm:
+            pwm_file = args.pwm
+            
+        logger.info(f"Loading PWM from {pwm_file}")
+        pwm = ProbabilisticPWM(
+            pwm_file=pwm_file,
+            temperature=sim_config.pwm.get('temperature', 1.2),
+            min_entropy=sim_config.pwm.get('min_entropy', 0.1)
+        )
+    
+    # Initialize simulator
+    simulator = SequenceSimulator(sim_config, pwm_file=pwm_file if pwm else None)
+    
+    # Generate training data
+    train_reads = simulator.generate_reads(sim_config.n_train)
+    val_reads = simulator.generate_reads(sim_config.n_val)
     
     # Convert to arrays
-    label_to_idx = simulator.label_to_idx
-    idx_to_label = {v: k for k, v in label_to_idx.items()}
+    from tempest.data.simulator import LabelEncoder
+    label_encoder = LabelEncoder()
+    
+    # Fit label encoder on all possible labels from config
+    all_labels = set()
+    for read in train_reads + val_reads:
+        all_labels.update(read.labels)
+    label_encoder.fit(list(all_labels))
     
     # Convert reads to arrays
-    X_train, y_train = reads_to_arrays(train_reads, label_to_idx)
-    X_val, y_val = reads_to_arrays(val_reads, label_to_idx)
+    X_train, y_train = reads_to_arrays(train_reads, label_encoder)
+    X_val, y_val = reads_to_arrays(val_reads, label_encoder)
     
-    # Pad sequences
-    max_len = config.model.max_seq_len
-    X_train = pad_sequences(X_train, maxlen=max_len, padding='post', value=0)
-    y_train = pad_sequences(y_train, maxlen=max_len, padding='post', value=-1)
-    X_val = pad_sequences(X_val, maxlen=max_len, padding='post', value=0)
-    y_val = pad_sequences(y_val, maxlen=max_len, padding='post', value=-1)
+    # Save generated data
+    ensure_dir(data_dir)
+    train_file = data_dir / "train_data.pkl"
+    val_file = data_dir / "val_data.pkl"
     
-    logger.info(f"Prepared data shapes:")
-    logger.info(f"  X_train: {X_train.shape}, y_train: {y_train.shape}")
-    logger.info(f"  X_val: {X_val.shape}, y_val: {y_val.shape}")
+    with open(train_file, 'wb') as f:
+        pickle.dump({
+            'X_train': X_train,
+            'y_train': y_train,
+            'label_encoder': label_encoder
+        }, f)
+        
+    with open(val_file, 'wb') as f:
+        pickle.dump({
+            'X_val': X_val,
+            'y_val': y_val,
+            'label_encoder': label_encoder
+        }, f)
     
-    return X_train, y_train, X_val, y_val, label_to_idx, train_reads, val_reads
+    logger.info(f"Generated {len(X_train)} training and {len(X_val)} validation sequences")
+    logger.info(f"Saved data to {data_dir}")
+    
+    return X_train, y_train, X_val, y_val, label_encoder
 
 
-def train_standard(config, X_train, y_train, X_val, y_val, label_to_idx):
-    """Standard training mode."""
-    logger.info("\n" + "="*60)
-    logger.info("Starting STANDARD training mode")
-    logger.info("="*60 + "\n")
+def train_standard_model(config: TempestConfig, args: argparse.Namespace,
+                        X_train: np.ndarray, y_train: np.ndarray,
+                        X_val: np.ndarray, y_val: np.ndarray,
+                        label_encoder: Any) -> keras.Model:
+    """
+    Train a standard CRF model.
     
+    Args:
+        config: Tempest configuration
+        args: Command line arguments
+        X_train: Training sequences
+        y_train: Training labels
+        X_val: Validation sequences
+        y_val: Validation labels
+        label_encoder: Label encoder
+        
+    Returns:
+        Trained model
+    """
+    logger.info("Training standard CRF model")
+    
+    # Apply command-line overrides to config
+    model_config = config.model
+    if args.max_seq_len:
+        model_config.max_seq_len = args.max_seq_len
+    if args.embedding_dim:
+        model_config.embedding_dim = args.embedding_dim
+    if args.lstm_units:
+        model_config.lstm_units = args.lstm_units
+    if args.lstm_layers:
+        model_config.lstm_layers = args.lstm_layers
+    if args.dropout:
+        model_config.dropout = args.dropout
+    if args.use_cnn:
+        model_config.use_cnn = True
+    if args.use_bilstm:
+        model_config.use_bilstm = True
+        
+    training_config = config.training
+    if args.epochs:
+        training_config.epochs = args.epochs
+    if args.batch_size:
+        training_config.batch_size = args.batch_size
+    if args.learning_rate:
+        training_config.learning_rate = args.learning_rate
+    if args.optimizer:
+        training_config.optimizer = args.optimizer
+        
     # Build model
-    model = build_model_from_config(config)
-    print_model_summary(model)
+    model = build_model_from_config(model_config, num_classes=len(label_encoder.classes_))
     
     # Compile model
+    optimizer = keras.optimizers.get({
+        'class_name': training_config.optimizer,
+        'config': {'learning_rate': training_config.learning_rate}
+    })
+    
     model.compile(
-        optimizer=keras.optimizers.Adam(config.training.learning_rate),
+        optimizer=optimizer,
         loss='sparse_categorical_crossentropy',
         metrics=['accuracy']
     )
     
-    # Setup callbacks
-    ensure_dir(config.training.checkpoint_dir)
+    # Print model summary
+    print_model_summary(model)
     
-    callbacks = [
-        keras.callbacks.ModelCheckpoint(
-            f"{config.training.checkpoint_dir}/model_best.h5",
-            save_best_only=True,
-            monitor='val_loss'
-        ),
-        keras.callbacks.EarlyStopping(
-            patience=config.training.early_stopping_patience,
-            restore_best_weights=True
-        ),
-        keras.callbacks.ReduceLROnPlateau(
-            patience=config.training.reduce_lr_patience,
-            factor=0.5
-        ),
-        keras.callbacks.CSVLogger(
-            f"{config.training.checkpoint_dir}/training_history.csv"
+    # Setup callbacks
+    callbacks = []
+    
+    # Checkpoint callback
+    if args.checkpoint_dir:
+        checkpoint_dir = Path(args.checkpoint_dir)
+        ensure_dir(checkpoint_dir)
+        checkpoint_path = checkpoint_dir / "model_{epoch:02d}_{val_loss:.2f}.h5"
+        checkpoint_callback = keras.callbacks.ModelCheckpoint(
+            filepath=str(checkpoint_path),
+            save_best_only=args.save_best_only if hasattr(args, 'save_best_only') else True,
+            monitor='val_loss',
+            mode='min',
+            verbose=1
         )
-    ]
+        callbacks.append(checkpoint_callback)
+    
+    # Early stopping
+    if args.early_stopping:
+        early_stopping = keras.callbacks.EarlyStopping(
+            monitor='val_loss',
+            patience=args.patience if args.patience else training_config.early_stopping.get('patience', 10),
+            restore_best_weights=True,
+            verbose=1
+        )
+        callbacks.append(early_stopping)
+    
+    # TensorBoard
+    if args.tensorboard:
+        log_dir = Path(args.log_dir if args.log_dir else "./logs")
+        ensure_dir(log_dir)
+        tensorboard = keras.callbacks.TensorBoard(
+            log_dir=str(log_dir),
+            histogram_freq=1,
+            write_graph=True,
+            update_freq='epoch'
+        )
+        callbacks.append(tensorboard)
+    
+    # Prepare data
+    X_train_pad = pad_sequences(X_train, maxlen=model_config.max_seq_len)
+    X_val_pad = pad_sequences(X_val, maxlen=model_config.max_seq_len)
+    y_train_cat = convert_labels_to_categorical(y_train, num_classes=len(label_encoder.classes_))
+    y_val_cat = convert_labels_to_categorical(y_val, num_classes=len(label_encoder.classes_))
+    
+    # Compute class weights if requested
+    class_weights = None
+    if args.use_class_weights or training_config.get('use_class_weights'):
+        from sklearn.utils.class_weight import compute_class_weight
+        y_train_flat = y_train.reshape(-1)
+        classes = np.unique(y_train_flat[y_train_flat != -1])  # Exclude padding
+        weights = compute_class_weight(
+            'balanced',
+            classes=classes,
+            y=y_train_flat[y_train_flat != -1]
+        )
+        class_weights = dict(zip(classes, weights))
+        logger.info("Computed class weights for imbalanced data")
     
     # Train model
-    logger.info(f"Training for {config.training.epochs} epochs...")
     history = model.fit(
-        X_train, y_train,
-        validation_data=(X_val, y_val),
-        epochs=config.training.epochs,
-        batch_size=config.model.batch_size,
+        X_train_pad, y_train_cat,
+        validation_data=(X_val_pad, y_val_cat),
+        epochs=training_config.epochs,
+        batch_size=training_config.batch_size,
+        class_weight=class_weights,
         callbacks=callbacks,
         verbose=1
     )
     
-    # Save final model
-    final_path = f"{config.training.checkpoint_dir}/model_final.h5"
-    model.save(final_path)
-    logger.info(f"Saved final model to: {final_path}")
-    
-    # Save label mapping
-    import pickle
-    labels_path = f"{config.training.checkpoint_dir}/label_mapping.pkl"
-    with open(labels_path, 'wb') as f:
-        pickle.dump({
-            'label_to_idx': label_to_idx,
-            'idx_to_label': {v: k for k, v in label_to_idx.items()}
-        }, f)
-    logger.info(f"Saved label mapping to: {labels_path}")
-    
-    # Save configuration
-    config_path = f"{config.training.checkpoint_dir}/config.yaml"
-    config.to_yaml(config_path)
-    logger.info(f"Saved configuration to: {config_path}")
-    
-    return model
-
-
-def train_hybrid(config, train_reads, val_reads, unlabeled_path=None, 
-                max_pseudo_per_file=None, max_pseudo_total=None):
-    """Hybrid training mode with pseudo-labeling support."""
-    logger.info("\n" + "="*60)
-    logger.info("Starting HYBRID training mode")
-    logger.info("="*60 + "\n")
-    
-    # Initialize hybrid trainer
-    trainer = HybridTrainer(config)
-    
-    # Process unlabeled data if provided
-    if unlabeled_path:
-        path_obj = Path(unlabeled_path)
-        
-        if path_obj.is_dir():
-            # Process directory of FASTQ files
-            logger.info(f"Processing FASTQ files from directory: {path_obj}")
-            trainer.process_unlabeled_directory(
-                path_obj,
-                max_reads_per_file=max_pseudo_per_file,
-                max_total_reads=max_pseudo_total
-            )
-        elif path_obj.is_file():
-            # Process single FASTQ file
-            logger.info(f"Loading unlabeled sequences from: {path_obj}")
-            trainer.load_unlabeled_sequences(path_obj)
-        else:
-            logger.warning(f"Invalid unlabeled path: {unlabeled_path}")
-    else:
-        logger.info("No unlabeled data provided - skipping pseudo-labeling phase")
-    
-    # Train model
-    model = trainer.train(train_reads, val_reads)
-    
-    # Save final model
-    ensure_dir(config.training.checkpoint_dir)
-    final_path = f"{config.training.checkpoint_dir}/model_hybrid_final.h5"
-    model.save(final_path)
-    logger.info(f"Saved hybrid model to: {final_path}")
-    
     # Save training history
-    if hasattr(trainer, 'history'):
-        import pandas as pd
-        history_df = pd.DataFrame(trainer.history)
-        history_path = f"{config.training.checkpoint_dir}/hybrid_training_history.csv"
-        history_df.to_csv(history_path, index=False)
-        logger.info(f"Saved training history to: {history_path}")
+    output_dir = Path(args.output_dir if args.output_dir else "./tempest_output")
+    ensure_dir(output_dir)
     
-    # Save configuration
-    config_path = f"{config.training.checkpoint_dir}/hybrid_config.yaml"
-    config.to_yaml(config_path)
+    history_file = output_dir / "training_history.json"
+    with open(history_file, 'w') as f:
+        json.dump(history.history, f, indent=2)
+    logger.info(f"Saved training history to {history_file}")
     
-    return model
+    return model, history
 
 
-def train_ensemble(config, X_train, y_train, X_val, y_val, label_to_idx, 
-                  num_models=3, vary_architecture=True, vary_initialization=True):
+def train_hybrid_model(config: TempestConfig, args: argparse.Namespace,
+                      X_train: np.ndarray, y_train: np.ndarray,
+                      X_val: np.ndarray, y_val: np.ndarray,
+                      label_encoder: Any) -> keras.Model:
     """
-    Train ensemble of models with diversity.
-    
-    This function trains multiple models with variations to create
-    a diverse ensemble suitable for BMA combination.
+    Train a hybrid model with constraints and pseudo-labeling.
     
     Args:
-        config: Training configuration
-        X_train, y_train: Training data
-        X_val, y_val: Validation data
-        label_to_idx: Label mapping
-        num_models: Number of models to train
-        vary_architecture: Whether to vary model architectures
-        vary_initialization: Whether to vary random seeds
+        config: Tempest configuration
+        args: Command line arguments
+        X_train: Training sequences
+        y_train: Training labels
+        X_val: Validation sequences
+        y_val: Validation labels
+        label_encoder: Label encoder
+        
+    Returns:
+        Trained model
+    """
+    logger.info("Training hybrid model with constraints")
+    
+    # Initialize hybrid trainer
+    hybrid_config = config.hybrid if hasattr(config, 'hybrid') else {}
+    
+    # Apply command-line overrides
+    if args.constrained_decoding:
+        hybrid_config['constrained_decoding'] = {
+            'enabled': True,
+            'method': args.decoding_method if args.decoding_method else 'beam_search',
+            'beam_width': args.beam_width if args.beam_width else 5
+        }
+        
+    if args.enforce_length_constraints:
+        hybrid_config['length_constraints'] = {
+            'enabled': True,
+            'enforce_during_training': True,
+            'enforce_during_inference': True
+        }
+        
+    if args.enforce_whitelist_constraints:
+        hybrid_config['whitelist_constraints'] = {
+            'enabled': True,
+            'enforce_during_training': True,
+            'enforce_during_inference': True
+        }
+        
+    # PWM constraints
+    pwm = None
+    if args.pwm or (hasattr(config, 'hybrid') and config.hybrid.get('pwm_constraints', {}).get('enabled')):
+        pwm_file = args.pwm if args.pwm else config.simulation.pwm.get('pwm_file')
+        if pwm_file:
+            logger.info(f"Loading PWM for constraints from {pwm_file}")
+            if args.use_probabilistic_pwm:
+                pwm = ProbabilisticPWM(
+                    pwm_file=pwm_file,
+                    temperature=config.simulation.pwm.get('temperature', 1.2),
+                    min_entropy=config.simulation.pwm.get('min_entropy', 0.1)
+                )
+                hybrid_config['pwm_constraints'] = {
+                    'enabled': True,
+                    'use_probabilistic_scoring': True,
+                    'scoring_method': args.pwm_scoring_method if args.pwm_scoring_method else 'log_likelihood',
+                    'min_score': args.pwm_min_score if args.pwm_min_score else -10.0,
+                    'score_weight': args.pwm_score_weight if args.pwm_score_weight else 0.5
+                }
+    
+    # Initialize trainer
+    trainer = HybridTrainer(
+        config=config,
+        hybrid_config=hybrid_config,
+        pwm=pwm
+    )
+    
+    # Load unlabeled data for pseudo-labeling if provided
+    pseudo_labels = None
+    if args.unlabeled or args.unlabeled_dir:
+        logger.info("Generating pseudo-labels from unlabeled data...")
+        
+        if args.unlabeled:
+            unlabeled_path = parse_unlabeled_input(args.unlabeled)
+        else:
+            unlabeled_path = parse_unlabeled_input(args.unlabeled_dir)
+            
+        pseudo_labels = trainer.generate_pseudo_labels(
+            unlabeled_path=unlabeled_path,
+            max_per_file=args.max_pseudo_per_file if args.max_pseudo_per_file else 1000,
+            max_total=args.max_pseudo_total if args.max_pseudo_total else 10000,
+            confidence_threshold=0.85
+        )
+        
+        if pseudo_labels:
+            logger.info(f"Generated {len(pseudo_labels)} pseudo-labels")
+            # Add pseudo-labels to training data
+            X_pseudo = np.array([pl['sequence'] for pl in pseudo_labels])
+            y_pseudo = np.array([pl['labels'] for pl in pseudo_labels])
+            X_train = np.concatenate([X_train, X_pseudo])
+            y_train = np.concatenate([y_train, y_pseudo])
+    
+    # Train model
+    model = trainer.train(
+        X_train=X_train,
+        y_train=y_train,
+        X_val=X_val,
+        y_val=y_val,
+        label_encoder=label_encoder,
+        epochs=args.epochs if args.epochs else config.training.epochs,
+        batch_size=args.batch_size if args.batch_size else config.training.batch_size
+    )
+    
+    # Save hybrid training report
+    output_dir = Path(args.output_dir if args.output_dir else "./tempest_output")
+    ensure_dir(output_dir)
+    
+    report = trainer.generate_report()
+    report_file = output_dir / "hybrid_training_report.json"
+    with open(report_file, 'w') as f:
+        json.dump(report, f, indent=2)
+    logger.info(f"Saved hybrid training report to {report_file}")
+    
+    return model
+
+
+def train_ensemble_models(config: TempestConfig, args: argparse.Namespace,
+                         X_train: np.ndarray, y_train: np.ndarray,
+                         X_val: np.ndarray, y_val: np.ndarray,
+                         label_encoder: Any) -> List[keras.Model]:
+    """
+    Train an ensemble of models with BMA support.
+    
+    Args:
+        config: Tempest configuration
+        args: Command line arguments
+        X_train: Training sequences
+        y_train: Training labels
+        X_val: Validation sequences
+        y_val: Validation labels
+        label_encoder: Label encoder
         
     Returns:
         List of trained models
     """
-    logger.info("\n" + "="*60)
-    logger.info(f"Training ENSEMBLE with {num_models} models")
-    logger.info("="*60 + "\n")
+    logger.info("Training ensemble of models")
     
-    models = []
-    ensemble_dir = Path(config.training.checkpoint_dir) / "ensemble"
-    ensure_dir(str(ensemble_dir))
+    # Get ensemble configuration
+    ensemble_config = config.ensemble if hasattr(config, 'ensemble') else {}
     
-    # Architecture variations
-    architecture_variations = []
-    if vary_architecture:
-        base_units = config.model.lstm_units
-        base_dropout = config.model.dropout
-        architecture_variations = [
-            {'lstm_units': base_units, 'dropout': base_dropout},
-            {'lstm_units': base_units // 2, 'dropout': base_dropout + 0.1},
-            {'lstm_units': base_units * 2, 'dropout': max(0.2, base_dropout - 0.1)},
-        ]
-    else:
-        architecture_variations = [
-            {'lstm_units': config.model.lstm_units, 'dropout': config.model.dropout}
-        ] * num_models
-    
-    # Random seeds for initialization diversity
-    random_seeds = [42, 123, 456, 789, 1011] if vary_initialization else [42] * num_models
-    
-    # Train each model
-    for i in range(num_models):
-        logger.info(f"\nTraining model {i+1}/{num_models}...")
+    # Apply command-line overrides
+    if args.num_models:
+        ensemble_config['num_models'] = args.num_models
+    if args.ensemble_voting_method:
+        ensemble_config['voting_method'] = args.ensemble_voting_method
         
-        # Set random seed
-        np.random.seed(random_seeds[i % len(random_seeds)])
-        tf.random.set_seed(random_seeds[i % len(random_seeds)])
+    # Configure BMA if requested
+    if args.ensemble_voting_method == 'bayesian_model_averaging':
+        bma_config = ensemble_config.get('bma_config', {})
+        if args.bma_prior_type:
+            bma_config['prior_type'] = args.bma_prior_type
+        if args.bma_approximation:
+            bma_config['approximation'] = args.bma_approximation
+        if args.bma_temperature:
+            bma_config['temperature'] = args.bma_temperature
+        ensemble_config['bma_config'] = bma_config
         
-        # Modify config for this model
-        model_config = config
-        if vary_architecture:
-            arch_params = architecture_variations[i % len(architecture_variations)]
-            model_config.model.lstm_units = arch_params['lstm_units']
-            model_config.model.dropout = arch_params['dropout']
-            logger.info(f"  Architecture: LSTM units={arch_params['lstm_units']}, dropout={arch_params['dropout']}")
+    # Configure diversity
+    if args.enforce_diversity:
+        diversity_config = ensemble_config.get('diversity', {})
+        diversity_config['enforce_diversity'] = True
+        if args.diversity_metric:
+            diversity_config['diversity_metric'] = args.diversity_metric
+        if args.vary_architecture:
+            diversity_config['vary_architecture'] = True
+        if args.vary_initialization:
+            diversity_config['vary_initialization'] = True
+        ensemble_config['diversity'] = diversity_config
         
-        # Build and compile model
-        model = build_model_from_config(model_config)
-        model.compile(
-            optimizer=keras.optimizers.Adam(config.training.learning_rate),
-            loss='sparse_categorical_crossentropy',
-            metrics=['accuracy']
+    # Configure calibration
+    if args.enable_calibration:
+        calibration_config = ensemble_config.get('calibration', {})
+        calibration_config['enabled'] = True
+        if args.calibration_method:
+            calibration_config['method'] = args.calibration_method
+        ensemble_config['calibration'] = calibration_config
+    
+    # Initialize ensemble trainer
+    trainer = EnsembleTrainer(
+        config=config,
+        ensemble_config=ensemble_config
+    )
+    
+    # Train models
+    models = trainer.train_ensemble(
+        X_train=X_train,
+        y_train=y_train,
+        X_val=X_val,
+        y_val=y_val,
+        label_encoder=label_encoder,
+        num_models=ensemble_config.get('num_models', 3)
+    )
+    
+    # Combine models if BMA is requested
+    if ensemble_config.get('voting_method') == 'bayesian_model_averaging':
+        logger.info("Combining models with Bayesian Model Averaging")
+        
+        # Create BMA configuration
+        bma_config_obj = BMAConfig(
+            approximation=ensemble_config['bma_config'].get('approximation', 'bic'),
+            prior_type=ensemble_config['bma_config'].get('prior_type', 'uniform'),
+            temperature=ensemble_config['bma_config'].get('temperature', 1.0)
         )
         
-        # Setup callbacks for this model
-        model_dir = ensemble_dir / f"model_{i}"
-        ensure_dir(str(model_dir))
-        
-        callbacks = [
-            keras.callbacks.ModelCheckpoint(
-                str(model_dir / "best.h5"),
-                save_best_only=True,
-                monitor='val_loss'
-            ),
-            keras.callbacks.EarlyStopping(
-                patience=config.training.early_stopping_patience,
-                restore_best_weights=True
-            ),
-            keras.callbacks.CSVLogger(
-                str(model_dir / "history.csv")
-            )
-        ]
-        
-        # Train model
-        history = model.fit(
-            X_train, y_train,
-            validation_data=(X_val, y_val),
-            epochs=config.training.epochs,
-            batch_size=config.model.batch_size,
-            callbacks=callbacks,
-            verbose=1
+        # Create ensemble configuration
+        ensemble_cfg = EnsembleConfig(
+            voting_method='bayesian_model_averaging',
+            bma_config=bma_config_obj
         )
         
-        # Save final model
-        model_path = ensemble_dir / f"ensemble_model_{i}.h5"
-        model.save(str(model_path))
-        logger.info(f"  Saved model to: {model_path}")
+        # Create combiner
+        model_paths = {}
+        for i, model in enumerate(models):
+            model_name = f"model_{i}"
+            model_paths[model_name] = model
+            
+        combiner = ModelCombiner(model_paths, ensemble_cfg)
         
-        # Save model-specific config
-        model_config_path = model_dir / "config.yaml"
-        model_config.to_yaml(str(model_config_path))
+        # Compute BMA weights
+        logger.info("Computing BMA posterior weights...")
+        combiner.compute_bma_weights({'X': X_val, 'y': y_val})
         
-        models.append(model)
+        # Calibrate if requested
+        if ensemble_config.get('calibration', {}).get('enabled'):
+            logger.info("Calibrating ensemble predictions...")
+            combiner.calibrate({'X': X_val, 'y': y_val})
+        
+        # Save ensemble
+        output_dir = Path(args.output_dir if args.output_dir else "./tempest_output")
+        ensure_dir(output_dir)
+        
+        ensemble_path = output_dir / "ensemble"
+        combiner.save(ensemble_path)
+        logger.info(f"Saved BMA ensemble to {ensemble_path}")
+        
+        # Save ensemble report
+        report = trainer.generate_ensemble_report()
+        report['bma_weights'] = combiner.get_posterior_weights()
+        report['model_evidence'] = combiner.get_model_evidence()
+        
+        report_file = output_dir / "ensemble_report.json"
+        with open(report_file, 'w') as f:
+            json.dump(report, f, indent=2)
+        logger.info(f"Saved ensemble report to {report_file}")
+        
+        return combiner
     
-    # Save ensemble metadata
-    metadata = {
-        'num_models': num_models,
-        'vary_architecture': vary_architecture,
-        'vary_initialization': vary_initialization,
-        'model_paths': [f"ensemble_model_{i}.h5" for i in range(num_models)],
-        'architecture_variations': architecture_variations[:num_models] if vary_architecture else None,
-        'random_seeds': random_seeds[:num_models]
-    }
+    # Save individual models
+    output_dir = Path(args.output_dir if args.output_dir else "./tempest_output")
+    ensure_dir(output_dir)
     
-    metadata_path = ensemble_dir / "ensemble_metadata.json"
-    with open(metadata_path, 'w') as f:
-        json.dump(metadata, f, indent=2)
-    logger.info(f"\nSaved ensemble metadata to: {metadata_path}")
+    for i, model in enumerate(models):
+        model_path = output_dir / f"model_{i}.h5"
+        model.save(model_path)
+        logger.info(f"Saved model {i} to {model_path}")
     
-    # Save label mapping
-    import pickle
-    labels_path = ensemble_dir / "label_mapping.pkl"
-    with open(labels_path, 'wb') as f:
-        pickle.dump({
-            'label_to_idx': label_to_idx,
-            'idx_to_label': {v: k for k, v in label_to_idx.items()}
-        }, f)
-    
-    logger.info(f"\nEnsemble training complete. Models saved to: {ensemble_dir}")
-    logger.info("Use 'tempest combine' to create BMA ensemble from these models")
+    # Save ensemble report
+    report = trainer.generate_ensemble_report()
+    report_file = output_dir / "ensemble_report.json"
+    with open(report_file, 'w') as f:
+        json.dump(report, f, indent=2)
+    logger.info(f"Saved ensemble report to {report_file}")
     
     return models
 
 
+def evaluate_model(model: Union[keras.Model, Any], 
+                  X_test: np.ndarray, 
+                  y_test: np.ndarray,
+                  label_encoder: Any,
+                  config: TempestConfig,
+                  output_dir: Path) -> Dict[str, Any]:
+    """
+    Evaluate a trained model on test data.
+    
+    Args:
+        model: Trained model or ensemble
+        X_test: Test sequences
+        y_test: Test labels
+        label_encoder: Label encoder
+        config: Configuration
+        output_dir: Output directory
+        
+    Returns:
+        Dictionary of evaluation metrics
+    """
+    logger.info("Evaluating model on test data")
+    
+    from tempest.inference import ModelEvaluator
+    from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+    
+    # Check if model is an ensemble
+    if hasattr(model, 'predict_with_uncertainty'):
+        # Ensemble with uncertainty
+        predictions, uncertainty = model.predict_with_uncertainty(X_test)
+        y_pred = predictions.argmax(axis=-1)
+        
+        metrics = {
+            'accuracy': accuracy_score(y_test.reshape(-1), y_pred.reshape(-1)),
+            'mean_uncertainty': float(uncertainty.mean()),
+            'std_uncertainty': float(uncertainty.std())
+        }
+        
+    else:
+        # Single model
+        evaluator = ModelEvaluator(model)
+        y_pred = evaluator.predict(X_test)
+        
+        metrics = {
+            'accuracy': accuracy_score(y_test.reshape(-1), y_pred.reshape(-1))
+        }
+    
+    # Classification report
+    report = classification_report(
+        y_test.reshape(-1),
+        y_pred.reshape(-1),
+        target_names=label_encoder.classes_,
+        output_dict=True
+    )
+    metrics['classification_report'] = report
+    
+    # Confusion matrix
+    cm = confusion_matrix(y_test.reshape(-1), y_pred.reshape(-1))
+    metrics['confusion_matrix'] = cm.tolist()
+    
+    # Per-segment metrics if configured
+    if config.evaluation.get('per_segment_metrics'):
+        segment_metrics = {}
+        for i, label in enumerate(label_encoder.classes_):
+            mask = y_test.reshape(-1) == i
+            if mask.any():
+                segment_metrics[label] = {
+                    'accuracy': accuracy_score(
+                        y_test.reshape(-1)[mask],
+                        y_pred.reshape(-1)[mask]
+                    ),
+                    'support': int(mask.sum())
+                }
+        metrics['per_segment'] = segment_metrics
+    
+    # Save metrics
+    metrics_file = output_dir / "evaluation_metrics.json"
+    with open(metrics_file, 'w') as f:
+        json.dump(metrics, f, indent=2)
+    logger.info(f"Saved evaluation metrics to {metrics_file}")
+    
+    # Log summary
+    logger.info(f"Test Accuracy: {metrics['accuracy']:.4f}")
+    if 'mean_uncertainty' in metrics:
+        logger.info(f"Mean Uncertainty: {metrics['mean_uncertainty']:.4f}")
+    
+    return metrics
+
+
 def main():
-    """Main training pipeline."""
+    """Main training execution."""
     parser = argparse.ArgumentParser(
-        description='Tempest Training Pipeline with Enhanced Ensemble Support',
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        description='Tempest training with comprehensive configuration support'
     )
     
-    # Configuration
-    parser.add_argument(
-        '--config',
-        type=str,
-        required=True,
-        help='Path to configuration YAML file'
-    )
+    # Required arguments
+    parser.add_argument('--config', '-c', type=str, required=True,
+                       help='Path to configuration YAML file')
     
-    # Training mode
-    mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument(
-        '--hybrid',
-        action='store_true',
-        help='Enable hybrid training mode with invalid sequence handling'
-    )
-    mode_group.add_argument(
-        '--ensemble',
-        action='store_true',
-        help='Train ensemble of models for BMA combination'
-    )
+    # Data arguments
+    parser.add_argument('--data-dir', type=str,
+                       help='Directory containing or for saving data')
+    parser.add_argument('--regenerate-data', action='store_true',
+                       help='Regenerate synthetic data even if it exists')
+    parser.add_argument('--num-sequences', type=int,
+                       help='Override number of sequences to generate')
     
-    # Ensemble parameters
-    parser.add_argument(
-        '--num-models',
-        type=int,
-        default=3,
-        help='Number of models to train for ensemble (default: 3)'
-    )
-    parser.add_argument(
-        '--vary-architecture',
-        action='store_true',
-        help='Vary model architectures in ensemble'
-    )
-    parser.add_argument(
-        '--vary-initialization',
-        action='store_true',
-        help='Vary random initialization in ensemble'
-    )
+    # Model architecture overrides
+    parser.add_argument('--max-seq-len', type=int,
+                       help='Maximum sequence length')
+    parser.add_argument('--embedding-dim', type=int,
+                       help='Embedding dimension')
+    parser.add_argument('--lstm-units', type=int,
+                       help='Number of LSTM units')
+    parser.add_argument('--lstm-layers', type=int,
+                       help='Number of LSTM layers')
+    parser.add_argument('--dropout', type=float,
+                       help='Dropout rate')
+    parser.add_argument('--use-cnn', action='store_true',
+                       help='Use CNN layers')
+    parser.add_argument('--use-bilstm', action='store_true',
+                       help='Use bidirectional LSTM')
     
-    # PWM parameters
-    parser.add_argument(
-        '--pwm',
-        type=str,
-        help='Path to PWM file for probabilistic ACC generation'
-    )
-    parser.add_argument(
-        '--temperature',
-        type=float,
-        default=None,
-        help='Temperature for PWM sampling (higher = more random)'
-    )
+    # Training parameters
+    parser.add_argument('--epochs', type=int,
+                       help='Number of training epochs')
+    parser.add_argument('--batch-size', type=int,
+                       help='Batch size')
+    parser.add_argument('--learning-rate', type=float,
+                       help='Learning rate')
+    parser.add_argument('--optimizer', type=str,
+                       choices=['adam', 'sgd', 'rmsprop'],
+                       help='Optimizer')
+    parser.add_argument('--use-class-weights', action='store_true',
+                       help='Use class weights for imbalanced data')
+    
+    # Hybrid training
+    parser.add_argument('--hybrid', action='store_true',
+                       help='Enable hybrid training mode')
+    parser.add_argument('--constrained-decoding', action='store_true',
+                       help='Enable constrained decoding')
+    parser.add_argument('--decoding-method', type=str,
+                       choices=['beam_search', 'viterbi', 'greedy'],
+                       help='Decoding method')
+    parser.add_argument('--beam-width', type=int,
+                       help='Beam width for beam search')
+    parser.add_argument('--enforce-length-constraints', action='store_true',
+                       help='Enforce length constraints')
+    parser.add_argument('--enforce-whitelist-constraints', action='store_true',
+                       help='Enforce whitelist constraints')
+    
+    # PWM constraints
+    parser.add_argument('--pwm', type=str,
+                       help='PWM file for constraints')
+    parser.add_argument('--use-probabilistic-pwm', action='store_true',
+                       help='Use probabilistic PWM scoring')
+    parser.add_argument('--pwm-scoring-method', type=str,
+                       choices=['log_likelihood', 'geometric_mean', 'min_probability'],
+                       help='PWM scoring method')
+    parser.add_argument('--pwm-min-score', type=float,
+                       help='Minimum PWM score threshold')
+    parser.add_argument('--pwm-score-weight', type=float,
+                       help='Weight for PWM score in loss')
+    
+    # Ensemble training
+    parser.add_argument('--ensemble', action='store_true',
+                       help='Train ensemble of models')
+    parser.add_argument('--num-models', type=int,
+                       help='Number of models in ensemble')
+    parser.add_argument('--ensemble-voting-method', type=str,
+                       choices=['bayesian_model_averaging', 'weighted_average', 'voting'],
+                       help='Ensemble voting method')
+    parser.add_argument('--bma-prior-type', type=str,
+                       choices=['uniform', 'informative', 'adaptive'],
+                       help='BMA prior type')
+    parser.add_argument('--bma-approximation', type=str,
+                       choices=['bic', 'laplace', 'variational', 'cross_validation'],
+                       help='BMA approximation method')
+    parser.add_argument('--bma-temperature', type=float,
+                       help='BMA temperature scaling')
+    
+    # Model diversity
+    parser.add_argument('--enforce-diversity', action='store_true',
+                       help='Enforce model diversity in ensemble')
+    parser.add_argument('--diversity-metric', type=str,
+                       choices=['disagreement', 'correlation', 'kl_divergence'],
+                       help='Diversity metric')
+    parser.add_argument('--vary-architecture', action='store_true',
+                       help='Vary architecture across ensemble')
+    parser.add_argument('--vary-initialization', action='store_true',
+                       help='Vary initialization across ensemble')
+    
+    # Calibration
+    parser.add_argument('--enable-calibration', action='store_true',
+                       help='Enable prediction calibration')
+    parser.add_argument('--calibration-method', type=str,
+                       choices=['isotonic', 'platt', 'temperature_scaling', 'beta'],
+                       help='Calibration method')
+    
+    # Pseudo-labeling
+    parser.add_argument('--unlabeled', type=str,
+                       help='Path to unlabeled FASTQ file')
+    parser.add_argument('--unlabeled-dir', type=str,
+                       help='Directory with unlabeled FASTQ files')
+    parser.add_argument('--max-pseudo-per-file', type=int,
+                       help='Max pseudo-labels per file')
+    parser.add_argument('--max-pseudo-total', type=int,
+                       help='Max total pseudo-labels')
+    
+    # Checkpointing and monitoring
+    parser.add_argument('--checkpoint-dir', type=str,
+                       help='Directory for checkpoints')
+    parser.add_argument('--save-best-only', action='store_true',
+                       help='Save only best model')
+    parser.add_argument('--early-stopping', action='store_true',
+                       help='Enable early stopping')
+    parser.add_argument('--patience', type=int,
+                       help='Early stopping patience')
     
     # Output
-    parser.add_argument(
-        '--output-dir',
-        type=str,
-        help='Output directory for model checkpoints (overrides config)'
-    )
+    parser.add_argument('--output-dir', '-o', type=str,
+                       help='Output directory for models and logs')
+    parser.add_argument('--tensorboard', action='store_true',
+                       help='Enable TensorBoard logging')
+    parser.add_argument('--log-dir', type=str,
+                       help='TensorBoard log directory')
     
-    # Unlabeled data for hybrid training
-    unlabeled_group = parser.add_mutually_exclusive_group()
-    unlabeled_group.add_argument(
-        '--unlabeled',
-        type=str,
-        help='Path to unlabeled FASTQ file for pseudo-label training'
-    )
-    unlabeled_group.add_argument(
-        '--unlabeled-dir',
-        type=str,
-        default=None,
-        help='Path to directory containing FASTQ files for pseudo-label training'
-    )
-    
-    # Directory processing parameters
-    parser.add_argument(
-        '--max-pseudo-per-file',
-        type=int,
-        default=None,
-        help='Maximum pseudo-labels to generate per FASTQ file (for directory input)'
-    )
-    parser.add_argument(
-        '--max-pseudo-total',
-        type=int,
-        default=None,
-        help='Maximum total pseudo-labels to generate across all files (for directory input)'
-    )
-    
-    # Training hyperparameters (override config)
-    parser.add_argument(
-        '--epochs',
-        type=int,
-        help='Number of training epochs (overrides config)'
-    )
-    parser.add_argument(
-        '--batch-size',
-        type=int,
-        help='Batch size (overrides config)'
-    )
-    parser.add_argument(
-        '--learning-rate',
-        type=float,
-        help='Learning rate (overrides config)'
-    )
-    
+    # Parse arguments
     args = parser.parse_args()
-    
-    # Print header
-    print("\n" + "="*80)
-    print(" "*25 + "TEMPEST TRAINING PIPELINE")
-    print(" "*20 + "with Enhanced Ensemble Support")
-    if args.hybrid:
-        print(" "*15 + "(HYBRID ROBUSTNESS MODE WITH DIRECTORY SUPPORT)")
-    elif args.ensemble:
-        print(" "*20 + f"(ENSEMBLE MODE: {args.num_models} MODELS)")
-    print("="*80 + "\n")
     
     # Setup GPU
     setup_gpu()
     
     # Load configuration
-    logger.info(f"Loading configuration from: {args.config}")
+    logger.info(f"Loading configuration from {args.config}")
     config = load_config(args.config)
     
-    # Override configuration with command-line arguments
-    if args.output_dir:
-        config.training.checkpoint_dir = args.output_dir
-        logger.info(f"Output directory overridden to: {args.output_dir}")
-    
-    if args.epochs:
-        config.training.epochs = args.epochs
-        logger.info(f"Epochs overridden to: {args.epochs}")
-    
-    if args.batch_size:
-        config.model.batch_size = args.batch_size
-        logger.info(f"Batch size overridden to: {args.batch_size}")
-    
-    if args.learning_rate:
-        config.training.learning_rate = args.learning_rate
-        logger.info(f"Learning rate overridden to: {args.learning_rate}")
-    
-    # Determine PWM file and temperature
-    pwm_file = args.pwm
-    if pwm_file is None and hasattr(config, 'pwm') and hasattr(config.pwm, 'pwm_file'):
-        pwm_file = config.pwm.pwm_file
-    
-    if pwm_file:
-        logger.info(f"Using PWM file: {pwm_file}")
-        if args.temperature is not None:
-            logger.info(f"PWM temperature override: {args.temperature}")
-            if not hasattr(config, 'pwm'):
-                config.pwm = type('obj', (object,), {'temperature': args.temperature})()
-            else:
-                config.pwm.temperature = args.temperature
+    # Load or generate data
+    data = load_or_generate_data(config, args)
+    if len(data) == 5:
+        X_train, y_train, X_val, y_val, label_encoder = data
     else:
-        logger.info("No PWM file specified - ACC sequences will be generated randomly or from patterns")
+        X_train, y_train, label_encoder = data
+        # Generate validation data
+        from tempest.data.simulator import SequenceSimulator
+        simulator = SequenceSimulator(config.simulation)
+        val_reads = simulator.generate_reads(config.simulation.n_val)
+        X_val, y_val = reads_to_arrays(val_reads, label_encoder)
     
-    # Handle unlabeled data path for hybrid training
-    unlabeled_path = args.unlabeled or args.unlabeled_dir
-    if unlabeled_path:
-        unlabeled_path = parse_unlabeled_input(unlabeled_path)
-        
-        # Print helpful information about the unlabeled data
-        path_obj = Path(unlabeled_path)
-        if path_obj.is_dir():
-            logger.info("Pseudo-labeling will process multiple FASTQ files from directory")
-            if args.max_pseudo_per_file:
-                logger.info(f"  Max reads per file: {args.max_pseudo_per_file}")
-            if args.max_pseudo_total:
-                logger.info(f"  Max total reads: {args.max_pseudo_total}")
-        elif path_obj.is_file():
-            logger.info("Pseudo-labeling will process single FASTQ file")
+    # Generate test data for evaluation
+    logger.info("Generating test data...")
+    simulator = SequenceSimulator(config.simulation)
+    test_reads = simulator.generate_reads(config.simulation.n_test)
+    X_test, y_test = reads_to_arrays(test_reads, label_encoder)
     
-    logger.info("Configuration loaded\n")
+    # Choose training mode
+    if args.ensemble:
+        # Train ensemble
+        model = train_ensemble_models(
+            config, args,
+            X_train, y_train,
+            X_val, y_val,
+            label_encoder
+        )
+    elif args.hybrid:
+        # Train hybrid model
+        model = train_hybrid_model(
+            config, args,
+            X_train, y_train,
+            X_val, y_val,
+            label_encoder
+        )
+    else:
+        # Train standard model
+        model, history = train_standard_model(
+            config, args,
+            X_train, y_train,
+            X_val, y_val,
+            label_encoder
+        )
     
-    # Run pipeline
-    try:
-        # Prepare data with probabilistic PWM support
-        X_train, y_train, X_val, y_val, label_to_idx, train_reads, val_reads = prepare_data(config, pwm_file)
-        
-        # Train based on mode
-        if args.ensemble:
-            # Train ensemble of models
-            models = train_ensemble(
-                config, X_train, y_train, X_val, y_val, label_to_idx,
-                num_models=args.num_models,
-                vary_architecture=args.vary_architecture,
-                vary_initialization=args.vary_initialization
-            )
-            model = models[0]  # Return first model for compatibility
-            
-        elif args.hybrid:
-            # Hybrid training
-            model = train_hybrid(
-                config, 
-                train_reads, 
-                val_reads, 
-                unlabeled_path,
-                args.max_pseudo_per_file,
-                args.max_pseudo_total
-            )
-        else:
-            # Standard training
-            model = train_standard(config, X_train, y_train, X_val, y_val, label_to_idx)
-        
-        if model is not None:
-            # Summary
-            print("\n" + "="*80)
-            print(" "*30 + "TRAINING COMPLETE")
-            print("="*80)
-            print(f"\nCheckpoints saved to: {config.training.checkpoint_dir}")
-            
-            if args.ensemble:
-                print(f"\nEnsemble Training Results:")
-                print(f"  - Trained {args.num_models} models")
-                print(f"  - Models saved to: {config.training.checkpoint_dir}/ensemble/")
-                print(f"  - Architecture variation: {args.vary_architecture}")
-                print(f"  - Initialization variation: {args.vary_initialization}")
-                print(f"\nNext steps:")
-                print(f"  1. Prepare validation data for BMA weight computation")
-                print(f"  2. Use 'tempest combine' to create BMA ensemble:")
-                print(f"     tempest combine --models-dir {config.training.checkpoint_dir}/ensemble \\")
-                print(f"                     --method bayesian_model_averaging \\")
-                print(f"                     --validation-data val_data.pkl")
-            else:
-                print(f"  - model_best.h5: Best model based on validation loss")
-                print(f"  - model_final.h5 or model_hybrid_final.h5: Final trained model")
-                print(f"  - training_history.csv: Training metrics")
-            
-            if args.pwm:
-                print(f"\nProbabilistic ACC generation used PWM from: {args.pwm}")
-                if args.temperature:
-                    print(f"  Temperature: {args.temperature}")
-            
-            if args.hybrid and unlabeled_path:
-                path_obj = Path(unlabeled_path)
-                if path_obj.is_dir():
-                    print(f"\nPseudo-labels were generated from directory: {unlabeled_path}")
-                else:
-                    print(f"\nPseudo-labels were generated from file: {unlabeled_path}")
-            
-            print("\n" + "="*80 + "\n")
-        
-    except Exception as e:
-        logger.error(f"Training failed with error: {e}", exc_info=True)
-        sys.exit(1)
+    # Evaluate model
+    output_dir = Path(args.output_dir if args.output_dir else "./tempest_output")
+    ensure_dir(output_dir)
+    
+    metrics = evaluate_model(
+        model, X_test, y_test,
+        label_encoder, config, output_dir
+    )
+    
+    # Save final model(s)
+    if not args.ensemble or not isinstance(model, ModelCombiner):
+        model_path = output_dir / "model_final.h5"
+        if hasattr(model, 'save'):
+            model.save(model_path)
+            logger.info(f"Saved final model to {model_path}")
+    
+    # Save label encoder
+    encoder_path = output_dir / "label_encoder.pkl"
+    with open(encoder_path, 'wb') as f:
+        pickle.dump(label_encoder, f)
+    logger.info(f"Saved label encoder to {encoder_path}")
+    
+    # Save configuration used
+    config_path = output_dir / "config_used.yaml"
+    with open(config_path, 'w') as f:
+        yaml.dump(config.to_dict() if hasattr(config, 'to_dict') else vars(config), f)
+    logger.info(f"Saved configuration to {config_path}")
+    
+    logger.info("Training complete!")
+    logger.info(f"All outputs saved to: {output_dir}")
+    
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
