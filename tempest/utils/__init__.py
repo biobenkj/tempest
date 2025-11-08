@@ -2,7 +2,8 @@
 Utilities module for Tempest.
 """
 
-from .config import (
+# Import config from the main config module for backward compatibility
+from tempest.config import (
     TempestConfig,
     ModelConfig,
     SimulationConfig,
@@ -11,6 +12,8 @@ from .config import (
     InferenceConfig,
     PWMConfig,
     LengthConstraints,
+    BMAConfig,
+    HybridTrainingConfig,
     load_config
 )
 
@@ -39,6 +42,8 @@ __all__ = [
     'InferenceConfig',
     'PWMConfig',
     'LengthConstraints',
+    'BMAConfig',
+    'HybridTrainingConfig',
     'load_config',
     # I/O
     'load_pwm',

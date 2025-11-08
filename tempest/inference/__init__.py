@@ -23,12 +23,9 @@ from .inference_utils import (
     batch_process_fasta
 )
 
-# Import combination module
-from .combine import (
-    ModelCombiner,
-    BMAConfig,
-    EnsembleConfig
-)
+# Import combination module (configs now come from tempest.config)
+from tempest.config import BMAConfig, EnsembleConfig
+from .combine import ModelCombiner
 
 # Import visualization components (with graceful fallback)
 _HAS_VISUALIZATION = False

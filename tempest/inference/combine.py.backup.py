@@ -26,14 +26,91 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 
 from tempest.data.simulator import SimulatedRead, reads_to_arrays
-from tempest.config import TempestConfig, EnsembleConfig, BMAConfig, load_config
+from tempest.utils.config import TempestConfig, load_config
 from tempest.utils.io import ensure_dir
 from tempest.training.hybrid_trainer import pad_sequences
 
 logger = logging.getLogger(__name__)
 
 
-# BMAConfig and EnsembleConfig are now imported from tempest.config
+@dataclass
+class BMAConfig:
+    """Enhanced configuration for Bayesian Model Averaging."""
+    
+    # Prior configuration
+    prior_type: str = 'uniform'  # 'uniform', 'informative', 'adaptive'
+    prior_weights: Optional[Dict[str, float]] = None
+    
+    # Approximation method
+    approximation: str = 'bic'  # 'bic', 'laplace', 'variational', 'cross_validation'
+    
+    # BIC parameters
+    bic_penalty_factor: float = 1.0
+    
+    # Laplace approximation parameters
+    laplace_num_samples: int = 1000
+    laplace_damping: float = 0.01
+    
+    # Variational inference parameters
+    vi_num_iterations: int = 100
+    vi_learning_rate: float = 0.01
+    vi_convergence_threshold: float = 1e-4
+    
+    # Cross-validation parameters
+    cv_num_folds: int = 5
+    cv_stratified: bool = True
+    
+    # Posterior settings
+    temperature: float = 1.0
+    compute_posterior_variance: bool = True
+    normalize_posteriors: bool = True
+    min_posterior_weight: float = 0.01
+    
+    # Model selection
+    use_model_averaging: bool = True
+    evidence_threshold: float = 0.05
+
+
+@dataclass
+class EnsembleConfig:
+    """Complete ensemble configuration."""
+    
+    # General settings
+    enabled: bool = True
+    num_models: int = 3
+    voting_method: str = 'bayesian_model_averaging'  # or 'weighted_average', 'voting', 'stacking'
+    
+    # BMA configuration
+    bma_config: BMAConfig = field(default_factory=BMAConfig)
+    
+    # Weighted average configuration
+    weighted_optimization: str = 'fixed'  # 'fixed', 'grid_search', 'differential_evolution', 'bayesian_optimization'
+    fixed_weights: Optional[Dict[str, float]] = None
+    
+    # Prediction aggregation
+    prediction_method: str = 'probability_averaging'  # 'logit_averaging', 'rank_averaging'
+    confidence_weighting: bool = True
+    apply_temperature_scaling: bool = False
+    
+    # Calibration settings
+    calibration_enabled: bool = True
+    calibration_method: str = 'isotonic'  # 'platt', 'beta', 'temperature_scaling'
+    use_separate_calibration_set: bool = True
+    calibration_split: float = 0.2
+    
+    # Diversity settings
+    enforce_diversity: bool = True
+    diversity_metric: str = 'disagreement'  # 'kl_divergence', 'correlation'
+    min_diversity_threshold: float = 0.1
+    
+    # Uncertainty settings
+    compute_epistemic: bool = True
+    compute_aleatoric: bool = True
+    confidence_intervals: bool = True
+    interval_alpha: float = 0.05
+    
+    # Output settings
+    output_dir: str = './ensemble_results'
 
 
 class ModelCombiner:

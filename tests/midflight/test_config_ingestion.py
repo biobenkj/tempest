@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 from tempest.utils.config import (
     TempestConfig, ModelConfig, SimulationConfig, TrainingConfig,
     EnsembleConfig, InferenceConfig, PWMConfig, LengthConstraints,
-    HybridTrainingConfig
+    HybridTrainingConfig, BMAConfig
 )
 
 
