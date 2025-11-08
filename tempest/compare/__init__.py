@@ -15,10 +15,10 @@ Main components:
 """
 
 from .evaluation_framework import ModelEvaluationFramework
-from .evaluator import TempestModelEvaluator, compare_models
+from .evaluator import ModelEvaluator, compare_models
 
 __all__ = [
     'ModelEvaluationFramework',
-    'TempestModelEvaluator', 
+    'ModelEvaluator', 
     'compare_models'
 ]
