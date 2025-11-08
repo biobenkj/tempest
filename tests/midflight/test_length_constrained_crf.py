@@ -494,20 +494,20 @@ class TestConvenienceFunction:
         mock_label_binarizer = Mock()
         mock_label_binarizer.classes_ = ['ADAPTER', 'UMI', 'ACC']
 
-        # Patch the internal builder inside length_crf
-        with patch('tempest.core.length_crf.build_model') as mock_build:
-            mock_build.return_value = mock_base_model
+        # Call directly, since the function expects a ready base_model
+        model = create_length_constrained_model(
+            base_model=mock_base_model,
+            length_constraints={'UMI': (8, 8)},
+            constraint_weight=5.0,
+            constraint_ramp_epochs=10,
+            max_seq_len=256,
+            label_binarizer=mock_label_binarizer
+        )
 
-            model = create_length_constrained_model(
-                model_config={'some': 'config'},
-                label_binarizer=mock_label_binarizer,
-                length_constraints={'UMI': (8, 8)},
-                constraint_weight=5.0,
-                constraint_ramp_epochs=10
-            )
-
-            assert model is not None
-            assert isinstance(model, ModelWithLengthConstrainedCRF)
+        assert model is not None
+        assert isinstance(model, ModelWithLengthConstrainedCRF)
+        assert model.base_model == mock_base_model
+        assert model.length_constraints == {'UMI': (8, 8)}
 
 
 class TestIntegration:
