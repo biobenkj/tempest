@@ -30,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class TempestModelEvaluator:
+class ModelEvaluator:
     """
     Specialized evaluator for Tempest models incorporating domain-specific metrics.
     """
@@ -538,7 +538,7 @@ def compare_models(models_dir: str, test_data_path: str,
     
     # Initialize evaluator
     logger.info("Initializing evaluator...")
-    evaluator = TempestModelEvaluator(config_path=config_path)
+    evaluator = ModelEvaluator(config_path=config_path)
     
     # Load models
     logger.info(f"Loading models from {models_dir}...")
