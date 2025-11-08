@@ -15,6 +15,7 @@ from . import training
 from . import inference
 from . import visualization
 from . import utils
+from . import demux
 
 # Core model building functions
 from .core import (
@@ -32,6 +33,7 @@ __all__ = [
     'inference',
     'visualization',
     'utils',
+    'demux',
     'build_cnn_bilstm_crf',
     'build_model_with_length_constraints',
     'build_model_from_config',

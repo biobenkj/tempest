@@ -1,568 +1,20 @@
 #!/usr/bin/env python3
 """
-Standalone Tempest CLI - UPDATED VERSION
-Complete command-line interface with all configuration options exposed.
+Tempest command-line interface launcher
+
+This script serves as the main entry point for the Tempest CLI,
+finding and loading the appropriate CLI module from the installation.
 """
 
 import sys
 import os
+import site
+import importlib.util
+from pathlib import Path
 
 
-# Define subcommand help texts with all new options
-SUBCOMMAND_HELP = {
-    'simulate': """usage: tempest simulate [options]
-
-Generate synthetic sequence data with advanced features
-
-REQUIRED OPTIONS:
-  --config CONFIG           Path to configuration YAML file (required)
-
-OUTPUT OPTIONS:
-  --output OUTPUT           Output file for single dataset
-  --output-dir DIR          Output directory for split datasets
-  --split                   Create train/validation split (80/20)
-  --train-fraction RATIO    Training data ratio when splitting (default: 0.8)
-  --save-stats              Save detailed simulation statistics
-
-GENERATION OPTIONS:
-  --num-sequences N         Number of sequences to generate (overrides config)
-  --seed SEED              Random seed for reproducibility
-  --full-rc-prob PROB      Probability of full read reverse complement (0.0-1.0)
-
-PWM OPTIONS (for ACC generation):
-  --pwm PWM_FILE           PWM file for motif generation
-  --pwm-temperature T      Temperature for probabilistic sampling (default: 1.2)
-                          Lower = more conservative, Higher = more diverse
-  --pwm-min-entropy E      Minimum entropy at each position (default: 0.1)
-
-WHITELIST OPTIONS:
-  --whitelist-i7 FILE      Whitelist file for i7 indices
-  --whitelist-i5 FILE      Whitelist file for i5 indices
-  --whitelist-cbc FILE     Whitelist file for cell barcodes
-
-TRANSCRIPT OPTIONS (for cDNA):
-  --transcript-fasta FILE  FASTA file for transcript-based cDNA generation
-  --fragment-mode          Enable transcript fragmentation
-  --fragment-min N         Minimum fragment length (default: 200)
-  --fragment-max N         Maximum fragment length (default: 1000)
-
-ERROR INJECTION:
-  --enable-errors          Enable sequencing error simulation
-  --substitution-rate R    Substitution error rate (default: 0.001)
-  --insertion-rate R       Insertion error rate (default: 0.0001)
-  --deletion-rate R        Deletion error rate (default: 0.0001)
-
-EXAMPLES:
-  # Basic generation with config
-  tempest simulate --config config.yaml --num-sequences 10000 --output reads.txt
-  
-  # Generate with train/validation split
-  tempest simulate --config config.yaml --num-sequences 10000 --split --output-dir data/
-  
-  # Generate with probabilistic PWM
-  tempest simulate --config config.yaml --pwm acc_pwm.txt --pwm-temperature 1.5
-  
-  # Generate with transcripts and errors
-  tempest simulate --config config.yaml --transcript-fasta gencode.fa.gz \\
-                   --fragment-mode --enable-errors --substitution-rate 0.002
-  
-  # Generate with whitelists
-  tempest simulate --config config.yaml --whitelist-i7 i7_indices.txt \\
-                   --whitelist-i5 i5_indices.txt --whitelist-cbc barcodes.txt
-""",
-    
-    'train': """usage: tempest train [options]
-
-Train Tempest models with standard, hybrid, or ensemble approaches
-
-REQUIRED OPTIONS:
-  --config CONFIG          Path to configuration YAML file (required)
-
-MODEL ARCHITECTURE:
-  --max-seq-len N          Maximum sequence length (default: from config)
-  --embedding-dim N        Embedding dimension (default: 128)
-  --lstm-units N           Number of LSTM units (default: 256)
-  --lstm-layers N          Number of LSTM layers (default: 2)
-  --dropout RATE           Dropout rate (default: 0.3)
-  --use-cnn                Add CNN layers before LSTM
-  --use-bilstm             Use bidirectional LSTM
-
-TRAINING PARAMETERS:
-  --epochs N               Number of training epochs (default: 50)
-  --batch-size N           Batch size (default: 32)
-  --learning-rate LR       Initial learning rate (default: 0.001)
-  --optimizer OPT          Optimizer: adam, sgd, rmsprop (default: adam)
-  --use-class-weights      Compute and use class weights for imbalanced data
-
-HYBRID TRAINING MODE:
-  --hybrid                 Enable hybrid training with constraints
-  
-  Constrained Decoding:
-  --constrained-decoding   Enable constrained decoding during training
-  --decoding-method M      Method: beam_search, viterbi, greedy (default: beam_search)
-  --beam-width N           Beam width for beam search (default: 5)
-  
-  Constraints:
-  --enforce-length-constraints      Enforce segment length constraints
-  --enforce-whitelist-constraints   Enforce whitelist constraints for i7/i5/CBC
-  
-  PWM Constraints:
-  --pwm PWM_FILE                   PWM file for ACC constraints
-  --use-probabilistic-pwm          Use probabilistic scoring (recommended)
-  --pwm-scoring-method M           Scoring: log_likelihood, geometric_mean, min_probability
-  --pwm-min-score S                Minimum score threshold (default: -10.0)
-  --pwm-score-weight W             Weight in loss function (default: 0.5)
-
-ENSEMBLE TRAINING:
-  --ensemble                       Train ensemble of models
-  --num-models N                   Number of models (default: 3)
-  --ensemble-voting-method M       Method: bayesian_model_averaging, weighted_average, voting
-  
-  BMA Configuration:
-  --bma-prior-type T               Prior: uniform, informative, adaptive
-  --bma-approximation A            Approximation: bic, laplace, variational, cross_validation
-  --bma-temperature T              Temperature for posterior scaling (default: 1.0)
-  
-  Model Diversity:
-  --enforce-diversity              Enforce diversity across ensemble models
-  --diversity-metric M             Metric: disagreement, correlation, kl_divergence
-  --vary-architecture              Vary architecture parameters across models
-  --vary-initialization            Use different random seeds for initialization
-  
-  Calibration:
-  --enable-calibration             Calibrate ensemble predictions
-  --calibration-method M           Method: isotonic, platt, temperature_scaling, beta
-
-PSEUDO-LABELING (for hybrid):
-  --unlabeled FILE                 Single unlabeled FASTQ file
-  --unlabeled-dir DIR              Directory of unlabeled FASTQ files
-  --max-pseudo-per-file N          Max pseudo-labels per file (default: 1000)
-  --max-pseudo-total N             Max total pseudo-labels (default: 10000)
-
-CHECKPOINTING & MONITORING:
-  --checkpoint-dir DIR             Save model checkpoints
-  --save-best-only                 Only save best model checkpoint
-  --early-stopping                 Enable early stopping
-  --patience N                     Early stopping patience (default: 10)
-  --tensorboard                    Enable TensorBoard logging
-  --log-dir DIR                    TensorBoard log directory
-
-OUTPUT:
-  --output-dir DIR                 Output directory for all artifacts
-
-EXAMPLES:
-  # Standard CRF training
-  tempest train --config config.yaml --epochs 100 --use-bilstm
-  
-  # Hybrid training with PWM constraints
-  tempest train --config config.yaml --hybrid --pwm acc_pwm.txt \\
-                --use-probabilistic-pwm --pwm-scoring-method log_likelihood
-  
-  # Hybrid with pseudo-labeling from directory
-  tempest train --config config.yaml --hybrid \\
-                --unlabeled-dir /data/fastq_files/ \\
-                --max-pseudo-per-file 500 --max-pseudo-total 5000
-  
-  # Ensemble with BMA
-  tempest train --config config.yaml --ensemble --num-models 5 \\
-                --ensemble-voting-method bayesian_model_averaging \\
-                --bma-approximation laplace --enable-calibration
-  
-  # Ensemble with diversity
-  tempest train --config config.yaml --ensemble --num-models 3 \\
-                --enforce-diversity --vary-architecture --vary-initialization
-""",
-    
-    'evaluate': """usage: tempest evaluate [options]
-
-Comprehensive model evaluation with multiple metrics
-
-REQUIRED OPTIONS:
-  --model MODEL            Path to trained model file (.h5, .keras, or ensemble/)
-  --test-data DATA         Path to test data file (.pkl, .txt, or directory)
-
-OPTIONAL OPTIONS:
-  --config CONFIG          Configuration file (uses model config if not specified)
-  --output-dir DIR         Output directory for results (default: ./evaluation_results)
-  --batch-size N           Batch size for evaluation (default: 32)
-
-EVALUATION METRICS:
-  --per-segment-metrics    Compute metrics for each segment type
-  --confusion-matrix       Generate confusion matrix
-  --boundary-accuracy      Evaluate segment boundary detection accuracy
-  --edit-distance          Compute sequence edit distance metrics
-  --bootstrap N            Bootstrap samples for confidence intervals
-
-ANALYSIS OPTIONS:
-  --save-predictions       Save all predictions to file
-  --plot-confusion         Generate confusion matrix visualization
-  --error-analysis         Perform detailed error analysis
-  --num-error-samples N    Number of samples for error analysis (default: 100)
-  --acc-evaluation         Perform ACC-specific evaluation (diversity, entropy)
-
-EXAMPLES:
-  # Basic evaluation
-  tempest evaluate --model model_final.h5 --test-data test_data.pkl
-  
-  # Comprehensive evaluation with all metrics
-  tempest evaluate --model ensemble/ --test-data test.pkl \\
-                   --per-segment-metrics --confusion-matrix \\
-                   --boundary-accuracy --edit-distance
-  
-  # Evaluation with bootstrap confidence intervals
-  tempest evaluate --model model.h5 --test-data test.pkl \\
-                   --bootstrap 1000 --save-predictions
-  
-  # Error analysis with visualizations
-  tempest evaluate --model model.h5 --test-data test.pkl \\
-                   --error-analysis --plot-confusion --num-error-samples 200
-  
-  # ACC-specific evaluation
-  tempest evaluate --model model.h5 --test-data test.pkl \\
-                   --acc-evaluation --output-dir acc_results/
-""",
-    
-    'visualize': """usage: tempest visualize [options]
-
-Create comprehensive visualizations of models and results
-
-REQUIRED OPTIONS:
-  --type TYPE              Visualization type (see list below)
-  --input INPUT            Input file or directory
-
-VISUALIZATION TYPES:
-  training                 Training history curves (loss, accuracy)
-  predictions              Sequence predictions with labels
-  attention                Attention weights heatmap
-  embeddings               Embedding space visualization (t-SNE, UMAP, PCA)
-  segment_performance      Per-segment performance metrics
-  length_distribution      Segment length distributions
-  model_comparison         Compare multiple model performances
-  acc_pwm                  ACC PWM heatmap and sequence logo
-
-GENERAL OPTIONS:
-  --output-dir DIR         Output directory (default: ./visualizations)
-  --model MODEL            Model file (required for attention/embeddings)
-  --format FORMAT          Output format: png, pdf, svg, html (default: png)
-  --dpi DPI                Resolution for raster formats (default: 150)
-  --style STYLE            Plot style: default, paper, presentation
-
-TYPE-SPECIFIC OPTIONS:
-  # For predictions
-  --num-samples N          Number of samples to visualize (default: 10)
-  --show-confidence        Show prediction confidence scores
-  
-  # For training curves
-  --smoothing N            Smoothing window size
-  
-  # For embeddings
-  --embedding-method M     Method: tsne, umap, pca (default: tsne)
-  
-  # For ACC PWM
-  --pwm-file FILE          PWM file for visualization
-
-EXAMPLES:
-  # Visualize training history
-  tempest visualize --type training --input history.json \\
-                    --smoothing 5 --format pdf
-  
-  # Visualize predictions with confidence
-  tempest visualize --type predictions --input predictions.pkl \\
-                    --num-samples 20 --show-confidence
-  
-  # Visualize attention weights
-  tempest visualize --type attention --model model.h5 \\
-                    --input test_sequences.txt
-  
-  # Visualize embeddings with UMAP
-  tempest visualize --type embeddings --model model.h5 \\
-                    --embedding-method umap --style paper
-  
-  # Visualize ACC PWM
-  tempest visualize --type acc_pwm --pwm-file acc_pwm.txt \\
-                    --format svg --dpi 300
-  
-  # Model comparison
-  tempest visualize --type model_comparison --input comparison_results.json \\
-                    --style presentation
-""",
-    
-    'compare': """usage: tempest compare [options]
-
-Compare multiple trained models comprehensively
-
-REQUIRED OPTIONS:
-  --test-data DATA         Path to test data file (.pkl format)
-  
-  # Specify models using one of:
-  --models-dir DIR         Directory containing all models to compare
-  --models LIST            Comma-separated list of model paths
-
-OPTIONAL OPTIONS:
-  --config CONFIG          Configuration file
-  --output-dir DIR         Output directory (default: ./comparison_results)
-  --dpi DPI                DPI for plots (default: 150)
-
-METRICS OPTIONS:
-  --metrics LIST           Comma-separated metrics to evaluate
-                          (default: accuracy,precision,recall,f1,segment_accuracy,
-                           edit_distance,boundary_accuracy)
-  --include-ensemble-metrics    Include diversity, uncertainty, agreement metrics
-  --pairwise-agreement          Compute pairwise model agreement
-  --bootstrap N                 Bootstrap samples for confidence intervals
-
-OUTPUT OPTIONS:
-  --no-plots               Skip visualization generation
-  --no-report              Skip markdown report generation
-  --profile-performance    Profile inference speed and memory usage
-
-EXAMPLES:
-  # Compare all models in directory
-  tempest compare --models-dir ./trained_models --test-data test.pkl
-  
-  # Compare specific models
-  tempest compare --models model1.h5,model2.h5,ensemble/ \\
-                  --test-data test.pkl --output-dir comparison/
-  
-  # Comprehensive comparison with ensemble metrics
-  tempest compare --models-dir ./models --test-data test.pkl \\
-                  --include-ensemble-metrics --pairwise-agreement \\
-                  --bootstrap 1000
-  
-  # Performance profiling
-  tempest compare --models-dir ./models --test-data test.pkl \\
-                  --profile-performance --output-dir perf_comparison/
-  
-  # Quick comparison without visualizations
-  tempest compare --models-dir ./models --test-data test.pkl \\
-                  --no-plots --no-report --metrics accuracy,f1
-""",
-    
-    'combine': """usage: tempest combine [options]
-
-Combine models using advanced ensemble methods
-
-MODEL SPECIFICATION:
-  # Use one of:
-  --models-dir DIR         Directory containing models to combine
-  --models LIST            Comma-separated list of [name:]path pairs
-
-COMBINATION METHOD:
-  --method METHOD          Method: bayesian_model_averaging (bma), 
-                          weighted_average, voting, stacking
-                          (default: bayesian_model_averaging)
-
-BMA CONFIGURATION:
-  --approximation A        BMA approximation method:
-                          bic: Fast Bayesian Information Criterion
-                          laplace: Laplace approximation with Hessian
-                          variational: Variational inference with ELBO
-                          cross_validation: K-fold CV-based evidence
-                          (default: bic)
-  
-  --prior-type TYPE        Prior distribution:
-                          uniform: Equal prior for all models
-                          informative: User-specified weights
-                          adaptive: Complexity-based adaptive prior
-                          (default: uniform)
-  
-  --prior-weights W        Prior weights for informative prior
-                          Format: model1:0.5,model2:0.3,model3:0.2
-  
-  --temperature T          Temperature for posterior scaling (default: 1.0)
-  --bic-penalty-factor F   BIC penalty factor (default: 1.0)
-
-CALIBRATION:
-  --calibrate              Enable prediction calibration
-  --calibration-method M   Method: isotonic, platt, temperature_scaling, beta
-                          (default: isotonic)
-  --calibration-data FILE  Separate calibration data (uses validation if not specified)
-
-DATA:
-  --validation-data FILE   Validation data for weight computation (required for BMA)
-  --test-data FILE         Test data for final evaluation (optional)
-
-WEIGHTED AVERAGE:
-  --weights W              Custom weights (format: model1:0.6,model2:0.4)
-  --weighted-optimization  Optimization: fixed, grid_search, 
-                          differential_evolution, bayesian_optimization
-                          (default: fixed)
-
-CONFIGURATION:
-  --ensemble-config FILE   YAML file with full ensemble configuration
-
-OUTPUT:
-  --output-dir DIR         Output directory (default: ./combine_results)
-  --plot-uncertainty       Generate uncertainty distribution plots
-
-EXAMPLES:
-  # BMA with BIC approximation
-  tempest combine --models-dir ./models --method bma \\
-                  --approximation bic --validation-data val.pkl
-  
-  # BMA with Laplace approximation and calibration
-  tempest combine --models-dir ./models --method bma \\
-                  --approximation laplace --validation-data val.pkl \\
-                  --calibrate --calibration-method isotonic
-  
-  # BMA with informative prior
-  tempest combine --models model1.h5,model2.h5,model3.h5 \\
-                  --method bma --prior-type informative \\
-                  --prior-weights model1:0.5,model2:0.3,model3:0.2 \\
-                  --validation-data val.pkl
-  
-  # Weighted average with optimization
-  tempest combine --models-dir ./models --method weighted_average \\
-                  --weighted-optimization grid_search \\
-                  --validation-data val.pkl
-  
-  # Full configuration from YAML
-  tempest combine --models-dir ./models \\
-                  --ensemble-config ensemble_config.yaml \\
-                  --validation-data val.pkl --test-data test.pkl \\
-                  --plot-uncertainty
-""",
-}
-
-
-def show_quick_help():
-    """Display quick help message without importing any modules."""
-    help_text = """usage: tempest [-h] [--version] [--log-level LEVEL] [--debug] {simulate,train,evaluate,compare,combine,visualize} ...
-
-Tempest - Advanced sequence annotation with length-constrained CRFs
-Version 2.0.0
-
-COMMANDS:
-=========
-  simulate              Generate synthetic sequence data with configurable architecture
-  train                 Train models (standard CRF, hybrid, or ensemble with BMA)
-  evaluate              Comprehensive model evaluation with multiple metrics
-  compare               Compare multiple trained models
-  combine               Combine models using Bayesian Model Averaging or voting
-  visualize             Create comprehensive visualizations
-
-KEY FEATURES:
-=============
-• Length-constrained CRFs     - Enforce biologically meaningful segment sizes
-• Probabilistic PWM integration - Generate diverse ACC sequences with controlled variation
-• Hybrid training modes        - Combine supervised learning with constraints
-• Bayesian Model Averaging     - Principled ensemble combination with uncertainty
-• Pseudo-labeling             - Leverage unlabeled FASTQ data
-• Comprehensive evaluation    - Per-segment metrics, bootstrap CIs, error analysis
-
-QUICK START:
-============
-  # 1. Generate training data with PWM-based ACC sequences
-  tempest simulate --config config.yaml --num-sequences 10000 --split \\
-                   --pwm acc_pwm.txt --pwm-temperature 1.2
-
-  # 2. Train hybrid model with constraints
-  tempest train --config config.yaml --hybrid --pwm acc_pwm.txt \\
-                --use-probabilistic-pwm --enforce-length-constraints
-
-  # 3. Train ensemble with BMA
-  tempest train --config config.yaml --ensemble --num-models 5 \\
-                --ensemble-voting-method bayesian_model_averaging
-
-  # 4. Evaluate model
-  tempest evaluate --model model_final.h5 --test-data test.pkl \\
-                   --per-segment-metrics --confusion-matrix
-
-  # 5. Compare models
-  tempest compare --models-dir ./models --test-data test.pkl \\
-                  --include-ensemble-metrics
-
-  # 6. Combine models with BMA
-  tempest combine --models-dir ./models --method bma \\
-                  --approximation laplace --validation-data val.pkl
-
-CONFIGURATION:
-==============
-Tempest uses YAML configuration files to control:
-  • Model architecture (LSTM layers, units, dropout, CNN, BiLSTM)
-  • Simulation parameters (sequence structure, lengths, error rates)
-  • Training settings (epochs, batch size, optimizer, early stopping)
-  • Hybrid constraints (length, whitelist, PWM)
-  • Ensemble configuration (BMA, diversity, calibration)
-
-Example configurations are provided in the config/ directory:
-  • config.yaml                    - Standard configuration
-  • hybrid_config.yaml             - Hybrid training with constraints
-  • ensemble_config.yaml           - Ensemble with BMA
-  • custom_tempest_config_probabilistic.yaml - Your custom configuration
-
-GLOBAL OPTIONS:
-===============
-  --version              Show version information
-  --log-level LEVEL      Set logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
-  --log-file FILE        Log to file in addition to console
-  --debug                Enable debug mode with verbose output
-
-DETAILED HELP:
-==============
-For detailed help on any command, use:
-  tempest <command> --help
-
-Examples:
-  tempest simulate --help   # Data generation options
-  tempest train --help      # Training configurations
-  tempest evaluate --help   # Evaluation metrics
-  tempest combine --help    # BMA and ensemble options
-
-DOCUMENTATION:
-==============
-For complete documentation, tutorials, and examples:
-  https://github.com/yourusername/tempest
-
-Report issues:
-  https://github.com/yourusername/tempest/issues
-
-© 2024 Tempest - Advanced Sequence Annotation Framework
-"""
-    print(help_text)
-    sys.exit(0)
-
-
-def show_subcommand_help(subcommand):
-    """Display help for a specific subcommand."""
-    if subcommand in SUBCOMMAND_HELP:
-        print(SUBCOMMAND_HELP[subcommand])
-    else:
-        print(f"Error: Unknown command '{subcommand}'", file=sys.stderr)
-        print("\nAvailable commands: simulate, train, evaluate, compare, combine, visualize", file=sys.stderr)
-        sys.exit(1)
-    sys.exit(0)
-
-
-def main():
-    """Main entry point that checks for help before ANY imports."""
-    # Check for quick help FIRST, before any imports
-    if len(sys.argv) == 1:
-        show_quick_help()
-    
-    # Check if help is requested at top level
-    if ('--help' in sys.argv or '-h' in sys.argv) and len(sys.argv) == 2:
-        show_quick_help()
-    
-    # Check for version
-    if '--version' in sys.argv:
-        print("Tempest version 2.0.0")
-        sys.exit(0)
-    
-    # Check for subcommand help requests
-    if len(sys.argv) >= 3:
-        # Get the potential subcommand
-        subcommand = None
-        for arg in sys.argv[1:]:
-            if not arg.startswith('-'):
-                subcommand = arg
-                break
-        
-        # Check if help is requested for this subcommand
-        if subcommand and ('--help' in sys.argv or '-h' in sys.argv):
-            show_subcommand_help(subcommand)
-    
-    # Set up TensorFlow suppression before any imports
+def suppress_tensorflow_logging():
+    """Suppress TensorFlow verbose logging unless debug mode is enabled."""
     if '--debug' not in sys.argv and os.getenv('TEMPEST_DEBUG', '0') != '1':
         # Suppress TensorFlow C++ logging
         os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -578,53 +30,104 @@ def main():
         import logging
         logging.getLogger('tensorflow').setLevel(logging.ERROR)
         logging.getLogger('tensorflow').propagate = False
+
+
+def find_tempest_cli():
+    """Find the Tempest CLI module in various possible locations."""
+    # Get the directory containing this script
+    script_dir = Path(__file__).parent.resolve()
     
-    # NOW import and run tempest
-    import site
-    import importlib.util
-    
-    # Try to find tempest installation
+    # Possible locations for the tempest package
     tempest_locations = [
-        # Development install locations
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tempest'),
-        # Current directory structure
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tempest'),
+        # Development install - sibling to bin directory
+        script_dir.parent / 'tempest',
+        # Development install - current directory structure
+        script_dir / '..' / 'tempest',
+        # Direct path if script is in tempest/bin
+        script_dir.parent if script_dir.name == 'bin' else None,
         # Site packages locations
-        *[os.path.join(sp, 'tempest') for sp in site.getsitepackages()],
+        *[Path(sp) / 'tempest' for sp in site.getsitepackages()],
         # User site packages
-        os.path.join(site.getusersitepackages(), 'tempest') if site.getusersitepackages() else None,
+        Path(site.getusersitepackages()) / 'tempest' if site.getusersitepackages() else None,
     ]
     
-    cli_path = None
-    for loc in tempest_locations:
-        if loc and os.path.exists(loc):
-            # Try to find the CLI module
-            for cli_name in ['cli.py', 'cli_updated.py']:
-                potential_cli = os.path.join(loc, cli_name)
-                if os.path.exists(potential_cli):
-                    cli_path = potential_cli
-                    break
-            if cli_path:
-                break
+    # Look for the CLI module in each location
+    for location in tempest_locations:
+        if location and location.exists():
+            # Check for CLI module files
+            cli_candidates = [
+                location / 'cli.py',
+                location / 'cli_updated.py',
+            ]
+            
+            for cli_path in cli_candidates:
+                if cli_path.exists():
+                    return cli_path
+    
+    return None
+
+
+def main():
+    """Main entry point that loads and runs the Tempest CLI."""
+    # Check for version or help early
+    if '--version' in sys.argv:
+        print("Tempest version 2.0.0")
+        sys.exit(0)
+    
+    if len(sys.argv) == 1 or (len(sys.argv) == 2 and sys.argv[1] in ['--help', '-h']):
+        # Show basic help without loading the full CLI
+        print("""
+Tempest - Advanced sequence annotation with length-constrained CRFs
+
+Usage: tempest <command> [options]
+
+Commands:
+  simulate    Generate synthetic sequence data
+  train       Train Tempest models
+  evaluate    Evaluate trained models
+  visualize   Create visualizations
+  compare     Compare multiple models
+  combine     Combine models using ensemble methods
+  demux       Demultiplex FASTQ files
+
+Use 'tempest <command> --help' for detailed help on each command.
+
+Global options:
+  --version   Show version information
+  --help      Show this help message
+  --debug     Enable debug mode with verbose output
+        """)
+        sys.exit(0)
+    
+    # Suppress TensorFlow logging before any imports
+    suppress_tensorflow_logging()
+    
+    # Find the CLI module
+    cli_path = find_tempest_cli()
     
     if not cli_path:
-        print("Error: Could not find tempest CLI module!", file=sys.stderr)
-        print("Please ensure tempest is properly installed.", file=sys.stderr)
-        print("\nTry: pip install -e .", file=sys.stderr)
+        print("Error: Could not find Tempest CLI module!", file=sys.stderr)
+        print("Please ensure Tempest is properly installed.", file=sys.stderr)
+        print("\nTry one of the following:", file=sys.stderr)
+        print("  pip install -e .", file=sys.stderr)
+        print("  python setup.py install", file=sys.stderr)
         sys.exit(1)
     
-    # Load the CLI module directly
+    # Add the tempest directory to Python path
+    tempest_dir = cli_path.parent
+    sys.path.insert(0, str(tempest_dir))
+    
+    # Load the CLI module
     spec = importlib.util.spec_from_file_location("tempest_cli", cli_path)
-    tempest_cli = importlib.util.module_from_spec(spec)
-    
-    # Add tempest directory to path so the CLI can find its imports
-    sys.path.insert(0, os.path.dirname(cli_path))
-    
-    # Execute the module
-    spec.loader.exec_module(tempest_cli)
-    
-    # Run the CLI main function
-    tempest_cli.main()
+    if spec and spec.loader:
+        tempest_cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tempest_cli)
+        
+        # Run the CLI
+        tempest_cli.main()
+    else:
+        print(f"Error: Could not load CLI module from {cli_path}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == '__main__':
