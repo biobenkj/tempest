@@ -1,805 +1,301 @@
 #!/usr/bin/env python3
 """
-Tempest CLI with modular subcommands
+Tempest CLI
 
-This module provides the main command-line interface for Tempest,
-organizing functionality into clear subcommands for simulation,
-training, evaluation, visualization, demultiplexing, and model combination.
+Provides subcommands for simulation, training, evaluation, visualization,
+demultiplexing, and ensemble model combination.
 """
 
+import typer
 import sys
 import os
-import argparse
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional
+from textwrap import dedent
 import yaml
-import json
+from rich.console import Console
+from rich.progress import Progress
 
-# Configure logging
+# import sub-applications
+from tempest.simulate import simulate_app
+from tempest.train import train_app
+from tempest.evaluate import evaluate_app
+from tempest.compare import compare_app
+from tempest.combine import combine_app
+from tempest.demux import demux_app
+
+__version__ = "0.2.0"
+console = Console()
+
+# main
+app = typer.Typer(
+    name="tempest",
+    help="TEMPEST: Advanced sequence annotation with length-constrained CRFs",
+    add_completion=False,
+    rich_markup_mode="rich",
+)
+
+# register subcommands
+app.add_typer(simulate_app, name="simulate", help="Generate synthetic sequence data")
+app.add_typer(train_app, name="train", help="Train Tempest models")
+app.add_typer(evaluate_app, name="evaluate", help="Evaluate trained models")
+app.add_typer(compare_app, name="compare", help="Compare multiple models")
+app.add_typer(combine_app, name="combine", help="Combine models using ensemble methods")
+app.add_typer(demux_app, name="demux", help="Demultiplex FASTQ files")
+
+# logging and tf suppression utils
 def setup_logging(level: str = "INFO", log_file: Optional[str] = None):
     """Set up logging configuration."""
     numeric_level = getattr(logging, level.upper(), None)
     if not isinstance(numeric_level, int):
-        raise ValueError(f'Invalid log level: {level}')
-    
-    handlers = []
-    
-    # Console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(numeric_level)
-    handlers.append(console_handler)
-    
-    # File handler if specified
+        raise ValueError(f"Invalid log level: {level}")
+
+    handlers = [logging.StreamHandler()]
     if log_file:
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(numeric_level)
-        handlers.append(file_handler)
-    
+        handlers.append(logging.FileHandler(log_file))
+
     logging.basicConfig(
         level=numeric_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        handlers=handlers
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=handlers,
     )
 
-logger = logging.getLogger(__name__)
+
+def suppress_tensorflow_logging():
+    """Suppress TensorFlow verbose logging unless debug mode is enabled."""
+    if "--debug" not in sys.argv and os.getenv("TEMPEST_DEBUG", "0") != "1":
+        os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+        os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+        os.environ.setdefault("TF_DISABLE_PLUGIN_REGISTRATION", "1")
+        os.environ.setdefault("TF_ENABLE_DEPRECATION_WARNINGS", "0")
+
+        import warnings
+        warnings.filterwarnings("ignore")
+
+        logging.getLogger("tensorflow").setLevel(logging.ERROR)
+        logging.getLogger("tensorflow").propagate = False
+
+# cli metadata - global options
+@app.callback()
+def main_callback(
+    debug: bool = typer.Option(
+        False, "--debug", help="Enable debug mode with verbose output"
+    ),
+    log_level: str = typer.Option(
+        "INFO", "--log-level", help="Set logging level (DEBUG, INFO, WARNING, ERROR)"
+    ),
+    log_file: Optional[Path] = typer.Option(
+        None, "--log-file", help="Save logs to a file"
+    ),
+):
+    """Global options for the Tempest CLI."""
+    suppress_tensorflow_logging()
+    setup_logging(
+        level="DEBUG" if debug else log_level,
+        log_file=str(log_file) if log_file else None,
+    )
+
+    if debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+        os.environ["TEMPEST_DEBUG"] = "1"
+
+# core commands
+@app.command()
+def version():
+    """Show Tempest version information."""
+    console.print(f"[bold blue]Tempest[/bold blue] version {__version__}")
+    console.print("Long read RNA-seq sequence annotation toolkit")
+    console.print("© Ben Johnson")
 
 
-def simulate_command(args):
+@app.command()
+def info():
+    """Display system and environment information."""
+    import platform
+
+    console.print("[bold blue]System Information[/bold blue]")
+    console.print("=" * 60)
+    console.print(f"[cyan]Python:[/cyan] {sys.version.split()[0]}")
+    console.print(f"[cyan]Platform:[/cyan] {platform.platform()}")
+    console.print(f"[cyan]Tempest Version:[/cyan] {__version__}")
+
+    try:
+        import tensorflow as tf
+        console.print(f"[cyan]TensorFlow:[/cyan] {tf.__version__}")
+        gpus = tf.config.list_physical_devices("GPU")
+        if gpus:
+            console.print(f"[cyan]GPUs Available:[/cyan] {len(gpus)}")
+            for i, gpu in enumerate(gpus):
+                console.print(f"  GPU {i}: {gpu.name}")
+        else:
+            console.print("[yellow]No GPUs detected[/yellow]")
+    except ImportError:
+        console.print("[red]TensorFlow not installed[/red]")
+
+# init a new project
+@app.command()
+def init(
+    project_dir: Path = typer.Argument(
+        Path("."), help="Directory to initialize the Tempest project."
+    ),
+    with_examples: bool = typer.Option(
+        False, "--with-examples", help="Include example data and scripts."
+    ),
+):
     """
-    Simulate sequence reads for training and testing.
+    Initialize a new Tempest project directory and create a default
+    configuration modeled after the probabilistic PWM architecture,
+    excluding RP1 and RP2 sequences.
     """
-    from tempest.utils import load_config
-    from tempest.data import SequenceSimulator
-    
-    logger.info("="*80)
-    logger.info(" " * 30 + "TEMPEST SIMULATOR")
-    logger.info("="*80)
-    
-    # Load base configuration
-    config = load_config(args.config)
-    
-    # Override simulation parameters from command line
-    if args.num_sequences:
-        config.simulation.num_sequences = args.num_sequences
-    if args.seed:
-        config.simulation.random_seed = args.seed
-    
-    # Create simulator
-    simulator = SequenceSimulator(config)
-    
-    # Generate sequences
-    if args.split:
-        # Generate train/validation split
-        train_fraction = args.train_fraction
-        logger.info(f"Generating {config.simulation.num_sequences} sequences")
-        logger.info(f"Split: {train_fraction:.0%} train, {1-train_fraction:.0%} validation")
-        
-        train_data, val_data = simulator.generate_split(
-            num_sequences=config.simulation.num_sequences,
-            train_fraction=train_fraction
-        )
-        
-        # Save to output directory
-        output_dir = Path(args.output_dir or "./data")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        train_file = output_dir / "train.txt"
-        val_file = output_dir / "val.txt"
-        
-        simulator.save_sequences(train_data, train_file)
-        simulator.save_sequences(val_data, val_file)
-        
-        logger.info(f"Train data saved to: {train_file}")
-        logger.info(f"Validation data saved to: {val_file}")
-    else:
-        # Generate single dataset
-        logger.info(f"Generating {config.simulation.num_sequences} sequences")
-        sequences = simulator.generate(config.simulation.num_sequences)
-        
-        output_file = Path(args.output or "sequences.txt")
-        simulator.save_sequences(sequences, output_file)
-        logger.info(f"Sequences saved to: {output_file}")
-    
-    logger.info("Simulation complete!")
+    console.print(f"[bold blue]Initializing Tempest project in {project_dir}[/bold blue]")
+    dirs = [
+        project_dir / "configs",
+        project_dir / "data",
+        project_dir / "models",
+        project_dir / "results",
+        project_dir / "logs",
+        project_dir / "plots",
+    ]
 
+    with Progress() as progress:
+        task = progress.add_task("[cyan]Creating directories...", total=len(dirs))
+        for d in dirs:
+            d.mkdir(parents=True, exist_ok=True)
+            progress.advance(task)
 
-def train_command(args):
-    """
-    Train Tempest models with standard, hybrid, or ensemble approaches.
-    """
-    from tempest.main import main as train_main
-    from tempest.utils import load_config
-    
-    logger.info("="*80)
-    logger.info(" " * 30 + "TEMPEST TRAINER")
-    logger.info("="*80)
-    
-    # Convert argparse namespace to dict for train_main
-    train_args = vars(args).copy()
-    
-    # Call the training main function
-    train_main(train_args)
+    # example config
+    default_config = {
+        "model": {
+            "max_seq_len": 1500,
+            "num_labels": 9,  # removed RP1/RP2
+            "embedding_dim": 128,
+            "lstm_units": 256,
+            "lstm_layers": 2,
+            "dropout": 0.3,
+            "use_cnn": True,
+            "use_bilstm": True,
+            "batch_size": 32,
+        },
+        "simulation": {
+            "num_sequences": 50000,
+            "train_split": 0.8,
+            "random_seed": 42,
+            "sequence_order": [
+                "p7", "i7", "UMI", "ACC", "cDNA", "polyA", "CBC", "i5", "p5"
+            ],
+            "sequences": {
+                "p7": "CAAGCAGAAGACGGCATACGAGAT",
+                "p5": "GTGTAGATCTCGGTGGTCGCCGTATCATT",
+                "UMI": "random",
+                "cDNA": "transcript",
+                "polyA": "polya",
+            },
+            "whitelist_files": {
+                "i7": "whitelist/udi_i7.txt",
+                "i5": "whitelist/udi_i5.txt",
+                "CBC": "whitelist/cbc.txt",
+            },
+            "pwm_files": {"ACC": "whitelist/acc_pwm.txt"},
+            "pwm": {
+                "pwm_file": "whitelist/acc_pwm.txt",
+                "temperature": 1.2,
+                "min_entropy": 0.1,
+                "diversity_boost": 1.0,
+                "pattern": "ACCSSV",
+            },
+            "segment_generation": {
+                "lengths": {
+                    "p7": 24, "i7": 8, "UMI": 8, "ACC": 6,
+                    "cDNA": 500, "polyA": 30, "CBC": 6, "i5": 8, "p5": 29
+                },
+                "generation_mode": {
+                    "p7": "fixed", "i7": "whitelist", "UMI": "random",
+                    "ACC": "pwm", "cDNA": "transcript", "polyA": "polya",
+                    "CBC": "whitelist", "i5": "whitelist", "p5": "fixed"
+                },
+            },
+            "sequence_lengths": {
+                "p7": {"min": 24, "max": 24},
+                "i7": {"min": 8, "max": 8},
+                "UMI": {"min": 8, "max": 8},
+                "ACC": {"min": 6, "max": 6},
+                "cDNA": {"min": 200, "max": 1000},
+                "polyA": {"min": 10, "max": 50},
+                "CBC": {"min": 6, "max": 6},
+                "i5": {"min": 8, "max": 8},
+                "p5": {"min": 29, "max": 29},
+            },
+        },
+        "training": {
+            "epochs": 50,
+            "batch_size": 32,
+            "learning_rate": 0.001,
+            "optimizer": "adam",
+            "early_stopping": {"enabled": True, "patience": 10, "min_delta": 0.0001},
+            "use_class_weights": True,
+        },
+        "evaluation": {"metrics": ["accuracy", "f1", "segment_accuracy"]},
+        "output": {"save_dir": "./tempest_output", "save_model": True},
+    }
 
+    config_path = project_dir / "configs" / "default.yaml"
+    yaml.safe_dump(default_config, config_path.open("w"))
+    console.print(f"[green]✓[/green] Created default configuration: {config_path}")
 
-def evaluate_command(args):
-    """
-    Evaluate trained models on test data.
-    """
-    from tempest.compare.evaluate import ModelEvaluator
-    from tempest.utils import load_config
-    
-    logger.info("="*80)
-    logger.info(" " * 30 + "TEMPEST EVALUATOR")
-    logger.info("="*80)
-    
-    # Load configuration
-    config = None
-    if args.config:
-        config = load_config(args.config)
-    
-    # Create evaluator
-    evaluator = ModelEvaluator(
-        model_path=args.model,
-        config=config
-    )
-    
-    # Load test data
-    logger.info(f"Loading test data from: {args.test_data}")
-    test_data = evaluator.load_test_data(args.test_data)
-    
-    # Evaluate
-    results = evaluator.evaluate(
-        test_data,
-        batch_size=args.batch_size,
-        per_segment_metrics=args.per_segment_metrics,
-        confusion_matrix=args.confusion_matrix
-    )
-    
-    # Save results
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    results_file = output_dir / "evaluation_results.json"
-    with open(results_file, 'w') as f:
-        json.dump(results, f, indent=2)
-    
-    logger.info(f"Results saved to: {results_file}")
-    
-    # Print summary
-    logger.info("\nEvaluation Results:")
-    logger.info(f"Overall Accuracy: {results['overall_accuracy']:.4f}")
-    if 'segment_metrics' in results:
-        logger.info("\nPer-segment F1 scores:")
-        for segment, metrics in results['segment_metrics'].items():
-            logger.info(f"  {segment}: {metrics['f1_score']:.4f}")
+    # optional examples
+    if with_examples:
+        ex_data = project_dir / "data" / "example_sequences.txt"
+        ex_data.write_text("ATCGATCG\nGCTAGCTA\nTAGCTAGC\n")
+        ex_script = project_dir / "train_example.sh"
+        ex_script.write_text(dedent("""\
+            #!/bin/bash
+            tempest simulate generate --config configs/default.yaml --output-dir data
+            tempest train standard --config configs/default.yaml --output-dir models
+            tempest evaluate performance --model models/model.h5 --test-data data/test.txt
+        """))
+        ex_script.chmod(0o755)
+        console.print("[green]✓[/green] Added example data and training script.")
 
+    readme = project_dir / "README.md"
+    readme.write_text(dedent(f"""\
+        # {project_dir.name}
 
-def visualize_command(args):
-    """
-    Create visualizations from training or evaluation results.
-    """
-    from tempest.visualization import create_visualizations
-    
-    logger.info("="*80)
-    logger.info(" " * 30 + "TEMPEST VISUALIZER")
-    logger.info("="*80)
-    
-    # Create visualizations based on input type
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    if args.history:
-        # Visualize training history
-        logger.info(f"Loading training history from: {args.history}")
-        create_visualizations(
-            history_file=args.history,
-            output_dir=output_dir,
-            types=['loss', 'accuracy']
-        )
-    
-    if args.confusion_matrix:
-        # Visualize confusion matrix
-        logger.info(f"Loading confusion matrix from: {args.confusion_matrix}")
-        create_visualizations(
-            confusion_file=args.confusion_matrix,
-            output_dir=output_dir,
-            types=['confusion']
-        )
-    
-    if args.predictions:
-        # Visualize predictions
-        logger.info(f"Loading predictions from: {args.predictions}")
-        create_visualizations(
-            predictions_file=args.predictions,
-            output_dir=output_dir,
-            types=['predictions'],
-            num_examples=args.num_examples
-        )
-    
-    logger.info(f"Visualizations saved to: {output_dir}")
+        A Tempest project initialized with probabilistic PWM configuration (RP1/RP2 removed).
 
+        ## Structure
+        {project_dir.name}/
+        ├── configs/
+        ├── data/
+        ├── models/
+        ├── results/
+        ├── logs/
+        └── plots/
 
-def compare_command(args):
-    """
-    Compare multiple trained models.
-    """
-    from tempest.compare import ModelComparator
-    
-    logger.info("="*80)
-    logger.info(" " * 30 + "TEMPEST COMPARATOR")
-    logger.info("="*80)
-    
-    # Create comparator
-    comparator = ModelComparator()
-    
-    # Load models
-    model_paths = []
-    if args.models:
-        model_paths = args.models
-    elif args.models_dir:
-        models_dir = Path(args.models_dir)
-        model_paths = list(models_dir.glob("*.h5")) + list(models_dir.glob("*.keras"))
-    
-    logger.info(f"Comparing {len(model_paths)} models")
-    
-    # Compare models
-    results = comparator.compare(
-        model_paths=model_paths,
-        test_data=args.test_data,
-        metrics=args.metrics or ['accuracy', 'f1_score', 'precision', 'recall']
-    )
-    
-    # Save results
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    comparison_file = output_dir / "model_comparison.json"
-    with open(comparison_file, 'w') as f:
-        json.dump(results, f, indent=2)
-    
-    logger.info(f"Comparison saved to: {comparison_file}")
-    
-    # Print summary
-    logger.info("\nModel Comparison Results:")
-    for model_name, metrics in results.items():
-        logger.info(f"\n{model_name}:")
-        for metric, value in metrics.items():
-            logger.info(f"  {metric}: {value:.4f}")
+        ## Next Steps
+        1. Edit `configs/default.yaml` for your architecture.
+        2. Generate data: `tempest simulate generate --config configs/default.yaml`
+        3. Train a model: `tempest train standard --config configs/default.yaml`
+    """))
+    console.print("[bold green]Project initialized successfully![/bold green]")
 
-
-def combine_command(args):
-    """
-    Combine multiple models using ensemble methods.
-    """
-    from tempest.inference.combine import ModelCombiner
-    
-    logger.info("="*80)
-    logger.info(" " * 30 + "TEMPEST COMBINER")
-    logger.info("="*80)
-    
-    # Get model paths
-    model_paths = []
-    if args.models:
-        model_paths = args.models
-    elif args.models_dir:
-        models_dir = Path(args.models_dir)
-        model_paths = list(models_dir.glob("*.h5")) + list(models_dir.glob("*.keras"))
-    
-    logger.info(f"Combining {len(model_paths)} models using {args.method}")
-    
-    # Create combiner
-    combiner = ModelCombiner(
-        model_paths=model_paths,
-        method=args.method,
-        validation_data=args.validation_data
-    )
-    
-    # Combine models
-    if args.method == 'bma':
-        ensemble_model = combiner.combine_bma(
-            approximation=args.approximation,
-            temperature=args.temperature
-        )
-    elif args.method == 'weighted_average':
-        ensemble_model = combiner.combine_weighted()
-    else:  # voting
-        ensemble_model = combiner.combine_voting()
-    
-    # Save ensemble model
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    ensemble_file = output_dir / "ensemble_model.pkl"
-    combiner.save_ensemble(ensemble_model, ensemble_file)
-    
-    logger.info(f"Ensemble model saved to: {ensemble_file}")
-
-
-def demux_command(args):
-    """
-    Demultiplex FASTQ files using trained model.
-    """
-    from tempest.demux import ReadDemultiplexer, BarcodeWhitelist
-    
-    logger.info("="*80)
-    logger.info(" " * 30 + "TEMPEST DEMUX")
-    logger.info("="*80)
-    
-    # Create output directory
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Load whitelists if provided
-    whitelists = BarcodeWhitelist.from_files(
-        cbc_file=args.whitelist_cbc,
-        i5_file=args.whitelist_i5,
-        i7_file=args.whitelist_i7
-    )
-    
-    # Create demultiplexer
-    demux = ReadDemultiplexer(
-        model_path=args.model,
-        whitelists=whitelists,
-        max_edit_distance=args.max_edit_distance,
-        batch_size=args.batch_size
-    )
-    
-    # Process input
-    if args.input_dir:
-        # Process directory of FASTQs
-        results = demux.process_directory(
-            args.input_dir,
-            str(output_dir),
-            file_pattern=args.file_pattern
-        )
-    else:
-        # Process single FASTQ file
-        results = demux.process_fastq_file(
-            args.input,
-            str(output_dir)
-        )
-    
-    # Generate visualizations if requested
-    if args.plot_metrics and 'statistics' in results:
-        try:
-            from tempest.visualization import plot_demux_metrics
-            plot_demux_metrics(results, output_dir)
-            logger.info(f"Visualizations saved to: {output_dir}")
-        except ImportError:
-            logger.warning("Visualization module not available")
-    
-    logger.info("\nDemultiplexing Complete!")
-    logger.info(f"Results saved to: {output_dir}")
-    
-    # Print key metrics
-    if 'statistics' in results:
-        stats = results['statistics']
-        logger.info("\nKey Metrics:")
-        for key, value in stats.items():
-            if isinstance(value, float):
-                logger.info(f"  {key}: {value:.4f}")
-            else:
-                logger.info(f"  {key}: {value}")
-
-
-def create_parser():
-    """Create the argument parser with all commands and options."""
-    parser = argparse.ArgumentParser(
-        prog='tempest',
-        description='Tempest - Advanced sequence annotation with length-constrained CRFs',
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    
-    # Global arguments
-    parser.add_argument(
-        '--version',
-        action='version',
-        version='%(prog)s 2.0.0'
-    )
-    parser.add_argument(
-        '--log-level',
-        type=str,
-        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
-        default='INFO',
-        help='Set the logging level (default: INFO)'
-    )
-    parser.add_argument(
-        '--log-file',
-        type=str,
-        help='Log to file in addition to console'
-    )
-    parser.add_argument(
-        '--debug',
-        action='store_true',
-        help='Enable debug mode with verbose output'
-    )
-    
-    # Create subparsers for commands
-    subparsers = parser.add_subparsers(
-        dest='command',
-        help='Available commands'
-    )
-    
-    # ============ SIMULATE COMMAND ============
-    parser_simulate = subparsers.add_parser(
-        'simulate',
-        help='Generate synthetic sequence data',
-        description='Generate synthetic sequence reads with configurable architecture'
-    )
-    parser_simulate.add_argument(
-        '--config', '-c',
-        type=str,
-        required=True,
-        help='Path to configuration YAML file'
-    )
-    parser_simulate.add_argument(
-        '--output', '-o',
-        type=str,
-        help='Output file for generated sequences'
-    )
-    parser_simulate.add_argument(
-        '--output-dir',
-        type=str,
-        help='Output directory for split datasets'
-    )
-    parser_simulate.add_argument(
-        '--num-sequences', '-n',
-        type=int,
-        help='Number of sequences to generate'
-    )
-    parser_simulate.add_argument(
-        '--split',
-        action='store_true',
-        help='Generate train/validation split'
-    )
-    parser_simulate.add_argument(
-        '--train-fraction',
-        type=float,
-        default=0.8,
-        help='Fraction of data for training (default: 0.8)'
-    )
-    parser_simulate.add_argument(
-        '--seed',
-        type=int,
-        help='Random seed for reproducibility'
-    )
-    parser_simulate.set_defaults(func=simulate_command)
-    
-    # ============ TRAIN COMMAND ============
-    parser_train = subparsers.add_parser(
-        'train',
-        help='Train Tempest models',
-        description='Train models with standard, hybrid, or ensemble approaches'
-    )
-    parser_train.add_argument(
-        '--config', '-c',
-        type=str,
-        required=True,
-        help='Path to configuration YAML file'
-    )
-    parser_train.add_argument(
-        '--output-dir',
-        type=str,
-        default='./models',
-        help='Output directory for trained models'
-    )
-    parser_train.add_argument(
-        '--epochs',
-        type=int,
-        help='Number of training epochs'
-    )
-    parser_train.add_argument(
-        '--batch-size',
-        type=int,
-        help='Training batch size'
-    )
-    parser_train.add_argument(
-        '--learning-rate',
-        type=float,
-        help='Learning rate'
-    )
-    parser_train.add_argument(
-        '--hybrid',
-        action='store_true',
-        help='Enable hybrid training with constraints'
-    )
-    parser_train.add_argument(
-        '--ensemble',
-        action='store_true',
-        help='Train ensemble of models'
-    )
-    parser_train.add_argument(
-        '--num-models',
-        type=int,
-        default=3,
-        help='Number of models for ensemble'
-    )
-    parser_train.set_defaults(func=train_command)
-    
-    # ============ EVALUATE COMMAND ============
-    parser_evaluate = subparsers.add_parser(
-        'evaluate',
-        help='Evaluate trained models',
-        description='Comprehensive model evaluation with multiple metrics'
-    )
-    parser_evaluate.add_argument(
-        '--model', '-m',
-        type=str,
-        required=True,
-        help='Path to trained model'
-    )
-    parser_evaluate.add_argument(
-        '--test-data', '-t',
-        type=str,
-        required=True,
-        help='Path to test data'
-    )
-    parser_evaluate.add_argument(
-        '--config', '-c',
-        type=str,
-        help='Configuration file (optional)'
-    )
-    parser_evaluate.add_argument(
-        '--output-dir', '-o',
-        type=str,
-        default='./evaluation_results',
-        help='Output directory for results'
-    )
-    parser_evaluate.add_argument(
-        '--batch-size',
-        type=int,
-        default=32,
-        help='Evaluation batch size'
-    )
-    parser_evaluate.add_argument(
-        '--per-segment-metrics',
-        action='store_true',
-        help='Compute per-segment metrics'
-    )
-    parser_evaluate.add_argument(
-        '--confusion-matrix',
-        action='store_true',
-        help='Generate confusion matrix'
-    )
-    parser_evaluate.set_defaults(func=evaluate_command)
-    
-    # ============ VISUALIZE COMMAND ============
-    parser_visualize = subparsers.add_parser(
-        'visualize',
-        help='Create visualizations',
-        description='Generate plots and visualizations from results'
-    )
-    parser_visualize.add_argument(
-        '--history',
-        type=str,
-        help='Training history file'
-    )
-    parser_visualize.add_argument(
-        '--confusion-matrix',
-        type=str,
-        help='Confusion matrix file'
-    )
-    parser_visualize.add_argument(
-        '--predictions',
-        type=str,
-        help='Predictions file'
-    )
-    parser_visualize.add_argument(
-        '--output-dir', '-o',
-        type=str,
-        default='./visualizations',
-        help='Output directory for plots'
-    )
-    parser_visualize.add_argument(
-        '--num-examples',
-        type=int,
-        default=10,
-        help='Number of example predictions to plot'
-    )
-    parser_visualize.set_defaults(func=visualize_command)
-    
-    # ============ COMPARE COMMAND ============
-    parser_compare = subparsers.add_parser(
-        'compare',
-        help='Compare multiple models',
-        description='Compare performance of multiple trained models'
-    )
-    parser_compare.add_argument(
-        '--models',
-        nargs='+',
-        type=str,
-        help='List of model paths to compare'
-    )
-    parser_compare.add_argument(
-        '--models-dir',
-        type=str,
-        help='Directory containing models to compare'
-    )
-    parser_compare.add_argument(
-        '--test-data', '-t',
-        type=str,
-        required=True,
-        help='Test data for comparison'
-    )
-    parser_compare.add_argument(
-        '--output-dir', '-o',
-        type=str,
-        default='./comparison_results',
-        help='Output directory for results'
-    )
-    parser_compare.add_argument(
-        '--metrics',
-        nargs='+',
-        type=str,
-        help='Metrics to compare'
-    )
-    parser_compare.set_defaults(func=compare_command)
-    
-    # ============ COMBINE COMMAND ============
-    parser_combine = subparsers.add_parser(
-        'combine',
-        help='Combine models using ensemble methods',
-        description='Create ensemble models using various combination methods'
-    )
-    parser_combine.add_argument(
-        '--models',
-        nargs='+',
-        type=str,
-        help='List of model paths to combine'
-    )
-    parser_combine.add_argument(
-        '--models-dir',
-        type=str,
-        help='Directory containing models to combine'
-    )
-    parser_combine.add_argument(
-        '--method',
-        type=str,
-        choices=['bma', 'weighted_average', 'voting'],
-        default='bma',
-        help='Combination method'
-    )
-    parser_combine.add_argument(
-        '--validation-data',
-        type=str,
-        help='Validation data for weighting'
-    )
-    parser_combine.add_argument(
-        '--output-dir', '-o',
-        type=str,
-        default='./ensemble_models',
-        help='Output directory for ensemble'
-    )
-    parser_combine.add_argument(
-        '--approximation',
-        type=str,
-        choices=['bic', 'laplace', 'variational'],
-        default='laplace',
-        help='BMA approximation method'
-    )
-    parser_combine.add_argument(
-        '--temperature',
-        type=float,
-        default=1.0,
-        help='Temperature for BMA'
-    )
-    parser_combine.set_defaults(func=combine_command)
-    
-    # ============ DEMUX COMMAND ============
-    parser_demux = subparsers.add_parser(
-        'demux',
-        help='Demultiplex FASTQ files',
-        description='Demultiplex reads using trained model and barcode whitelists'
-    )
-    parser_demux.add_argument(
-        '--model', '-m',
-        type=str,
-        required=True,
-        help='Path to trained model'
-    )
-    
-    # Input options (mutually exclusive)
-    input_group = parser_demux.add_mutually_exclusive_group(required=True)
-    input_group.add_argument(
-        '--input', '-i',
-        type=str,
-        help='Input FASTQ file'
-    )
-    input_group.add_argument(
-        '--input-dir',
-        type=str,
-        help='Input directory containing FASTQ files'
-    )
-    
-    parser_demux.add_argument(
-        '--output-dir', '-o',
-        type=str,
-        default='./demux_results',
-        help='Output directory for results'
-    )
-    
-    # Whitelist options
-    parser_demux.add_argument(
-        '--whitelist-cbc',
-        type=str,
-        help='CBC whitelist file'
-    )
-    parser_demux.add_argument(
-        '--whitelist-i5',
-        type=str,
-        help='i5 whitelist file'
-    )
-    parser_demux.add_argument(
-        '--whitelist-i7',
-        type=str,
-        help='i7 whitelist file'
-    )
-    
-    # Processing options
-    parser_demux.add_argument(
-        '--max-edit-distance',
-        type=int,
-        default=2,
-        help='Maximum edit distance for barcode correction'
-    )
-    parser_demux.add_argument(
-        '--batch-size',
-        type=int,
-        default=32,
-        help='Batch size for inference'
-    )
-    parser_demux.add_argument(
-        '--file-pattern',
-        type=str,
-        default='*.fastq*',
-        help='File pattern for directory processing'
-    )
-    parser_demux.add_argument(
-        '--plot-metrics',
-        action='store_true',
-        help='Generate visualization plots'
-    )
-    parser_demux.set_defaults(func=demux_command)
-    
-    return parser
-
-
+# main entry point
 def main():
     """Main entry point for the CLI."""
-    # Create parser
-    parser = create_parser()
-    
-    # Parse arguments
-    args = parser.parse_args()
-    
-    # Setup logging
-    setup_logging(
-        args.log_level,
-        args.log_file if hasattr(args, 'log_file') else None
-    )
-    
-    # Enable debug mode if requested
-    if args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
-        logger.debug("Debug mode enabled")
-    
-    # Check if a command was specified
-    if args.command is None:
-        parser.print_help()
-        sys.exit(0)
-    
-    # Execute the command
     try:
-        args.func(args)
+        app()
     except KeyboardInterrupt:
-        logger.info("\nOperation cancelled by user")
+        console.print("\n[yellow]Operation cancelled by user[/yellow]")
         sys.exit(130)
     except Exception as e:
-        logger.error(f"Command failed: {e}", exc_info=args.debug)
+        if os.getenv("TEMPEST_DEBUG", "0") == "1":
+            console.print_exception()
+        else:
+            console.print(f"[red]Error:[/red] {e}")
+            console.print("[dim]Run with --debug for full traceback[/dim]")
         sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
