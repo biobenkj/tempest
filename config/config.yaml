@@ -1,10 +1,10 @@
-# Tempest Hybrid Training Configuration
-# Combines comprehensive hybrid training with full read reverse complement support
+# Custom Tempest Configuration for Complex Read Architecture with Probabilistic PWM
+# Sequence structure: p7, i7, RP2, UMI, ACC, cDNA, polyA, CBC, RP1, i5, p5
 
 # Model Architecture Configuration
 model:
-  max_seq_len: 1000
-  num_labels: 6  # ADAPTER5, UMI, ACC, BARCODE, INSERT, ADAPTER3
+  max_seq_len: 1500  # Increased for complex architecture
+  num_labels: 11     # p7, i7, RP2, UMI, ACC, cDNA, polyA, CBC, RP1, i5, p5
   embedding_dim: 128
   lstm_units: 256
   lstm_layers: 2
@@ -16,324 +16,454 @@ model:
 # Data Simulation Configuration
 simulation:
   # Number of sequences to generate
-  num_sequences: 10000
+  num_sequences: 50000  # Larger dataset for complex architecture
   train_split: 0.8
   
   # Additional test/validation splits
-  n_train: 10000
-  n_val: 2000
-  n_test: 2000
+  n_train: 40000
+  n_val: 5000
+  n_test: 5000
   
   # Random seed for reproducibility
   random_seed: 42
   
-  # Sequence architecture - define your read structure
+  # Sequence architecture - your specific read structure
   sequence_order:
-    - ADAPTER5
+    - p7
+    - i7
+    - RP2
     - UMI
     - ACC
-    - BARCODE
-    - INSERT
-    - ADAPTER3
+    - cDNA
+    - polyA
+    - CBC
+    - RP1
+    - i5
+    - p5
   
-  # =============================================================================
-  # FULL READ REVERSE COMPLEMENT (NEW FEATURE)
-  # =============================================================================
-  # Set this to 0.5 to reverse complement 50% of reads
-  # This applies to the ENTIRE assembled read, not just individual segments
-  # Use this for realistic bidirectional sequencing simulation
+  # Enable full read reverse complement to simulate bidirectional sequencing
   full_read_reverse_complement_prob: 0.5
   
-  # Fixed sequences for adapters
+  # Fixed sequences for adapters and primers
   sequences:
-    ADAPTER5: "CTACACGACGCTCTTCCGATCT"
-    ADAPTER3: "AGATCGGAAGAGCACACGTCTG"
-    INSERT: "transcript"  # Use transcript pool
-    # ACC: Will be generated via segment_generation or whitelist
-    # UMI and BARCODE: Will be generated randomly
+    p7: "CAAGCAGAAGACGGCATACGAGAT"
+    RP2: "GTGACTGGAGTTCAGACGTGTGCTCTTCCGATCT"
+    RP1: "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT"
+    p5: "GTGTAGATCTCGGTGGTCGCCGTATCATT"
+    UMI: "random"       # Will generate NNNNNNNN
+    cDNA: "transcript"  # Will use transcript pool
+    polyA: "polya"      # Will use polyA generator
+    # i7, i5, ACC, CBC will use whitelists/PWM
+  
+  # Whitelist files
+  whitelist_files:
+    i7: "/varidata/research/projects/shen/tools/benkj/tempest/whitelist/udi_i7.txt"
+    i5: "/varidata/research/projects/shen/tools/benkj/tempest/whitelist/udi_i5.txt"
+    CBC: "/varidata/research/projects/shen/tools/benkj/tempest/whitelist/cbc.txt"
+  
+  # PWM configuration for ACC - USING PROBABILISTIC APPROACH
+  pwm_files:
+    ACC: "/varidata/research/projects/shen/tools/benkj/tempest/whitelist/acc_pwm.txt"
+  
+  # Probabilistic PWM parameters for ACC generation
+  pwm:
+    pwm_file: "/varidata/research/projects/shen/tools/benkj/tempest/whitelist/acc_pwm.txt"
+    # Temperature controls diversity of generated sequences
+    # Lower values (0.5-1.0): More conservative, closer to consensus
+    # Higher values (1.5-2.0): More diverse, allows more variation
+    temperature: 1.2  # Moderate diversity for realistic ACC sequences
+    # Minimum entropy at each position to maintain some randomness
+    min_entropy: 0.1  # Ensures at least 10% entropy at each position
+    # Optional: boost diversity temporarily for specific generation tasks
+    diversity_boost: 1.0  # Can be increased for more varied test sets
+    # Pattern fallback if PWM file not found
+    pattern: "ACCSSV"  # IUPAC pattern for ACC
   
   # Segment generation parameters
   segment_generation:
     lengths:
-      ADAPTER5: 22  # Fixed length matches sequence above
-      UMI: 12
-      ACC: 100       # Average length for ACC
-      BARCODE: 8
-      INSERT: 300    # Average insert length when not using transcript
-      ADAPTER3: 22   # Fixed length matches sequence above
+      p7: 24
+      i7: 8     # From whitelist
+      RP2: 34
+      UMI: 8
+      ACC: 6    # From PWM (6 positions)
+      cDNA: 500 # Average length
+      polyA: 30 # Average polyA length
+      CBC: 6    # From whitelist
+      RP1: 33
+      i5: 8     # From whitelist
+      p5: 29
     
     # Generation mode for each segment
     generation_mode:
-      ADAPTER5: "fixed"      # Use sequences defined above
+      p7: "fixed"
+      i7: "whitelist"
+      RP2: "fixed"
       UMI: "random"
-      ACC: "pwm"             # Use PWM if available, else random
-      BARCODE: "random"
-      INSERT: "transcript"   # Use transcript pool
-      ADAPTER3: "fixed"      # Use sequences defined above
+      ACC: "pwm"
+      cDNA: "transcript"
+      polyA: "polya"
+      CBC: "whitelist"
+      RP1: "fixed"
+      i5: "whitelist"
+      p5: "fixed"
   
-  # Segment length ranges (for variable-length segments)
+  # Segment length ranges
   sequence_lengths:
-    ADAPTER5:
-      min: 22
-      max: 22
-    UMI:
-      min: 12
-      max: 12
-    ACC:
-      min: 50
-      max: 150
-    BARCODE:
+    p7:
+      min: 24
+      max: 24
+    i7:
       min: 8
       max: 8
-    INSERT:
-      min: 100
-      max: 400
-    ADAPTER3:
-      min: 22
-      max: 22
+    RP2:
+      min: 34
+      max: 34
+    UMI:
+      min: 8
+      max: 8
+    ACC:
+      min: 6
+      max: 6
+    cDNA:
+      min: 200
+      max: 1000
+    polyA:
+      min: 10
+      max: 50
+    CBC:
+      min: 6
+      max: 6
+    RP1:
+      min: 33
+      max: 33
+    i5:
+      min: 8
+      max: 8
+    p5:
+      min: 29
+      max: 29
   
-  # Fallback sequences (used if whitelist/transcript not available)
-  fallback_sequences:
-    ACC: "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
-  
-  # Transcript configuration for INSERT segments
+  # Transcript configuration for cDNA segments
   transcript:
-    fasta_file: null  # Path to transcript FASTA file (set to your file)
-    min_length: 100
-    max_length: 400
-    fragment_min: 100
-    fragment_max: 400
-    # IMPORTANT: Set to 0 when using full_read_reverse_complement_prob
-    # This ensures only full reads are RC'd, not individual inserts
-    reverse_complement_prob: 0.0
-    fallback_mode: "random"
-    fallback_gc_content: 0.5
+    fasta_file: "gencode.v49.transcripts.fa.gz"  # Will need to be downloaded/provided
+    min_length: 200
+    max_length: 5000
+    fragment_mode: true
+    fragment_min: 200
+    fragment_max: 1000
+    trim_polya: true
   
-  # PolyA tail configuration (optional, if adding POLYA to sequence_order)
+  # PolyA tail configuration
   polya_tail:
-    distribution: "normal"
-    mean_length: 100
-    std_length: 30
-    min_length: 20
-    max_length: 250
+    min_length: 10
+    max_length: 50
+    purity: 0.95  # 95% A bases, 5% errors
+    distribution: "normal"  # Normal distribution of lengths
+    mean: 30
+    std: 10
   
-  # Error profile configuration
-  error_profile:
-    error_rate: 0.01
-    substitution:
-      rate: 0.006
-      matrix:
-        A: {G: 0.5, C: 0.25, T: 0.25}
-        C: {T: 0.5, A: 0.25, G: 0.25}
-        G: {A: 0.5, C: 0.25, T: 0.25}
-        T: {C: 0.5, A: 0.25, G: 0.25}
-    insertion:
-      rate: 0.002
-      max_length: 2
-    deletion:
-      rate: 0.002
-      max_length: 2
+  # Error simulation parameters
+  error_injection:
+    enabled: true
+    substitution_rate: 0.001
+    insertion_rate: 0.0001
+    deletion_rate: 0.0001
+    homopolymer_error_rate: 0.002
   
-  # Whitelist files for specific segments (optional)
-  whitelist_files: {}
-    # Example:
-    # BARCODE: "/path/to/barcode_whitelist.txt"
-    # UMI: "/path/to/umi_whitelist.txt"
+  # Complexity parameters
+  complexity:
+    gc_bias:
+      enabled: false
+    quality_degradation:
+      enabled: false
 
 # Training Configuration
 training:
   epochs: 50
+  batch_size: 32
   learning_rate: 0.001
-  early_stopping_patience: 10
-  reduce_lr_patience: 5
-  checkpoint_dir: ./checkpoints
-  save_best_only: true
-  monitor: val_loss
+  optimizer: "adam"
+  early_stopping:
+    enabled: true
+    patience: 10
+    min_delta: 0.0001
+  
+  # Class weights for imbalanced segments
+  use_class_weights: true
+  
+  # Checkpoint configuration
+  checkpoint:
+    save_best_only: true
+    monitor: "val_loss"
+  
+  # TensorBoard logging
+  tensorboard:
+    enabled: true
+    log_dir: "./logs"
 
 # Hybrid Training Configuration
 hybrid:
   enabled: true
   
-  # =============================================================================
-  # TRAINING PHASES
-  # =============================================================================
-  # Phase 1: Warmup - Train on clean, valid reads
-  warmup_epochs: 5
+  # Constrained decoding parameters
+  constrained_decoding:
+    enabled: true
+    method: "beam_search"
+    beam_width: 5
+    max_iterations: 100
   
-  # Phase 2: Discriminator - Train with invalid reads + discriminator
-  discriminator_epochs: 10
+  # Length constraints
+  length_constraints:
+    enabled: true
+    enforce_during_training: true
+    enforce_during_inference: true
   
-  # Phase 3: Pseudo-label - Fine-tune with pseudo-labeled real data
-  pseudolabel_epochs: 10
+  # Whitelist constraints
+  whitelist_constraints:
+    enabled: true
+    segments:
+      - i7
+      - i5
+      - CBC
+    enforce_during_training: true
+    enforce_during_inference: true
   
-  # =============================================================================
-  # INVALID READ GENERATION
-  # =============================================================================
-  # Proportion of invalid reads to mix with training data
-  invalid_ratio: 0.15
+  # PWM constraints - NOW USING PROBABILISTIC SCORING
+  pwm_constraints:
+    enabled: true
+    segments:
+      - ACC
+    # Instead of hard threshold, use probabilistic scoring
+    use_probabilistic_scoring: true
+    # Scoring parameters for ACC validation
+    scoring_method: "log_likelihood"  # Options: log_likelihood, geometric_mean, min_probability
+    # Optional: minimum score for accepting a sequence (soft constraint)
+    min_score: -10.0  # Log likelihood threshold (more negative = more permissive)
+    # For training: weight of PWM score in loss function
+    score_weight: 0.5
+    # For generation: already handled by temperature in pwm section above
   
-  # Invalid read types and their probabilities
-  segment_loss_prob: 0.3      # Missing segments
-  segment_dup_prob: 0.3       # Duplicated segments
-  truncation_prob: 0.2        # Truncated reads
-  chimeric_prob: 0.1          # Chimeric reads (multiple templates)
-  scrambled_prob: 0.1         # Scrambled segment order
-  
-  # =============================================================================
-  # LOSS WEIGHTS
-  # =============================================================================
-  # Weight for invalid read loss (gradually increased during training)
-  invalid_weight_initial: 0.1
-  invalid_weight_max: 0.3
-  
-  # Weight for adversarial loss from discriminator
-  adversarial_weight: 0.1
-  
-  # =============================================================================
-  # PSEUDO-LABELING PARAMETERS
-  # =============================================================================
-  # Minimum confidence for accepting pseudo-labels
-  confidence_threshold: 0.85
-  
-  # Confidence threshold decay per epoch (0.95 = 5% decrease per epoch)
-  confidence_decay: 0.95
-  
-  # Weight for pseudo-labeled examples in loss
-  pseudo_weight: 0.5
-  
-  # =============================================================================
-  # DIRECTORY PROCESSING (for pseudo-labeling from FASTQ directories)
-  # =============================================================================
-  # Maximum pseudo-labels to generate per FASTQ file
-  max_pseudo_per_file: 1000
-  
-  # Maximum total pseudo-labels across all files
-  max_pseudo_total: 10000
-  
-  # Backward compatibility alias
-  max_pseudo_examples: 10000
-  
-  # =============================================================================
-  # DISCRIMINATOR SETTINGS
-  # =============================================================================
-  # Learning rate factor for discriminator (relative to main model)
-  discriminator_lr_factor: 0.1
-  
-  # Hidden dimension for discriminator network
-  discriminator_hidden_dim: 64
-  
-  # =============================================================================
-  # ARCHITECTURE VALIDATION
-  # =============================================================================
-  # Validate that predicted architectures are biologically plausible
-  validate_architecture: true
-  
-  # Minimum number of unique segments required
-  min_unique_segments: 3
-  
-  # Maximum times a segment can be repeated
-  max_segment_repetition: 2
+  # Transition constraints
+  transition_constraints:
+    enabled: true
+    enforce_order: true  # Enforce segment order
+    allow_missing: false # Don't allow missing segments
 
-# Ensemble Configuration (optional)
+# Ensemble Configuration
 ensemble:
-  enabled: false  # Set to true to use ensemble
-  n_models: 3
-  voting_method: soft  # 'soft' (average probabilities) or 'hard' (majority vote)
-  confidence_threshold: 0.8
-  diversity_weight: 0.1  # Weight for diversity loss during ensemble training
+  enabled: true
+  num_models: 3  # Number of models in ensemble
+  
+  # Model specifications
+  models:
+    - name: "standard_crf"
+      type: "crf"
+      weight: 0.3
+      architecture_params:
+        lstm_units: 256
+        lstm_layers: 2
+        dropout: 0.3
+    - name: "hybrid_crf"
+      type: "hybrid"
+      weight: 0.4
+      architecture_params:
+        lstm_units: 256
+        lstm_layers: 2
+        dropout: 0.35
+        use_constraints: true
+    - name: "length_constrained"
+      type: "length_constrained"
+      weight: 0.3
+      architecture_params:
+        lstm_units: 256
+        lstm_layers: 2
+        dropout: 0.3
+        constraint_weight: 1.0
+  
+  # Ensemble method selection
+  voting_method: "bayesian_model_averaging"
+  
+  # Bayesian Model Averaging (BMA) Configuration
+  bma_config:
+    enabled: true
+    prior_type: "uniform"
+    prior_weights:
+      standard_crf: 0.25
+      hybrid_crf: 0.50
+      length_constrained: 0.25
+    approximation: "bic"
+    approximation_params:
+      bic:
+        penalty_factor: 1.0
+      laplace:
+        num_samples: 1000
+        damping: 0.01
+      variational:
+        num_iterations: 100
+        learning_rate: 0.01
+        convergence_threshold: 1e-4
+      cross_validation:
+        num_folds: 5
+        stratified: true
+    temperature: 1.0
+    compute_posterior_variance: true
+    normalize_posteriors: true
+    min_posterior_weight: 0.01
+    selection_criteria:
+      use_model_averaging: true
+      evidence_threshold: 0.05
+  
+  # Simple weighted average configuration
+  weighted_average_config:
+    optimization: "fixed"
+    fixed_weights:
+      standard_crf: 0.3
+      hybrid_crf: 0.4
+      length_constrained: 0.3
+    optimization_params:
+      grid_search:
+        weight_resolution: 0.1
+      differential_evolution:
+        population_size: 20
+        max_iterations: 100
+        convergence_tol: 1e-4
+      bayesian_optimization:
+        num_initial_points: 10
+        num_iterations: 50
+        acquisition_function: "ei"
+  
+  # Prediction aggregation
+  prediction_aggregation:
+    method: "probability_averaging"
+    confidence_weighting: true
+    apply_temperature_scaling: false
+    temperature_scaling_params:
+      learn_temperature: true
+      initial_temperature: 1.0
+  
+  # Calibration
+  calibration:
+    enabled: true
+    method: "isotonic"
+    calibration_params:
+      isotonic:
+        y_min: 0.0
+        y_max: 1.0
+        increasing: true
+      platt:
+        max_iterations: 100
+        solver: "lbfgs"
+      beta:
+        num_bins: 15
+      temperature_scaling:
+        learn_temperature: true
+        optimization_metric: "nll"
+    use_separate_calibration_set: true
+    calibration_split: 0.2
+  
+  # Model diversity enforcement
+  diversity:
+    enforce_diversity: true
+    diversity_metric: "disagreement"
+    min_diversity_threshold: 0.1
+    vary_architecture: true
+    architecture_variations:
+      - lstm_units: [128, 256, 512]
+      - dropout: [0.2, 0.3, 0.4]
+      - lstm_layers: [2, 3]
+    vary_initialization: true
+    random_seeds: [42, 123, 456, 789, 1011]
+    vary_training: false
+    training_variations:
+      - learning_rate: [0.001, 0.0005]
+      - batch_size: [32, 64]
+  
+  # Uncertainty quantification
+  uncertainty:
+    compute_epistemic: true
+    compute_aleatoric: true
+    confidence_intervals: true
+    interval_alpha: 0.05
+  
+  # Ensemble evaluation metrics
+  evaluation:
+    compute_ensemble_metrics: true
+    metrics:
+      - "accuracy"
+      - "nll"
+      - "brier_score"
+      - "ece"
+      - "diversity"
+    analyze_model_contributions: true
+    compute_shapley_values: false
 
-# Inference Configuration
-inference:
-  batch_size: 128
-  input_format: fastq  # 'fastq' or 'fasta'
+# Evaluation Configuration
+evaluation:
+  metrics:
+    - "accuracy"
+    - "precision"
+    - "recall"
+    - "f1"
+    - "segment_accuracy"
+    - "edit_distance"
+    - "boundary_accuracy"
+    # Add PWM-specific metrics
+    - "acc_diversity"  # Measure diversity of generated ACC sequences
+    - "acc_score_distribution"  # Distribution of PWM scores
   
-  # Barcode correction
-  apply_barcode_correction: true
-  barcode_correction_distance: 1
+  # Segment-specific evaluation
+  per_segment_metrics: true
   
-  # Deduplication
-  deduplicate: true
-  dedup_strategy: umi  # 'umi', 'sequence', or 'both'
+  # Confusion matrix
+  confusion_matrix:
+    enabled: true
+    normalize: true
   
-  # Output configuration
-  output_format: json  # 'json', 'tsv', 'gff', or 'bed'
-  min_confidence: 0.8
-  include_metadata: true
+  # Error analysis
+  error_analysis:
+    enabled: true
+    sample_errors: 100
+    save_errors: true
   
-  # Handle reverse complement reads in inference
-  detect_orientation: true  # Auto-detect and report read orientation
+  # ACC-specific evaluation
+  acc_evaluation:
+    enabled: true
+    compute_entropy: true  # Measure entropy of generated ACC sequences
+    compute_divergence: true  # KL divergence from expected PWM distribution
+    save_acc_sequences: true  # Save all generated ACC sequences for analysis
 
-# PWM Configuration (for ACC generation)
-pwm:
-  pwm_file: null  # Path to PWM file for ACC generation (e.g., "./acc_pwm.txt")
-  min_score: 0.7
-  scan_reverse_complement: true  # Scan both strands when generating
+# Visualization Configuration
+visualization:
+  enabled: true
+  plots:
+    - "training_curves"
+    - "confusion_matrix"
+    - "segment_performance"
+    - "length_distribution"
+    - "error_patterns"
+    - "model_comparison"
+    - "acc_pwm_heatmap"  # Visualize ACC PWM
+    - "acc_sequence_logo"  # Sequence logo for generated ACCs
+    - "acc_score_histogram"  # Distribution of ACC PWM scores
+  
+  save_plots: true
+  plot_dir: "./plots"
 
 # Logging Configuration
 logging:
-  log_generation_stats: true
+  level: "INFO"
+  log_to_file: true
+  log_file: "./tempest_training.log"
   log_whitelist_usage: true
-  log_invalid_reads: true
-  log_discriminator_metrics: true
-  log_pseudo_label_stats: true
-  log_level: INFO  # DEBUG, INFO, WARNING, ERROR
-  log_file: ./logs/tempest.log
-  save_predictions: false  # Save all predictions for debugging
+  log_generation_stats: true
+  log_pwm_stats: true  # Log statistics about PWM-generated sequences
 
-# Advanced Options
-advanced:
-  # Memory optimization
-  use_mixed_precision: false
-  gradient_accumulation_steps: 1
-  
-  # Reproducibility
-  deterministic: true
-  benchmark: false
-  
-  # Multi-GPU training
-  use_multi_gpu: false
-  gpu_ids: [0]
-  
-  # Data loading
-  num_workers: 4
-  prefetch_factor: 2
-  pin_memory: true
-  
-  # Model checkpointing
-  save_frequency: 5  # Save checkpoint every N epochs
-  keep_n_checkpoints: 3  # Keep only the N best checkpoints
-
-# =============================================================================
-# USAGE NOTES
-# =============================================================================
-# 
-# 1. FULL READ REVERSE COMPLEMENT
-#    - Set simulation.full_read_reverse_complement_prob to 0.5 for bidirectional
-#    - Set simulation.transcript.reverse_complement_prob to 0.0 to avoid double RC
-#    - RC status tracked in read.metadata['is_reverse_complement']
-#
-# 2. HYBRID TRAINING
-#    - Phase 1 (warmup): Standard training on valid reads
-#    - Phase 2 (discriminator): Robustness training with invalid reads
-#    - Phase 3 (pseudo-label): Fine-tuning on unlabeled real data
-#
-# 3. PSEUDO-LABELING FROM DIRECTORIES
-#    - Set unlabeled_path to directory containing FASTQ files
-#    - Adjust max_pseudo_per_file and max_pseudo_total for dataset size
-#    - Higher confidence_threshold = higher quality but fewer examples
-#
-# 4. TRANSCRIPT FILES
-#    - Set simulation.transcript.fasta_file to your transcript FASTA
-#    - Or use fallback_mode: "random" for synthetic generation
-#
-# 5. ARCHITECTURE CUSTOMIZATION
-#    - Modify sequence_order to match your sequencing protocol
-#    - Adjust sequence_lengths for each segment
-#    - Add/remove segments as needed
-#
-# 6. PERFORMANCE TUNING
-#    - Increase model.batch_size for faster training (if GPU memory allows)
-#    - Adjust advanced.num_workers for data loading speed
-#    - Enable advanced.use_mixed_precision for faster training
-#
-# =============================================================================
+# Output Configuration
+output:
+  save_dir: "./tempest_output"
+  save_predictions: true
+  save_model: true
+  save_config: true
+  create_report: true
+  save_acc_analysis: true  # Save detailed ACC generation analysis

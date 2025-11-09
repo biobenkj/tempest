@@ -11,7 +11,7 @@ import logging
 import yaml
 from tempest.config import TempestConfig
 
-# Import functional entry points
+# import the runners
 from tempest.simulate import run_simulation
 from tempest.train import run_training
 from tempest.evaluate import run_evaluation

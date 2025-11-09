@@ -25,7 +25,7 @@ from tempest.compare import compare_app
 from tempest.combine import combine_app
 from tempest.demux import demux_app
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 console = Console()
 
 # main
@@ -169,7 +169,7 @@ def init(
     default_config = {
         "model": {
             "max_seq_len": 1500,
-            "num_labels": 9,  # removed RP1/RP2
+            "num_labels": 9,
             "embedding_dim": 128,
             "lstm_units": 256,
             "lstm_layers": 2,
