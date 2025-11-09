@@ -1,8 +1,9 @@
 """
-Tempest simulation module - refactored with Typer approach.
+Tempest simulation module - refactored with pickle format support.
 
 This module provides functionality for generating synthetic sequence reads
-for training and testing TEMPEST models.
+for training and testing TEMPEST models. Now saves to pickle format by default
+for efficiency, with a preview text file for inspection.
 """
 
 import typer
@@ -11,9 +12,12 @@ from typing import Optional, Dict, Any, List, Tuple
 import logging
 import yaml
 import json
+import pickle
+import gzip
 import numpy as np
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.table import Table
 
 # Import the data simulator components
 from tempest.data import (
@@ -59,6 +63,10 @@ def run_simulation(
     if 'train_fraction' in kwargs:
         sim_config.train_split = kwargs['train_fraction']
     
+    # Get format preference (default to pickle)
+    output_format = kwargs.get('format', 'pickle')
+    compress = kwargs.get('compress', True)
+    
     # Determine output paths
     output_path = Path(output_dir) if output_dir else Path('.')
     output_path.mkdir(parents=True, exist_ok=True)
@@ -79,12 +87,25 @@ def run_simulation(
         train_reads = simulator.generate_reads(n_train)
         val_reads = simulator.generate_reads(n_val)
         
-        # Save sequences
-        train_file = output_path / "train.txt"
-        val_file = output_path / "val.txt"
-        
-        _save_reads(train_reads, train_file)
-        _save_reads(val_reads, val_file)
+        # Save sequences based on format
+        if output_format == 'pickle':
+            train_file = output_path / ("train.pkl.gz" if compress else "train.pkl")
+            val_file = output_path / ("val.pkl.gz" if compress else "val.pkl")
+            train_preview = output_path / "train_preview.txt"
+            val_preview = output_path / "val_preview.txt"
+            
+            save_stats_train = _save_reads_pickle(train_reads, train_file, train_preview, compress)
+            save_stats_val = _save_reads_pickle(val_reads, val_file, val_preview, compress)
+            
+            result['save_stats'] = {
+                'train': save_stats_train,
+                'val': save_stats_val
+            }
+        else:
+            train_file = output_path / "train.txt"
+            val_file = output_path / "val.txt"
+            _save_reads_text(train_reads, train_file)
+            _save_reads_text(val_reads, val_file)
         
         result['train_file'] = str(train_file)
         result['val_file'] = str(val_file)
@@ -100,8 +121,15 @@ def run_simulation(
         
         reads = simulator.generate_reads(sim_config.num_sequences)
         
-        output_file = output_path / (kwargs.get('output_file', 'sequences.txt'))
-        _save_reads(reads, output_file)
+        # Determine output filename based on format
+        if output_format == 'pickle':
+            output_file = output_path / (kwargs.get('output_file', 'sequences.pkl.gz' if compress else 'sequences.pkl'))
+            preview_file = output_path / kwargs.get('preview_file', 'sequences_preview.txt')
+            save_stats = _save_reads_pickle(reads, output_file, preview_file, compress)
+            result['save_stats'] = save_stats
+        else:
+            output_file = output_path / kwargs.get('output_file', 'sequences.txt')
+            _save_reads_text(reads, output_file)
         
         result['output_file'] = str(output_file)
         result['n_sequences'] = sim_config.num_sequences
@@ -112,13 +140,86 @@ def run_simulation(
     result['config'] = config
     result['seed'] = sim_config.random_seed
     result['success'] = True
+    result['format'] = output_format
     
     return result
 
 
-def _save_reads(reads: List[SimulatedRead], output_file: Path):
+def _save_reads_pickle(
+    reads: List[SimulatedRead], 
+    output_file: Path, 
+    preview_file: Path,
+    compress: bool = True
+) -> Dict[str, Any]:
     """
-    Save simulated reads to file.
+    Save simulated reads to pickle format with preview text file.
+    
+    Args:
+        reads: List of SimulatedRead objects
+        output_file: Path to save pickle file
+        preview_file: Path to save preview text file
+        compress: Whether to compress the pickle file
+        
+    Returns:
+        Dictionary with save statistics
+    """
+    import time
+    start_time = time.time()
+    
+    # Save pickle file (compressed or uncompressed)
+    if compress:
+        with gzip.open(output_file, 'wb') as f:
+            pickle.dump(reads, f, protocol=pickle.HIGHEST_PROTOCOL)
+    else:
+        with open(output_file, 'wb') as f:
+            pickle.dump(reads, f, protocol=pickle.HIGHEST_PROTOCOL)
+    
+    # Create preview text file with first 10 reads
+    n_preview = min(10, len(reads))
+    with open(preview_file, 'w') as f:
+        f.write(f"# Preview of first {n_preview} sequences from {output_file.name}\n")
+        f.write(f"# Total sequences: {len(reads)}\n")
+        f.write(f"# Format: sequence<TAB>labels\n")
+        f.write("#" + "="*70 + "\n\n")
+        
+        for i, read in enumerate(reads[:n_preview]):
+            labels_str = ' '.join(read.labels)
+            f.write(f"{read.sequence}\t{labels_str}\n")
+            
+            # Add metadata as comment if present
+            if read.metadata:
+                f.write(f"# Metadata: {json.dumps(read.metadata)}\n")
+            
+            # Add label regions summary
+            if read.label_regions:
+                regions_summary = ", ".join([f"{k}:{v}" for k, v in read.label_regions.items()])
+                f.write(f"# Regions: {regions_summary}\n")
+            
+            f.write("\n")
+    
+    # Calculate statistics
+    save_time = time.time() - start_time
+    file_size = output_file.stat().st_size
+    
+    stats = {
+        'file_size_bytes': file_size,
+        'file_size_mb': file_size / (1024 * 1024),
+        'save_time': save_time,
+        'sequences_per_second': len(reads) / save_time if save_time > 0 else 0,
+        'compressed': compress,
+        'preview_file': str(preview_file),
+        'n_preview': n_preview
+    }
+    
+    logger.info(f"Saved {len(reads)} sequences in {save_time:.2f}s ({stats['file_size_mb']:.2f} MB)")
+    logger.info(f"Preview saved to: {preview_file}")
+    
+    return stats
+
+
+def _save_reads_text(reads: List[SimulatedRead], output_file: Path):
+    """
+    Save simulated reads to text file (legacy format).
     
     Args:
         reads: List of SimulatedRead objects
@@ -129,6 +230,53 @@ def _save_reads(reads: List[SimulatedRead], output_file: Path):
             # Save in the format: sequence<TAB>labels
             labels_str = ' '.join(read.labels)
             f.write(f"{read.sequence}\t{labels_str}\n")
+
+
+def _load_reads_pickle(input_file: Path) -> List[SimulatedRead]:
+    """
+    Load simulated reads from pickle format.
+    
+    Args:
+        input_file: Path to pickle file
+        
+    Returns:
+        List of SimulatedRead objects
+    """
+    if input_file.suffix == '.gz' or '.gz' in input_file.suffixes:
+        with gzip.open(input_file, 'rb') as f:
+            return pickle.load(f)
+    else:
+        with open(input_file, 'rb') as f:
+            return pickle.load(f)
+
+
+def _load_reads_text(input_file: Path) -> List[SimulatedRead]:
+    """
+    Load simulated reads from text format.
+    
+    Args:
+        input_file: Path to text file
+        
+    Returns:
+        List of SimulatedRead objects
+    """
+    reads = []
+    with open(input_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split('\t')
+            if len(parts) == 2:
+                sequence, labels_str = parts
+                labels = labels_str.split()
+                reads.append(SimulatedRead(
+                    sequence=sequence,
+                    labels=labels,
+                    label_regions={},  # Would need to reconstruct
+                    metadata={}
+                ))
+    return reads
 
 
 @simulate_app.command("generate")
@@ -176,6 +324,16 @@ def generate_command(
         "--seed", "-r",
         help="Random seed for reproducibility (overrides config)"
     ),
+    format: str = typer.Option(
+        "pickle",
+        "--format", "-f",
+        help="Output format: 'pickle' (default, efficient) or 'text' (human-readable)"
+    ),
+    no_compress: bool = typer.Option(
+        False,
+        "--no-compress",
+        help="Don't compress pickle files (saves faster but uses more disk)"
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose", "-v",
@@ -186,19 +344,23 @@ def generate_command(
     Generate synthetic sequence reads with configurable architecture.
     
     This command generates synthetic sequences based on the architecture
-    defined in the configuration file. The sequences can be saved as
-    a single dataset or split into training and validation sets.
+    defined in the configuration file. By default, sequences are saved in
+    compressed pickle format for efficiency, with a preview text file for
+    inspection.
     
     Examples:
         
-        # Generate 1000 sequences to a single file
-        tempest simulate generate -c config.yaml -o sequences.txt -n 1000
+        # Generate 1000 sequences in pickle format (default)
+        tempest simulate generate -c config.yaml -n 1000
         
-        # Generate train/validation split with custom ratio
+        # Generate in text format for compatibility
+        tempest simulate generate -c config.yaml -n 1000 --format text
+        
+        # Generate train/validation split
         tempest simulate generate -c config.yaml --split -d ./data -t 0.8
         
-        # Generate with specific seed for reproducibility
-        tempest simulate generate -c config.yaml -o test.txt --seed 12345
+        # Generate without compression for faster I/O
+        tempest simulate generate -c config.yaml --no-compress
     """
     # Print header
     if verbose:
@@ -218,7 +380,10 @@ def generate_command(
             progress.update(task, completed=True, description="Configuration loaded")
         
         # Override parameters from command line
-        kwargs = {}
+        kwargs = {
+            'format': format.lower(),
+            'compress': not no_compress
+        }
         if num_sequences is not None:
             kwargs['num_sequences'] = num_sequences
         if seed is not None:
@@ -244,6 +409,7 @@ def generate_command(
             console.print(f"  Sequences: {kwargs.get('num_sequences', cfg.simulation.num_sequences)}")
             console.print(f"  Random seed: {kwargs.get('seed', cfg.simulation.random_seed)}")
             console.print(f"  Architecture: {len(cfg.simulation.sequence_order)} segments")
+            console.print(f"  Output format: {format} {'(compressed)' if not no_compress else '(uncompressed)'}")
             if split:
                 console.print(f"  Train fraction: {train_fraction:.0%}")
             console.print()
@@ -268,13 +434,113 @@ def generate_command(
             console.print(f"  Validation sequences: {result['n_val']}")
             console.print(f"  Training file: [green]{result['train_file']}[/green]")
             console.print(f"  Validation file: [green]{result['val_file']}[/green]")
+            
+            if 'save_stats' in result and verbose:
+                console.print("\n[cyan]Save Statistics:[/cyan]")
+                for dataset, stats in result['save_stats'].items():
+                    console.print(f"  {dataset}:")
+                    console.print(f"    File size: {stats['file_size_mb']:.2f} MB")
+                    console.print(f"    Save time: {stats['save_time']:.2f}s")
+                    console.print(f"    Preview: {stats['preview_file']}")
         else:
             console.print(f"  Total sequences: {result['n_sequences']}")
             console.print(f"  Output file: [green]{result['output_file']}[/green]")
+            
+            if 'save_stats' in result:
+                stats = result['save_stats']
+                console.print(f"  File size: {stats['file_size_mb']:.2f} MB")
+                if format == 'pickle':
+                    console.print(f"  Preview file: [green]{stats['preview_file']}[/green]")
+                
+                if verbose:
+                    console.print(f"\n[dim]Performance:[/dim]")
+                    console.print(f"  Save time: {stats['save_time']:.2f}s")
+                    console.print(f"  Throughput: {stats['sequences_per_second']:.0f} seq/s")
         
         if verbose:
             console.print(f"\n[dim]Random seed used: {result['seed']}[/dim]")
             
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise typer.Exit(1)
+
+
+@simulate_app.command("convert")
+def convert_command(
+    input_file: Path = typer.Argument(
+        ...,
+        help="Input file to convert",
+        exists=True,
+        file_okay=True,
+        readable=True
+    ),
+    output_file: Path = typer.Argument(
+        ...,
+        help="Output file path"
+    ),
+    input_format: Optional[str] = typer.Option(
+        None,
+        "--input-format", "-i",
+        help="Input format (auto-detected if not specified)"
+    ),
+    output_format: Optional[str] = typer.Option(
+        None,
+        "--output-format", "-o",
+        help="Output format (auto-detected from extension if not specified)"
+    ),
+    compress: bool = typer.Option(
+        True,
+        "--compress/--no-compress",
+        help="Compress output if using pickle format"
+    )
+):
+    """
+    Convert between sequence file formats.
+    
+    Examples:
+        # Convert text to pickle
+        tempest simulate convert sequences.txt sequences.pkl.gz
+        
+        # Convert pickle to text  
+        tempest simulate convert sequences.pkl.gz sequences.txt
+    """
+    try:
+        console.print(f"[cyan]Converting {input_file} to {output_file}...[/cyan]")
+        
+        # Auto-detect formats if not specified
+        if input_format is None:
+            if '.pkl' in str(input_file) or '.pickle' in str(input_file):
+                input_format = 'pickle'
+            else:
+                input_format = 'text'
+        
+        if output_format is None:
+            if '.pkl' in str(output_file) or '.pickle' in str(output_file):
+                output_format = 'pickle'
+            else:
+                output_format = 'text'
+        
+        # Load sequences
+        if input_format == 'pickle':
+            reads = _load_reads_pickle(input_file)
+        else:
+            reads = _load_reads_text(input_file)
+        
+        console.print(f"  Loaded {len(reads)} sequences")
+        
+        # Save in new format
+        if output_format == 'pickle':
+            preview_file = output_file.parent / f"{output_file.stem}_preview.txt"
+            stats = _save_reads_pickle(reads, output_file, preview_file, compress)
+            console.print(f"  Saved to: [green]{output_file}[/green]")
+            console.print(f"  Preview: [green]{preview_file}[/green]")
+            console.print(f"  Size: {stats['file_size_mb']:.2f} MB")
+        else:
+            _save_reads_text(reads, output_file)
+            console.print(f"  Saved to: [green]{output_file}[/green]")
+        
+        console.print("[bold green]✓ Conversion complete![/bold green]")
+        
     except Exception as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
         raise typer.Exit(1)
@@ -367,6 +633,12 @@ def validate_command(
             console.print(f"\n[cyan]Segment architecture:[/cyan]")
             
             if sim.sequence_order:
+                table = Table(title="Sequence Architecture")
+                table.add_column("#", style="cyan")
+                table.add_column("Segment", style="green")
+                table.add_column("Length", style="yellow")
+                table.add_column("Mode", style="magenta")
+                
                 for i, segment in enumerate(sim.sequence_order, 1):
                     # Get length info if available
                     if sim.segment_generation and 'lengths' in sim.segment_generation:
@@ -380,7 +652,9 @@ def validate_command(
                     else:
                         mode = 'unknown'
                     
-                    console.print(f"  {i:2}. {segment:10s} - length: {str(length):8s} mode: {mode}")
+                    table.add_row(str(i), segment, str(length), mode)
+                
+                console.print(table)
             
             # Show PWM configuration if present
             if sim.pwm:
@@ -411,6 +685,11 @@ def stats_command(
         dir_okay=False,
         readable=True
     ),
+    format: Optional[str] = typer.Option(
+        None,
+        "--format", "-f",
+        help="File format (auto-detected if not specified)"
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose", "-v",
@@ -422,30 +701,44 @@ def stats_command(
     
     This command analyzes a file of generated sequences and provides
     statistics about sequence lengths, segment distributions, and
-    label frequencies.
+    label frequencies. Supports both pickle and text formats.
     
     Examples:
         
-        # Basic statistics
-        tempest simulate stats sequences.txt
+        # Basic statistics from pickle file
+        tempest simulate stats sequences.pkl.gz
         
-        # Detailed statistics per segment  
+        # Detailed statistics from text file
         tempest simulate stats sequences.txt --verbose
     """
     try:
         console.print(f"[cyan]Analyzing sequences from {input_file}...[/cyan]")
         
-        # Read sequences
-        sequences = []
-        labels_list = []
+        # Auto-detect format if not specified
+        if format is None:
+            if '.pkl' in str(input_file) or '.pickle' in str(input_file):
+                format = 'pickle'
+            else:
+                format = 'text'
         
-        with open(input_file, 'r') as f:
-            for line in f:
-                parts = line.strip().split('\t')
-                if len(parts) == 2:
-                    seq, labels = parts
-                    sequences.append(seq)
-                    labels_list.append(labels.split())
+        # Load sequences
+        if format == 'pickle':
+            reads = _load_reads_pickle(input_file)
+            sequences = [r.sequence for r in reads]
+            labels_list = [r.labels for r in reads]
+        else:
+            sequences = []
+            labels_list = []
+            
+            with open(input_file, 'r') as f:
+                for line in f:
+                    if line.startswith('#'):
+                        continue
+                    parts = line.strip().split('\t')
+                    if len(parts) == 2:
+                        seq, labels = parts
+                        sequences.append(seq)
+                        labels_list.append(labels.split())
         
         n_sequences = len(sequences)
         
@@ -476,10 +769,18 @@ def stats_command(
             console.print(f"\n[cyan]Label distribution:[/cyan]")
             total_labels = sum(label_counts.values())
             
+            # Create a table for better display
+            table = Table(title="Label Distribution")
+            table.add_column("Label", style="cyan")
+            table.add_column("Count", style="green")
+            table.add_column("Percentage", style="yellow")
+            
             for label in sorted(label_counts.keys()):
                 count = label_counts[label]
                 percentage = (count / total_labels) * 100
-                console.print(f"  {label:10s}: {count:8d} ({percentage:5.2f}%)")
+                table.add_row(label, f"{count:,}", f"{percentage:.2f}%")
+            
+            console.print(table)
         
         if verbose:
             # Detailed segment analysis
@@ -494,8 +795,30 @@ def stats_command(
             
             console.print("\nMost common segment transitions:")
             sorted_transitions = sorted(transitions.items(), key=lambda x: x[1], reverse=True)
+            
+            trans_table = Table(title="Segment Transitions")
+            trans_table.add_column("Transition", style="cyan")
+            trans_table.add_column("Count", style="green")
+            
             for transition, count in sorted_transitions[:10]:
-                console.print(f"  {transition:20s}: {count:6d}")
+                trans_table.add_row(transition, f"{count:,}")
+            
+            console.print(trans_table)
+            
+            # Additional analysis for pickle format
+            if format == 'pickle' and isinstance(reads[0], SimulatedRead):
+                # Analyze metadata if present
+                metadata_keys = set()
+                for read in reads[:100]:  # Sample first 100
+                    if read.metadata:
+                        metadata_keys.update(read.metadata.keys())
+                
+                if metadata_keys:
+                    console.print(f"\n[cyan]Metadata fields:[/cyan] {', '.join(metadata_keys)}")
+                
+                # Analyze label regions
+                if reads[0].label_regions:
+                    console.print(f"\n[cyan]Label regions present:[/cyan] {', '.join(reads[0].label_regions.keys())}")
         
         console.print()
         
@@ -518,6 +841,8 @@ def simulate_command(args):
             split=True,
             train_fraction=args.train_fraction if hasattr(args, 'train_fraction') else 0.8,
             seed=args.seed if hasattr(args, 'seed') else None,
+            format='pickle',  # Default to pickle
+            no_compress=False,
             verbose=False
         )
     else:
@@ -527,5 +852,7 @@ def simulate_command(args):
             num_sequences=args.num_sequences if hasattr(args, 'num_sequences') else None,
             split=False,
             seed=args.seed if hasattr(args, 'seed') else None,
+            format='pickle',  # Default to pickle
+            no_compress=False,
             verbose=False
         )
