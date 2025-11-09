@@ -23,7 +23,9 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from tempest.cli import train_command
-from tempest.training import StandardTrainer, HybridTrainer, EnsembleTrainer
+from tempest.training.trainer import ModelTrainer
+from tempest.training.hybrid_trainer import HybridTrainer
+from tempest.training.ensemble import EnsembleTrainer
 from tempest.utils import load_config
 
 
@@ -363,11 +365,11 @@ class TestTrainerClasses:
     
     @pytest.mark.unit
     def test_standard_trainer_initialization(self, sample_config):
-        """Test StandardTrainer initialization."""
+        """Test ModelTrainer initialization."""
         from tempest.utils.config import TempestConfig
         
         config = TempestConfig.from_dict(sample_config)
-        trainer = StandardTrainer(config)
+        trainer = ModelTrainer(config)
         
         assert trainer is not None
         assert trainer.config == config
@@ -391,7 +393,7 @@ class TestTrainerClasses:
         config = TempestConfig.from_dict(sample_config)
         
         with tf.device('/GPU:0'):
-            trainer = StandardTrainer(config)
+            trainer = ModelTrainer(config)
             model = trainer.build_model()
             
             # Check that model is on GPU
