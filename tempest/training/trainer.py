@@ -86,7 +86,7 @@ class StandardTrainer:
             name='nucleotide_embedding'
         )(input_seq)
         
-        # Optional CNN layers for local pattern detection
+        # CNN layers for local pattern detection
         if self.model_config.use_cnn:
             conv1 = layers.Conv1D(
                 filters=self.model_config.cnn_filters,

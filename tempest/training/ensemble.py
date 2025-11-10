@@ -20,8 +20,9 @@ import random
 from tempest.data.simulator import SimulatedRead, reads_to_arrays
 from tempest.config import TempestConfig
 from tempest.utils.io import ensure_dir
-from tempest.training.trainer import ModelTrainer
+from tempest.training.trainer import StandardTrainer
 from tempest.training.hybrid_trainer import (
+    HybridTrainer,
     build_model_from_config,
     pad_sequences,
     convert_labels_to_categorical
@@ -32,28 +33,33 @@ logger = logging.getLogger(__name__)
 
 class EnsembleTrainer:
     """
-    Ensemble trainer using Bayesian Model Averaging.
+    Enhanced ensemble trainer that supports both standard and hybrid models.
     
-    Trains multiple models with variation in:
-    - Architecture (different hyperparameters)
-    - Initialization (different random seeds)
-    
-    Combines predictions using BMA with performance-based weights.
+    The ensemble can contain:
+    - All standard models
+    - All hybrid models  
+    - Mixed standard and hybrid models
     """
     
     def __init__(self,
                  config: TempestConfig,
                  num_models: int = 5,
                  variation_type: str = 'both',
-                 checkpoint_dir: str = "ensemble_checkpoints"):
+                 checkpoint_dir: str = "ensemble_checkpoints",
+                 model_types: Optional[List[str]] = None,
+                 hybrid_ratio: float = 0.0):
         """
-        Initialize ensemble trainer.
+        Initialize ensemble trainer with support for mixed model types.
         
         Args:
             config: Base TempestConfig for models
             num_models: Number of models in ensemble
             variation_type: Type of variation ('architecture', 'initialization', 'both')
             checkpoint_dir: Directory for saving ensemble checkpoints
+            model_types: List of model types for each model ('standard' or 'hybrid')
+                        If None, uses hybrid_ratio to determine
+            hybrid_ratio: Fraction of models that should be hybrid (0.0 to 1.0)
+                         Only used if model_types is None
         """
         self.base_config = deepcopy(config)
         self.num_models = num_models
@@ -72,13 +78,53 @@ class EnsembleTrainer:
         self.batch_size = config.model.batch_size
         
         # BMA parameters
-        self.bma_prior = getattr(config.ensemble, 'bma_prior', 'uniform') if config.ensemble else 'uniform'
-        self.bma_temperature = getattr(config.ensemble, 'bma_temperature', 1.0) if config.ensemble else 1.0
+        if hasattr(config, 'ensemble') and config.ensemble:
+            ensemble_config = config.ensemble
+        
+            # BMA configuration
+            self.bma_prior = getattr(ensemble_config, 'bma_prior', 'performance')
+            self.bma_temperature = getattr(ensemble_config, 'bma_temperature', 1.0)
+        
+            # Get BMA config details
+            if hasattr(ensemble_config, 'bma_config'):
+                self.bma_method = ensemble_config.bma_config.get('method', 'validation_accuracy')
+                self.min_weight = ensemble_config.bma_config.get('min_weight', 0.01)
+                self.type_bonus = ensemble_config.bma_config.get('type_bonus', {})
+            else:
+                self.bma_method = 'validation_accuracy'
+                self.min_weight = 0.01
+                self.type_bonus = {}
+        
+        # Architecture variations from config
+        if hasattr(ensemble_config, 'architecture_variations'):
+            self.architecture_variations = ensemble_config.architecture_variations
+        else:
+            self.architecture_variations = None
         
         # Tracking
         self.training_histories = []
         self.label_to_idx = None
         self.idx_to_label = None
+
+        # Determine model types for ensemble
+        if model_types is not None:
+            # Use explicitly specified model types
+            if len(model_types) != num_models:
+                raise ValueError(f"model_types length ({len(model_types)}) must match num_models ({num_models})")
+            self.model_types = model_types
+        else:
+            # Use hybrid_ratio to determine model types
+            num_hybrid = int(num_models * hybrid_ratio)
+            self.model_types = ['hybrid'] * num_hybrid + ['standard'] * (num_models - num_hybrid)
+            # Shuffle for randomness
+            import random
+            random.shuffle(self.model_types)
+        
+        # Store trainer instances
+        self.trainers = []
+        
+        logger.info(f"Ensemble configuration: {self.model_types.count('standard')} standard, "
+                   f"{self.model_types.count('hybrid')} hybrid models")
     
     def _generate_model_variations(self) -> List[TempestConfig]:
         """
@@ -106,40 +152,51 @@ class EnsembleTrainer:
             configs.append(config)
             
         logger.info(f"Generated {len(configs)} model configurations with {self.variation_type} variation")
+        # Log architecture variation structure for transparency
+        if hasattr(self, "architecture_variations") and self.architecture_variations:
+            logger.info(
+                f"Architecture variation keys: "
+                f"{list(self.architecture_variations.__dict__.keys()) if hasattr(self.architecture_variations, '__dict__') else list(self.architecture_variations.keys())}"
+            )
+        else:
+            logger.info("Architecture variation mode: randomized defaults (no config-based variations)")
         return configs
     
     def _vary_architecture(self, config: TempestConfig, model_idx: int) -> TempestConfig:
         """
-        Apply architecture variations to config.
-        
-        Args:
-            config: Base configuration
-            model_idx: Index of model in ensemble
-            
-        Returns:
-            Modified configuration
+        Apply architecture variations from config or predefined patterns.
         """
-        # Variation strategies based on model index
-        variations = [
-            # Model 0: Base configuration (no changes)
-            {},
-            # Model 1: Deeper LSTM
-            {'lstm_layers': 3, 'lstm_units': 256},
-            # Model 2: Wider CNN
-            {'cnn_filters': [128, 256], 'cnn_kernels': [3, 7]},
-            # Model 3: Higher dropout
-            {'dropout': 0.5},
-            # Model 4: Smaller model
-            {'lstm_units': 64, 'embedding_dim': 64},
-        ]
+        # Check if we have variations from config
+        if hasattr(self, 'architecture_variations') and self.architecture_variations:
+            variations_config = self.architecture_variations
         
-        # Apply variation if available
-        if model_idx < len(variations):
-            variation = variations[model_idx]
-            for key, value in variation.items():
-                if hasattr(config.model, key):
-                    setattr(config.model, key, value)
-                    logger.info(f"Model {model_idx}: Set {key} = {value}")
+            # Create variation based on model index
+            if model_idx == 0:
+                # Base model - no changes
+                pass
+            else:
+                # Apply variations from config
+                if hasattr(variations_config, 'vary_lstm_units'):
+                    units_options = variations_config.vary_lstm_units
+                    config.model.lstm_units = units_options[model_idx % len(units_options)]
+                
+                if hasattr(variations_config, 'vary_lstm_layers'):
+                    layers_options = variations_config.vary_lstm_layers
+                    config.model.lstm_layers = layers_options[model_idx % len(layers_options)]
+                
+                if hasattr(variations_config, 'vary_dropout'):
+                    dropout_options = variations_config.vary_dropout
+                    config.model.dropout = dropout_options[model_idx % len(dropout_options)]
+                
+                if hasattr(variations_config, 'vary_embedding_dim'):
+                    embed_options = variations_config.vary_embedding_dim
+                    config.model.embedding_dim = embed_options[model_idx % len(embed_options)]
+                
+                if hasattr(variations_config, 'vary_cnn_filters') and config.model.use_cnn:
+                    filter_options = variations_config.vary_cnn_filters
+                    config.model.cnn_filters = filter_options[model_idx % len(filter_options)]
+                
+                logger.info(f"Model {model_idx}: Applied config-based variations")
         else:
             # Random variations for additional models
             random.seed(42 + model_idx)
@@ -162,29 +219,37 @@ class EnsembleTrainer:
         return config
     
     def train(self,
-             train_reads: List[SimulatedRead],
-             val_reads: Optional[List[SimulatedRead]] = None) -> List[keras.Model]:
+              train_data: Union[np.ndarray, tuple, list],
+              val_data: Optional[Union[np.ndarray, tuple, list]] = None,
+              unlabeled_path: Optional[Union[str, Path]] = None,
+              **kwargs) -> Dict[str, Any]:
         """
-        Train ensemble of models.
+        Train ensemble of mixed standard and hybrid models.
         
         Args:
-            train_reads: Training SimulatedRead objects
-            val_reads: Optional validation SimulatedRead objects
+            train_data: Training data (X, y) or list of dicts
+            val_data: Optional validation data (X, y) or list of dicts
+            unlabeled_path: Optional path to unlabeled data (used for hybrid models)
+            **kwargs: Additional training parameters
             
         Returns:
-            List of trained models
+            Dictionary containing ensemble training results
         """
         logger.info("="*80)
-        logger.info(f"STARTING ENSEMBLE TRAINING ({self.num_models} models)")
+        logger.info(f"STARTING MIXED ENSEMBLE TRAINING ({self.num_models} models)")
+        logger.info(f"Model types: {self.model_types}")
         logger.info("="*80)
         
         # Generate model variations
         self.model_configs = self._generate_model_variations()
         
-        # Train each model
-        for i, config in enumerate(self.model_configs):
+        # Track results
+        training_results = []
+        
+        # Train each model based on its type
+        for i, (config, model_type) in enumerate(zip(self.model_configs, self.model_types)):
             logger.info(f"\n{'='*60}")
-            logger.info(f"TRAINING MODEL {i+1}/{self.num_models}")
+            logger.info(f"TRAINING MODEL {i+1}/{self.num_models} (Type: {model_type.upper()})")
             logger.info(f"{'='*60}")
             
             # Set random seed if specified
@@ -193,70 +258,163 @@ class EnsembleTrainer:
                 np.random.seed(config.seed)
                 random.seed(config.seed)
             
-            # Create trainer for this model
-            model_checkpoint_dir = self.checkpoint_dir / f"model_{i}"
-            trainer = ModelTrainer(config, checkpoint_dir=str(model_checkpoint_dir))
+            # Create appropriate trainer
+            model_checkpoint_dir = self.checkpoint_dir / f"model_{i}_{model_type}"
             
-            # Train model
-            model = trainer.train(train_reads, val_reads)
+            if model_type == 'standard':
+                trainer = StandardTrainer(
+                    config=config,
+                    output_dir=model_checkpoint_dir,
+                    verbose=kwargs.get('verbose', False)
+                )
+                
+                # Train standard model
+                result = trainer.train(
+                    train_data=train_data,
+                    val_data=val_data,
+                    **kwargs
+                )
+                
+            elif model_type == 'hybrid':
+                trainer = HybridTrainer(
+                    config=config,
+                    output_dir=model_checkpoint_dir,
+                    verbose=kwargs.get('verbose', False)
+                )
+
+                # Safety check for missing hybrid configuration
+                if not getattr(config, "hybrid", None):
+                    logger.warning(
+                        f"Hybrid model {i+1} specified but no 'hybrid' block found in config — "
+                        f"falling back to StandardTrainer."
+                    )
+                    model_type = "standard"
+                    trainer = StandardTrainer(
+                        config=config,
+                        output_dir=model_checkpoint_dir,
+                        verbose=kwargs.get('verbose', False)
+                    )
+                    result = trainer.train(
+                        train_data=train_data,
+                        val_data=val_data,
+                        **kwargs
+                    )
+                    self.trainers.append(trainer)
+                    self.models.append(trainer.model if hasattr(trainer, "model") else trainer.base_model)
+                    continue  # Skip to next model
+                
+                # Train hybrid model (with optional unlabeled data)
+                result = trainer.train(
+                    train_data=train_data,
+                    val_data=val_data,
+                    unlabeled_path=unlabeled_path,  # Only hybrid models use this
+                    **kwargs
+                )
+            else:
+                raise ValueError(f"Unknown model type: {model_type}")
             
-            # Store model and training info
-            self.models.append(model)
-            self.training_histories.append(trainer.training_history)
+            # Store trainer and results
+            self.trainers.append(trainer)
+            self.models.append(trainer.model if hasattr(trainer, 'model') else trainer.base_model)
+            training_results.append(result)
+            
+            # Extract performance metrics
+            if 'final_val_accuracy' in result:
+                val_acc = result['final_val_accuracy']
+                val_loss = result.get('final_val_loss', float('inf'))
+            elif 'metrics' in result:
+                val_acc = result['metrics'].get('Validation Accuracy', 0.0)
+                val_loss = result['metrics'].get('Validation Loss', float('inf'))
+            else:
+                val_acc = 0.0
+                val_loss = float('inf')
+            
             self.model_performances.append({
-                'val_loss': trainer.best_val_loss,
-                'val_accuracy': trainer.best_val_accuracy
+                'val_loss': val_loss,
+                'val_accuracy': val_acc,
+                'model_type': model_type,
+                'model_index': i
             })
             
             # Store label mappings from first model
             if i == 0:
-                self.label_to_idx = trainer.label_to_idx
-                self.idx_to_label = trainer.idx_to_label
+                if hasattr(trainer, 'label_to_idx'):
+                    self.label_to_idx = trainer.label_to_idx
+                    self.idx_to_label = trainer.idx_to_label
             
-            logger.info(f"Model {i+1} - Val Loss: {trainer.best_val_loss:.4f}, "
-                       f"Val Acc: {trainer.best_val_accuracy:.4f}")
+            logger.info(f"Model {i+1} ({model_type}) - Val Loss: {val_loss:.4f}, "
+                       f"Val Acc: {val_acc:.4f}")
         
         # Compute BMA weights
         self._compute_bma_weights()
         
-        # Save ensemble
+        # Save ensemble with metadata
         self.save_ensemble()
         
+        # Prepare comprehensive results
+        results = {
+            'models': self.models,
+            'model_types': self.model_types,
+            'model_weights': self.model_weights,
+            'model_performances': self.model_performances,
+            'training_results': training_results,
+            'ensemble_dir': str(self.checkpoint_dir),
+            'metrics': self._compute_ensemble_metrics()
+        }
+        
         logger.info("\n" + "="*80)
-        logger.info("ENSEMBLE TRAINING COMPLETE")
+        logger.info("MIXED ENSEMBLE TRAINING COMPLETE")
         logger.info("="*80)
         self._print_ensemble_summary()
         
-        return self.models
+        return results
     
     def _compute_bma_weights(self):
         """
-        Compute Bayesian Model Averaging weights based on validation performance.
+        Compute BMA weights with support for type bonuses and performance metrics.
         """
         if self.bma_prior == 'uniform':
             # Equal weights for all models
             self.model_weights = [1.0 / self.num_models] * self.num_models
             logger.info("Using uniform BMA prior (equal weights)")
-            
-        elif self.bma_prior == 'performance':
-            # Weights based on validation accuracy
-            val_accuracies = [perf['val_accuracy'] for perf in self.model_performances]
-            
-            # Apply temperature scaling
-            scaled_accs = np.array(val_accuracies) / self.bma_temperature
-            
-            # Softmax to get weights
-            exp_accs = np.exp(scaled_accs - np.max(scaled_accs))  # Numerical stability
-            self.model_weights = (exp_accs / np.sum(exp_accs)).tolist()
-            
-            logger.info(f"Using performance-based BMA prior (temp={self.bma_temperature})")
-            
-        else:
-            raise ValueError(f"Unknown BMA prior: {self.bma_prior}")
         
-        # Log weights
-        for i, weight in enumerate(self.model_weights):
-            logger.info(f"Model {i+1} BMA weight: {weight:.4f}")
+        elif self.bma_prior == 'performance':
+            # Get performance metrics
+            if self.bma_method == 'validation_accuracy':
+                scores = [perf.get('val_accuracy', 0.0) for perf in self.model_performances]
+            elif self.bma_method == 'validation_loss':
+                # Invert loss (lower is better)
+                scores = [1.0 / (perf.get('val_loss', 1.0) + 1e-6) for perf in self.model_performances]
+            else:
+                # Default to accuracy
+                scores = [perf.get('val_accuracy', 0.0) for perf in self.model_performances]
+        
+            # Apply type bonuses if configured
+            if hasattr(self, 'type_bonus') and self.type_bonus:
+                for i, model_type in enumerate(self.model_types):
+                    bonus = self.type_bonus.get(model_type, 1.0)
+                    scores[i] *= bonus
+                    if bonus != 1.0:
+                        logger.info(f"Applied {bonus}x bonus to {model_type} model {i+1}")
+        
+            # Apply temperature scaling
+            scores_array = np.array(scores) / self.bma_temperature
+        
+            # Softmax to get weights
+            exp_scores = np.exp(scores_array - np.max(scores_array))  # Numerical stability
+            weights = exp_scores / np.sum(exp_scores)
+        
+            # Apply minimum weight constraint
+            weights = np.maximum(weights, self.min_weight)
+            weights = weights / np.sum(weights)  # Re-normalize
+        
+            self.model_weights = weights.tolist()
+        
+            logger.info(f"Using performance-based BMA (method={self.bma_method}, temp={self.bma_temperature})")
+    
+        # Log weights with model types
+        for i, (weight, model_type) in enumerate(zip(self.model_weights, self.model_types)):
+            logger.info(f"Model {i+1} ({model_type}): BMA weight = {weight:.4f}")
     
     def predict(self, reads: List[SimulatedRead], return_uncertainty: bool = False) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
         """
@@ -365,54 +523,85 @@ class EnsembleTrainer:
         
         return metrics
     
+    def _compute_ensemble_metrics(self) -> Dict[str, Any]:
+        """Compute overall ensemble metrics."""
+        metrics = {
+            'num_models': self.num_models,
+            'num_standard': self.model_types.count('standard'),
+            'num_hybrid': self.model_types.count('hybrid'),
+            'avg_val_accuracy': np.mean([p['val_accuracy'] for p in self.model_performances]),
+            'avg_val_loss': np.mean([p['val_loss'] for p in self.model_performances]),
+            'best_val_accuracy': max([p['val_accuracy'] for p in self.model_performances]),
+            'worst_val_accuracy': min([p['val_accuracy'] for p in self.model_performances]),
+        }
+        
+        # Add model type specific metrics
+        standard_perfs = [p for p in self.model_performances if p['model_type'] == 'standard']
+        hybrid_perfs = [p for p in self.model_performances if p['model_type'] == 'hybrid']
+        
+        if standard_perfs:
+            metrics['avg_standard_accuracy'] = np.mean([p['val_accuracy'] for p in standard_perfs])
+        if hybrid_perfs:
+            metrics['avg_hybrid_accuracy'] = np.mean([p['val_accuracy'] for p in hybrid_perfs])
+        
+        return metrics
+    
     def save_ensemble(self, filepath: Optional[str] = None):
         """
-        Save ensemble models and metadata.
-        
-        Args:
-            filepath: Optional custom directory for saving
+        Save ensemble with enhanced metadata including model types.
         """
         if filepath is None:
             filepath = self.checkpoint_dir
         else:
             filepath = Path(filepath)
             ensure_dir(str(filepath))
-        
-        # Save each model
-        for i, model in enumerate(self.models):
-            model_path = filepath / f"ensemble_model_{i}.h5"
+    
+        # Save each model with type in filename
+        for i, (model, model_type) in enumerate(zip(self.models, self.model_types)):
+            model_path = filepath / f"ensemble_model_{i}_{model_type}.h5"
             model.save(str(model_path))
-            logger.info(f"Saved model {i+1} to: {model_path}")
-        
-        # Save ensemble metadata
+            logger.info(f"Saved {model_type} model {i+1} to: {model_path}")
+    
+        # Enhanced metadata
         metadata = {
             'num_models': self.num_models,
+            'model_types': self.model_types,
             'variation_type': self.variation_type,
             'model_weights': self.model_weights,
             'model_performances': self.model_performances,
             'bma_prior': self.bma_prior,
             'bma_temperature': self.bma_temperature,
+            'bma_method': getattr(self, 'bma_method', 'validation_accuracy'),
             'label_to_idx': self.label_to_idx,
             'idx_to_label': self.idx_to_label,
+            'ensemble_statistics': {
+                'num_standard': self.model_types.count('standard'),
+                'num_hybrid': self.model_types.count('hybrid'),
+                'avg_weight_standard': np.mean([w for w, t in zip(self.model_weights, self.model_types) if t == 'standard']) if 'standard' in self.model_types else 0,
+                'avg_weight_hybrid': np.mean([w for w, t in zip(self.model_weights, self.model_types) if t == 'hybrid']) if 'hybrid' in self.model_types else 0,
+            },
             'model_configs': [
-                # Save key hyperparameters for each model
                 {
+                    'model_type': model_type,
+                    'model_index': i,
                     'lstm_units': config.model.lstm_units,
                     'lstm_layers': config.model.lstm_layers,
                     'dropout': config.model.dropout,
                     'embedding_dim': config.model.embedding_dim,
-                    'cnn_filters': config.model.cnn_filters if config.model.use_cnn else None,
-                    'seed': getattr(config, 'seed', None)
+                    'cnn_filters': getattr(config.model, 'cnn_filters', None),
+                    'seed': getattr(config, 'seed', None),
+                    'weight': self.model_weights[i] if i < len(self.model_weights) else 0
                 }
-                for config in self.model_configs
+                for i, (config, model_type) in enumerate(zip(self.model_configs, self.model_types))
             ]
         }
-        
+    
+        # Save metadata
         metadata_path = filepath / "ensemble_metadata.json"
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f, indent=2, default=str)
-        
-        logger.info(f"Saved ensemble metadata to: {metadata_path}")
+    
+        logger.info(f"Saved enhanced ensemble metadata to: {metadata_path}")
     
     def load_ensemble(self, filepath: str):
         """
@@ -439,8 +628,8 @@ class EnsembleTrainer:
         
         # Load models
         self.models = []
-        for i in range(self.num_models):
-            model_path = filepath / f"ensemble_model_{i}.h5"
+        for i, model_type in enumerate(metadata["model_types"]):
+            model_path = filepath / f"ensemble_model_{i}_{model_type}.h5"
             model = keras.models.load_model(str(model_path))
             self.models.append(model)
         
@@ -448,18 +637,23 @@ class EnsembleTrainer:
         self._print_ensemble_summary()
     
     def _print_ensemble_summary(self):
-        """Print summary of the ensemble."""
+        """Ensemble summary that shows model types."""
         logger.info("\nEnsemble Summary:")
-        logger.info(f"  Number of models: {self.num_models}")
+        logger.info(f"  Total models: {self.num_models}")
+        logger.info(f"  Standard models: {self.model_types.count('standard')}")
+        logger.info(f"  Hybrid models: {self.model_types.count('hybrid')}")
         logger.info(f"  Variation type: {self.variation_type}")
         logger.info(f"  BMA prior: {self.bma_prior}")
         
         if self.model_weights:
-            logger.info("\nModel Weights (BMA):")
-            for i, weight in enumerate(self.model_weights):
-                perf = self.model_performances[i] if i < len(self.model_performances) else {}
+            logger.info("\nModel Weights and Performance:")
+            for i, (weight, perf, model_type) in enumerate(zip(
+                self.model_weights, 
+                self.model_performances,
+                self.model_types
+            )):
                 val_acc = perf.get('val_accuracy', 0.0)
-                logger.info(f"  Model {i+1}: weight={weight:.4f}, val_acc={val_acc:.4f}")
+                logger.info(f"  Model {i+1} ({model_type}): weight={weight:.4f}, val_acc={val_acc:.4f}")
         
         # Calculate effective number of models (based on weight entropy)
         if self.model_weights:
@@ -467,7 +661,41 @@ class EnsembleTrainer:
             entropy = -np.sum(weights * np.log(weights + 1e-10))
             effective_models = np.exp(entropy)
             logger.info(f"\nEffective number of models: {effective_models:.2f}")
-
+    
+    def compute_diversity(self, val_data: Optional[Union[np.ndarray, tuple, list]] = None) -> float:
+        """
+        Compute diversity metric for the ensemble.
+        """
+        if not self.models or len(self.models) < 2:
+            return 0.0
+    
+        if val_data is None:
+            logger.warning("No validation data provided for diversity computation")
+            return 0.0
+    
+        # Get predictions from each model
+        predictions = []
+        for model in self.models:
+            if hasattr(model, 'predict'):
+                pred = model.predict(val_data[0] if isinstance(val_data, tuple) else val_data)
+                predictions.append(np.argmax(pred, axis=-1))
+    
+        if len(predictions) < 2:
+            return 0.0
+    
+        # Compute pairwise disagreement
+        disagreement = 0.0
+        n_pairs = 0
+    
+        for i in range(len(predictions)):
+            for j in range(i + 1, len(predictions)):
+                disagreement += np.mean(predictions[i] != predictions[j])
+                n_pairs += 1
+    
+        diversity = disagreement / n_pairs if n_pairs > 0 else 0.0
+        logger.info(f"Ensemble diversity (disagreement rate): {diversity:.4f}")
+    
+        return diversity
 
 class BMAPredictor:
     """
@@ -569,3 +797,95 @@ class BMAPredictor:
             confidence_scores.append(scores)
         
         return predicted_labels, np.array(confidence_scores)
+    
+def run_ensemble_training(
+    config: TempestConfig,
+    output_dir: Optional[Path] = None,
+    **kwargs
+) -> Dict[str, Any]:
+    """
+    Enhanced orchestration function for mixed ensemble training.
+    """
+    # Extract parameters
+    train_data = kwargs.get('train_data')
+    val_data = kwargs.get('val_data')
+    unlabeled_path = kwargs.get('unlabeled_path')
+    num_models = kwargs.get('num_models', 5)
+    verbose = kwargs.get('verbose', False)
+    
+    # Get ensemble configuration from config
+    if hasattr(config, 'ensemble') and config.ensemble:
+        ensemble_config = config.ensemble
+        
+        # Override with config values if not specified in kwargs
+        if 'num_models' not in kwargs:
+            num_models = getattr(ensemble_config, 'num_models', 5)
+        
+        # Model types configuration
+        model_types = kwargs.get('model_types', getattr(ensemble_config, 'model_types', None))
+        hybrid_ratio = kwargs.get('hybrid_ratio', getattr(ensemble_config, 'hybrid_ratio', 0.0))
+        variation_type = kwargs.get('variation_type', getattr(ensemble_config, 'variation_type', 'both'))
+    else:
+        model_types = kwargs.get('model_types', None)
+        hybrid_ratio = kwargs.get('hybrid_ratio', 0.0)
+        variation_type = kwargs.get('variation_type', 'both')
+    
+    # Auto-determine hybrid ratio if unlabeled data provided
+    if model_types is None and unlabeled_path and hybrid_ratio == 0.0:
+        logger.info("Unlabeled data provided, setting hybrid_ratio to 0.4")
+        hybrid_ratio = 0.4
+    
+    # Create output directory
+    if output_dir is None:
+        output_dir = Path("ensemble_output")
+    else:
+        output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    logger.info("="*80)
+    logger.info("ENSEMBLE TRAINING CONFIGURATION")
+    logger.info("="*80)
+    logger.info(f"Number of models: {num_models}")
+    logger.info(f"Hybrid ratio: {hybrid_ratio}")
+    logger.info(f"Variation type: {variation_type}")
+    logger.info(f"Output directory: {output_dir}")
+    if unlabeled_path:
+        logger.info(f"Unlabeled data: {unlabeled_path}")
+    
+    # Create ensemble trainer with corrected parameters
+    trainer = EnsembleTrainer(
+        config=config,
+        num_models=num_models,
+        variation_type=variation_type,
+        checkpoint_dir=str(output_dir / "checkpoints"),  # Convert to string
+        model_types=model_types,
+        hybrid_ratio=hybrid_ratio
+    )
+    
+    # Run training
+    results = trainer.train(
+        train_data=train_data,
+        val_data=val_data,
+        unlabeled_path=unlabeled_path,
+        **kwargs
+    )
+    
+    # Compute diversity if validation data available
+    if val_data is not None:
+        diversity = trainer.compute_diversity(val_data)
+        results['diversity'] = diversity
+    
+    # Prepare summary for CLI
+    if 'metrics' not in results:
+        results['metrics'] = {}
+    
+    results['metrics'].update({
+        'Ensemble Size': num_models,
+        'Standard Models': trainer.model_types.count('standard'),
+        'Hybrid Models': trainer.model_types.count('hybrid'),
+        'Average Val Accuracy': f"{np.mean([p.get('val_accuracy', 0) for p in trainer.model_performances]):.4f}",
+        'Ensemble Diversity': f"{results.get('diversity', 0):.4f}",
+        'Output Directory': str(output_dir)
+    })
+    
+    return results

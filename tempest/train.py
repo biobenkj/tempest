@@ -141,7 +141,7 @@ def standard_command(
         ) as progress:
             progress.add_task("Loading...", total=None)
             train_dataset = load_data(train_data)
-        console.print(f"[green]✓[/green] Loaded {len(train_dataset)} training sequences")
+        console.print(f"[green][/green] Loaded {len(train_dataset)} training sequences")
     
     if val_data:
         console.print(f"[cyan]Loading validation data:[/cyan] {val_data}")
@@ -152,7 +152,7 @@ def standard_command(
         ) as progress:
             progress.add_task("Loading...", total=None)
             val_dataset = load_data(val_data)
-        console.print(f"[green]✓[/green] Loaded {len(val_dataset)} validation sequences")
+        console.print(f"[green][/green] Loaded {len(val_dataset)} validation sequences")
     
     # Import and run the actual training
     from tempest.training import run_training
@@ -186,7 +186,7 @@ def standard_command(
         
         console.print(table)
     
-    console.print("\n[bold green]✓ Training complete![/bold green]")
+    console.print("\n[bold green] Training complete![/bold green]")
     if output_dir:
         console.print(f"[dim]Model saved to: {output_dir}[/dim]")
 
@@ -211,6 +211,11 @@ def hybrid_command(
         None,
         "--val-data",
         help="Path to validation data (pickle or text format)"
+    ),
+    unlabeled_data: Optional[Path] = typer.Option(
+        None,
+        "--unlabeled-data",
+        help="Path to unlabeled data for semi-supervised hybrid training"
     ),
     output_dir: Optional[Path] = typer.Option(
         None,
@@ -283,6 +288,11 @@ def hybrid_command(
     # Load configuration using TempestConfig
     config_obj = load_config(config)
     
+    # Ensure hybrid block exists
+    if not hasattr(config_obj, "hybrid") or config_obj.hybrid is None:
+        from types import SimpleNamespace
+        config_obj.hybrid = SimpleNamespace()
+
     # Override config with CLI arguments if provided
     if epochs is not None and config_obj.training:
         config_obj.training.epochs = epochs
@@ -304,7 +314,7 @@ def hybrid_command(
         ) as progress:
             progress.add_task("Loading...", total=None)
             train_dataset = load_data(train_data)
-        console.print(f"[green]✓[/green] Loaded {len(train_dataset)} training sequences")
+        console.print(f"[green][/green] Loaded {len(train_dataset)} training sequences")
     
     if val_data:
         console.print(f"[cyan]Loading validation data:[/cyan] {val_data}")
@@ -315,7 +325,7 @@ def hybrid_command(
         ) as progress:
             progress.add_task("Loading...", total=None)
             val_dataset = load_data(val_data)
-        console.print(f"[green]✓[/green] Loaded {len(val_dataset)} validation sequences")
+        console.print(f"[green][/green] Loaded {len(val_dataset)} validation sequences")
     
     # Import and run the actual training
     from tempest.training import run_training
@@ -331,6 +341,9 @@ def hybrid_command(
         'verbose': verbose
     }
     
+    if unlabeled_data:
+        train_args["unlabeled_path"] = unlabeled_data
+
     # Run training
     result = run_training(config_obj, output_dir=output_dir, **train_args)
     
@@ -348,7 +361,7 @@ def hybrid_command(
         
         console.print(table)
     
-    console.print("\n[bold green]✓ Hybrid training complete![/bold green]")
+    console.print("\n[bold green] Hybrid training complete![/bold green]")
     if output_dir:
         console.print(f"[dim]Model saved to: {output_dir}[/dim]")
 
@@ -374,6 +387,11 @@ def ensemble_command(
         "--val-data",
         help="Path to validation data (pickle or text format)"
     ),
+    unlabeled_data: Optional[Path] = typer.Option(
+        None,
+        "--unlabeled-data",
+        help="Path to unlabeled data for hybrid models in ensemble"
+    ),
     output_dir: Optional[Path] = typer.Option(
         None,
         "--output-dir", "-o",
@@ -385,6 +403,18 @@ def ensemble_command(
         help="Number of models in ensemble",
         min=2,
         max=20
+    ),
+    hybrid_ratio: float = typer.Option(
+        0.0,
+        "--hybrid-ratio",
+        help="Fraction of models that should be hybrid (0.0-1.0)",
+        min=0.0,
+        max=1.0
+    ),
+    model_types: Optional[str] = typer.Option(
+        None,
+        "--model-types",
+        help="Comma-separated list of model types (e.g., 'standard,hybrid,standard,hybrid,standard')"
     ),
     epochs: Optional[int] = typer.Option(
         None,
@@ -401,17 +431,10 @@ def ensemble_command(
         "--learning-rate", "--lr",
         help="Learning rate (overrides config)"
     ),
-    diversity_weight: float = typer.Option(
-        0.1,
-        "--diversity-weight",
-        help="Weight for diversity regularization",
-        min=0.0,
-        max=1.0
-    ),
-    bma_method: str = typer.Option(
-        "BIC",
-        "--bma-method",
-        help="BMA approximation method: BIC, Laplace, or Variational"
+    variation_type: str = typer.Option(
+        "both",
+        "--variation-type",
+        help="Type of variation: 'architecture', 'initialization', or 'both'"
     ),
     use_gpu: bool = typer.Option(
         True,
@@ -430,30 +453,68 @@ def ensemble_command(
     )
 ):
     """
-    Train an ensemble of Tempest models using Bayesian Model Averaging.
+    Train an ensemble of Tempest models with optional mixing of standard and hybrid models.
     
-    Ensemble training creates multiple models with different
-    initializations and combines their predictions using BMA for improved
-    accuracy and uncertainty estimation.
+    The ensemble can consist of:
+    - All standard models (default)
+    - All hybrid models (set --hybrid-ratio 1.0)
+    - Mixed standard and hybrid (set --hybrid-ratio between 0 and 1)
+    
+    Hybrid models will use unlabeled data if provided via --unlabeled-data.
     
     [bold cyan]Examples:[/bold cyan]
     
-    Train ensemble with 5 models:
+    Train standard-only ensemble:
     ```
     tempest train ensemble --config config.yaml --train-data train.pkl.gz --num-models 5
     ```
     
-    Train larger ensemble with diversity:
+    Train mixed ensemble (40% hybrid, 60% standard):
     ```
-    tempest train ensemble --config config.yaml --train-data train.pkl.gz --num-models 10 --diversity-weight 0.2
+    tempest train ensemble --config config.yaml --train-data train.pkl.gz \\
+        --num-models 5 --hybrid-ratio 0.4 --unlabeled-data unlabeled.fastq
+    ```
+    
+    Train with explicit model types:
+    ```
+    tempest train ensemble --config config.yaml --train-data train.pkl.gz \\
+        --num-models 5 --model-types "standard,hybrid,standard,hybrid,standard"
     ```
     """
     console.print("\n[bold blue]═" * 80 + "[/bold blue]")
-    console.print(" " * 30 + "[bold cyan]TEMPEST TRAINER[/bold cyan]")
+    console.print(" " * 30 + "[bold cyan]TEMPEST ENSEMBLE TRAINER[/bold cyan]")
     console.print("[bold blue]═" * 80 + "[/bold blue]\n")
-    console.print(f"[yellow]Training Mode:[/yellow] Ensemble ({num_models} models)")
-    console.print(f"[yellow]BMA Method:[/yellow] {bma_method}")
-    console.print(f"[yellow]Diversity Weight:[/yellow] {diversity_weight}")
+    
+    # Process model types if specified as string
+    model_types_list = None
+    if model_types:
+        model_types_list = [t.strip() for t in model_types.split(',')]
+        if len(model_types_list) != num_models:
+            console.print(f"[red]Error: model-types list length ({len(model_types_list)}) must match num-models ({num_models})[/red]")
+            raise typer.Exit(1)
+        # Validate model types
+        for mt in model_types_list:
+            if mt not in ['standard', 'hybrid']:
+                console.print(f"[red]Error: Invalid model type '{mt}'. Must be 'standard' or 'hybrid'[/red]")
+                raise typer.Exit(1)
+    
+    # Determine model composition
+    if model_types_list:
+        num_standard = model_types_list.count('standard')
+        num_hybrid = model_types_list.count('hybrid')
+        console.print(f"[yellow]Ensemble Composition:[/yellow] {num_standard} standard, {num_hybrid} hybrid models (explicit)")
+    else:
+        num_hybrid = int(num_models * hybrid_ratio)
+        num_standard = num_models - num_hybrid
+        console.print(f"[yellow]Ensemble Composition:[/yellow] {num_standard} standard, {num_hybrid} hybrid models (ratio={hybrid_ratio})")
+    
+    console.print(f"[yellow]Total Models:[/yellow] {num_models}")
+    console.print(f"[yellow]Variation Type:[/yellow] {variation_type}")
+    
+    if unlabeled_data and num_hybrid > 0:
+        console.print(f"[yellow]Unlabeled Data:[/yellow] {unlabeled_data} (for hybrid models)")
+    elif num_hybrid > 0 and not unlabeled_data:
+        console.print("[yellow] Warning:[/yellow] Hybrid models requested but no unlabeled data provided")
     
     # Load configuration using TempestConfig
     config_obj = load_config(config)
@@ -469,15 +530,16 @@ def ensemble_command(
     # Update ensemble config if it exists
     if config_obj.ensemble:
         config_obj.ensemble.num_models = num_models
-        if config_obj.ensemble.bma_config:
-            config_obj.ensemble.bma_config.approximation = bma_method.lower()
+        if not model_types_list:  # Only set hybrid_ratio if not using explicit types
+            config_obj.ensemble.hybrid_ratio = hybrid_ratio
+        config_obj.ensemble.variation_type = variation_type
     
     # Load training data if specified
     train_dataset = None
     val_dataset = None
     
     if train_data:
-        console.print(f"[cyan]Loading training data:[/cyan] {train_data}")
+        console.print(f"\n[cyan]Loading training data:[/cyan] {train_data}")
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -485,7 +547,7 @@ def ensemble_command(
         ) as progress:
             progress.add_task("Loading...", total=None)
             train_dataset = load_data(train_data)
-        console.print(f"[green]✓[/green] Loaded {len(train_dataset)} training sequences")
+        console.print(f"[green][/green] Loaded {len(train_dataset)} training sequences")
     
     if val_data:
         console.print(f"[cyan]Loading validation data:[/cyan] {val_data}")
@@ -496,26 +558,30 @@ def ensemble_command(
         ) as progress:
             progress.add_task("Loading...", total=None)
             val_dataset = load_data(val_data)
-        console.print(f"[green]✓[/green] Loaded {len(val_dataset)} validation sequences")
+        console.print(f"[green][/green] Loaded {len(val_dataset)} validation sequences")
     
-    # Import and run the actual training
-    from tempest.training import run_training
+    # Import the correct training function
+    from tempest.training import run_ensemble_training
     
     # Build training arguments
     train_args = {
-        'mode': 'ensemble',
         'train_data': train_dataset,
         'val_data': val_dataset,
         'num_models': num_models,
-        'diversity_weight': diversity_weight,
-        'bma_method': bma_method,
+        'model_types': model_types_list,  # Pass the list if specified
+        'hybrid_ratio': hybrid_ratio,
+        'variation_type': variation_type,
         'use_gpu': use_gpu,
         'parallel': parallel,
         'verbose': verbose
     }
     
-    # Run training
-    result = run_training(config_obj, output_dir=output_dir, **train_args)
+    # Add unlabeled path if provided
+    if unlabeled_data:
+        train_args['unlabeled_path'] = str(unlabeled_data)
+    
+    # Run ensemble training
+    result = run_ensemble_training(config_obj, output_dir=output_dir, **train_args)
     
     # Display results
     if result and 'metrics' in result:
@@ -529,9 +595,22 @@ def ensemble_command(
             else:
                 table.add_row(metric, str(value))
         
-        console.print(table)
+        console.print("\n", table)
+        
+        # Additional ensemble-specific info
+        if 'model_weights' in result:
+            weights_table = Table(title="Model Weights (BMA)", show_header=True, header_style="bold cyan")
+            weights_table.add_column("Model", style="cyan")
+            weights_table.add_column("Type", style="yellow")
+            weights_table.add_column("Weight", style="green")
+            
+            for i, (weight, model_type) in enumerate(zip(result['model_weights'], result.get('model_types', ['unknown']*num_models))):
+                weights_table.add_row(f"Model {i+1}", model_type, f"{weight:.4f}")
+            
+            console.print("\n", weights_table)
     
-    console.print(f"\n[bold green]✓ Ensemble training complete! Trained {num_models} models.[/bold green]")
+    console.print(f"\n[bold green] Ensemble training complete![/bold green]")
+    console.print(f"[green]Trained {num_models} models ({num_standard} standard, {num_hybrid} hybrid)[/green]")
     if output_dir:
         console.print(f"[dim]Models saved to: {output_dir}[/dim]")
 
@@ -631,6 +710,6 @@ def resume_command(
         
         console.print(table)
     
-    console.print("\n[bold green]✓ Training resumed and complete![/bold green]")
+    console.print("\n[bold green] Training resumed and complete![/bold green]")
     if output_dir:
         console.print(f"[dim]Model saved to: {output_dir}[/dim]")

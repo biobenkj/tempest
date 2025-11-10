@@ -116,9 +116,11 @@ def main_callback(
     TEMPEST: Advanced sequence annotation toolkit for long-read RNA-seq
     
     TEMPEST (Transcript Element Mapping via Position-Encoded Sequence Tracking)
-    is a sophisticated bioinformatics package for computational biology that
-    implements an 11-segment read architecture with probabilistic PWM generation,
-    Bayesian Model Averaging, and constrained decoding capabilities.
+    is a tool that annotates long read RNA-seq read architecture using a deep
+    learning approach that can enforce element length constraints. Multiple models
+    can be trained and aggregated through Bayesian model averaging as well. Finally,
+    models can be compared and evaluated prior to using for annotating and demultiplexing
+    newly generated data.
     """
     if version:
         console.print(f"[bold blue]Tempest[/bold blue] version {__version__}")
@@ -306,7 +308,7 @@ def init(
         config_path = project_dir / "configs" / "config.yaml"
         with open(config_path, 'w') as f:
             yaml.safe_dump(example_config, f, default_flow_style=False)
-        console.print(f"[green]✓[/green] Created example configuration: {config_path}")
+        console.print(f"[green][/green] Created example configuration: {config_path}")
         
         # Create example workflow script
         workflow_script = project_dir / "run_workflow.sh"
@@ -339,24 +341,24 @@ def init(
         """)
         workflow_script.write_text(workflow_content)
         workflow_script.chmod(0o755)
-        console.print("[green]✓[/green] Created example workflow script")
+        console.print("[green][/green] Created example workflow script")
         
         # Create example whitelist files
         i7_whitelist = project_dir / "whitelist" / "udi_i7.txt"
         i7_whitelist.write_text("ATTACTCG\nTCCGGAGA\nCGCTCATT\nGAGATTCC\n")
-        console.print("[green]✓[/green] Created i7 whitelist")
+        console.print("[green][/green] Created i7 whitelist")
         
         i5_whitelist = project_dir / "whitelist" / "udi_i5.txt"
         i5_whitelist.write_text("TATAGCCT\nATATGAGA\nAGAGGATA\nTCTACTCT\n")
-        console.print("[green]✓[/green] Created i5 whitelist")
+        console.print("[green][/green] Created i5 whitelist")
         
         cbc_whitelist = project_dir / "whitelist" / "cbc.txt"
         cbc_whitelist.write_text("AAAAAA\nAAAAAC\nAAAAAG\nAAAATA\n")
-        console.print("[green]✓[/green] Created CBC whitelist")
+        console.print("[green][/green] Created CBC whitelist")
         
         acc_pwm = project_dir / "whitelist" / "acc_pwm.txt"
         acc_pwm.write_text("# ACC PWM Matrix\nA: 0.9 0.1 0.1 0.3 0.3 0.25\nC: 0.03 0.8 0.8 0.2 0.2 0.25\nG: 0.03 0.05 0.05 0.3 0.2 0.25\nT: 0.04 0.05 0.05 0.2 0.3 0.25\n")
-        console.print("[green]✓[/green] Created ACC PWM file")
+        console.print("[green][/green] Created ACC PWM file")
     
     # Create README
     readme = project_dir / "README.md"
@@ -408,7 +410,7 @@ def init(
         For more information, see the [Tempest documentation](https://github.com/tempest/docs).
     """)
     readme.write_text(readme_content)
-    console.print("[green]✓[/green] Created README.md")
+    console.print("[green][/green] Created README.md")
     
     # Display summary
     table = Table(title="Project Initialized", show_header=True, header_style="bold magenta")
@@ -416,12 +418,12 @@ def init(
     table.add_column("Status", style="green")
     
     table.add_row("Project Directory", str(project_dir))
-    table.add_row("Configuration", "✓ Created" if with_examples else "Ready for creation")
-    table.add_row("Directories", "✓ Created")
+    table.add_row("Configuration", " Created" if with_examples else "Ready for creation")
+    table.add_row("Directories", " Created")
     if with_examples:
-        table.add_row("Example Config", "✓ Included")
-        table.add_row("Workflow Script", "✓ Generated")
-        table.add_row("Whitelists", "✓ Generated")
+        table.add_row("Example Config", " Included")
+        table.add_row("Workflow Script", " Generated")
+        table.add_row("Whitelists", " Generated")
     
     console.print("\n", table)
     console.print("\n[bold green]Project initialized successfully![/bold green]")

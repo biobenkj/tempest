@@ -1,5 +1,5 @@
 """
-Vectorized Length-Constrained CRF for tranquillyzer.
+Vectorized Length-Constrained CRF for tempest.
 Fully XLA-friendly (no py_function/map_fn) with constraint weight ramping over epochs.
 
 Key features:
