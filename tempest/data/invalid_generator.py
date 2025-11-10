@@ -35,9 +35,7 @@ class InvalidReadGenerator:
     - scrambled: Randomized segment order
     """
 
-    # ------------------------------------------------------------------ #
-    # Initialization & config handling
-    # ------------------------------------------------------------------ #
+    # Init and config handling
     def __init__(self, config=None):
         """Initialize invalid read generator."""
         self.config = config
@@ -84,9 +82,7 @@ class InvalidReadGenerator:
         total = sum(probs.values())
         return {k: v / total for k, v in probs.items()} if total > 0 else probs
 
-    # ------------------------------------------------------------------ #
-    # File I/O with pickle format support
-    # ------------------------------------------------------------------ #
+    # File I/O
     def save_batch(
         self,
         reads: List[SimulatedRead],
@@ -370,9 +366,7 @@ class InvalidReadGenerator:
         # Remove zero counts
         return {k: v for k, v in counts.items() if v > 0}
     
-    # ------------------------------------------------------------------ #
-    # Utility helpers
-    # ------------------------------------------------------------------ #
+    # Helpers
     def _pychoice(self, items):
         """Return one random element from a list, preserving dicts."""
         if not items:
@@ -381,10 +375,16 @@ class InvalidReadGenerator:
         return choice.copy() if isinstance(choice, dict) else choice
 
     @staticmethod
-    def _clone_metadata(read: SimulatedRead, **updates) -> Dict:
+    def _clone_metadata(read: SimulatedRead, **updates) -> Dict[str, Any]:
         """Copy metadata and apply updates."""
         meta = dict(read.metadata) if read.metadata else {}
+        # Ensure every metadata dict has an explicit invalid flag
+        if "is_invalid" not in meta:
+            meta["is_invalid"] = False
         meta.update(updates)
+        # If this cloning is for an invalid read, mark accordingly
+        if "error_type" in updates or updates.get("is_invalid", False):
+            meta["is_invalid"] = True
         return meta
 
     @staticmethod

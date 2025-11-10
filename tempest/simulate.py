@@ -22,7 +22,7 @@ from rich.table import Table
 # Import the data simulator components
 from tempest.data import (
     SequenceSimulator,
-    SimulatedRead,
+    InvalidReadGenerator,
     create_simulator_from_config
 )
 from tempest.config import TempestConfig, SimulationConfig
@@ -79,13 +79,33 @@ def run_simulation(
     
     if kwargs.get('split', False):
         # Generate train/validation split
-        logger.info(f"Generating {sim_config.num_sequences} sequences with train/val split")
+        logger.info(f"Generating {sim_config.num_sequences} sequences with {sim_config.train_split}/{1.0 - sim_config.train_split} train/val split")
         
         n_train = int(sim_config.num_sequences * sim_config.train_split)
         n_val = sim_config.num_sequences - n_train
         
         train_reads = simulator.generate_reads(n_train)
         val_reads = simulator.generate_reads(n_val)
+
+        if getattr(sim_config, "invalid_fraction", 0.0) > 0.0:
+            invalid_ratio = sim_config.invalid_fraction
+            logger.info(
+                f"Applying invalid read corruption to train/val with ratio={invalid_ratio:.3f}"
+            )
+            invalid_gen = InvalidReadGenerator(sim_config)
+
+            for r in train_reads:
+                if r.metadata is None:
+                    r.metadata = {}
+                r.metadata.setdefault("is_invalid", False)
+
+            for r in val_reads:
+                if r.metadata is None:
+                    r.metadata = {}
+                r.metadata.setdefault("is_invalid", False)
+
+            train_reads = invalid_gen.generate_batch(train_reads, invalid_ratio=invalid_ratio)
+            val_reads = invalid_gen.generate_batch(val_reads, invalid_ratio=invalid_ratio)
         
         # Save sequences based on format
         if output_format == 'pickle':
@@ -120,6 +140,23 @@ def run_simulation(
         logger.info(f"Generating {sim_config.num_sequences} sequences")
         
         reads = simulator.generate_reads(sim_config.num_sequences)
+
+        # Generate invalid reads and log
+        if getattr(sim_config, "invalid_fraction", 0.0) > 0.0:
+            logger.info(
+                f"Generating invalid reads (fraction={sim_config.invalid_fraction:.2f})"
+            )
+            invalid_gen = InvalidReadGenerator(sim_config)
+            # Ensure metadata exists so generator can safely mark invalids
+            for r in reads:
+                if r.metadata is None:
+                    r.metadata = {}
+                r.metadata.setdefault("is_invalid", False)
+
+            reads = invalid_gen.generate_batch(reads, invalid_fraction=sim_config.invalid_fraction)
+
+            # Combine valid + invalid reads
+            logger.info(f"Total combined reads: {len(reads)} (valid + invalid)")
         
         # Determine output filename based on format
         if output_format == 'pickle':
@@ -595,6 +632,12 @@ def validate_command(
         
         if sim.train_split <= 0 or sim.train_split >= 1:
             errors.append("train_split must be between 0 and 1")
+        
+        # Check if invalid raction is non-existent or the majority
+        if sim.invalid_fraction < 0 or sim.invalid_fraction > 0.5:
+            warnings.append(
+                f"invalid_fraction={sim.invalid_fraction} is outside the recommended [0, 0.5] range"
+                )
         
         # Check sequence order
         if not sim.sequence_order:

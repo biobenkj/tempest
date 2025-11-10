@@ -8,7 +8,7 @@ from typing import Optional, List
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
 
-from tempest.demux import Demultiplexer
+from tempest.inference.demultiplexer import Demultiplexer
 from tempest.utils import load_config
 
 # Create the demux sub-application

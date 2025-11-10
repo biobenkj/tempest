@@ -93,6 +93,9 @@ class SimulationConfig:
     polya_tail: Optional[Dict[str, Any]] = None
     error_injection: Optional[Dict[str, Any]] = None
     complexity: Optional[Dict[str, Any]] = None
+
+    # invalid read generation up front instead of during hybrid training
+    invalid_fraction: float = 0.0
     
     @classmethod
     def from_dict(cls, config: dict):

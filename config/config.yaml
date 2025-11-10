@@ -18,6 +18,16 @@ simulation:
   # Number of sequences to generate
   num_sequences: 50000  # Larger dataset for complex architecture
   train_split: 0.8
+
+  # Introduce invalid reads
+  invalid_fraction: 0.1
+  invalid_types: ["segment_loss", "segment_duplication", "truncation", "chimeric", "scrambled"]
+  invalid_params:
+    segment_loss_prob: 0.2
+    segment_dup_prob: 0.2
+    truncated_prob: 0.2
+    chimeric_prob: 0.2
+    scrambled_prob: 0.2
   
   # Additional test/validation splits
   n_train: 40000
