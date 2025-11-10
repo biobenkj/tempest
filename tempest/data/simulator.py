@@ -16,7 +16,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class SequenceSimulatorPickleSupport:
+class SequenceSimulator:
     """
     Methods to add to SequenceSimulator class for pickle format support.
     These methods should be added to the existing SequenceSimulator class.
@@ -337,9 +337,9 @@ def create_simulator_from_config(config) -> 'SequenceSimulator':
     # Add pickle support methods if not already present
     if not hasattr(simulator, 'save_reads'):
         # Monkey-patch the methods
-        simulator.save_reads = SequenceSimulatorPickleSupport.save_reads.__get__(simulator)
-        simulator._create_preview_file = SequenceSimulatorPickleSupport._create_preview_file.__get__(simulator)
-        simulator.load_reads = SequenceSimulatorPickleSupport.load_reads.__get__(simulator)
-        simulator.generate_and_save = SequenceSimulatorPickleSupport.generate_and_save.__get__(simulator)
+        simulator.save_reads = SequenceSimulator.save_reads.__get__(simulator)
+        simulator._create_preview_file = SequenceSimulator._create_preview_file.__get__(simulator)
+        simulator.load_reads = SequenceSimulator.load_reads.__get__(simulator)
+        simulator.generate_and_save = SequenceSimulator.generate_and_save.__get__(simulator)
     
     return simulator

@@ -4,16 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tempest-bio"
-version = "0.2.0"
+version = "0.3.0"
 description = "Modular sequence annotation using length-constrained CRFs with PWM priors"
 readme = "README.md"
-authors = [
-    { name = "Ben Johnson", email = "ben.johnson@vai.org" }
-]
-maintainers = [
-    { name = "Ben Johnson", email = "ben.johnson@vai.org" }
-]
+authors = [{ name = "Ben Johnson", email = "ben.johnson@vai.org" }]
+maintainers = [{ name = "Ben Johnson", email = "ben.johnson@vai.org" }]
 license = { file = "LICENSE" }
+
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
@@ -27,6 +24,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Operating System :: OS Independent",
 ]
+
 keywords = [
     "bioinformatics",
     "deep learning",
@@ -35,37 +33,60 @@ keywords = [
     "nanopore",
     "genomics",
     "machine learning",
+    "CLI",
 ]
-requires-python = ">=3.8"
+
+# Pin Python versions to avoid TF 2.x incompatibilities
+requires-python = ">=3.8,<3.12"
+
 dependencies = [
     "tensorflow>=2.10.0,<2.16.0",
+    "tensorflow-addons>=0.20.0",  # required for CRF layers
     "tf2crf>=0.1.33",
     "numpy>=1.21.0,<2.0.0",
     "pandas>=2.0.0",
-    "biopython>=1.80",
+    "scipy>=1.9.0",
     "scikit-learn>=1.2.0",
+    "biopython>=1.80",
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+    "shellingham>=1.5.4",
+    "pyyaml>=6.0",
+    "pydantic>=2.0.0",
+    "pickle-mixin>=1.0.2",
+    "colorama>=0.4.6",
     "matplotlib>=3.5.0",
     "seaborn>=0.12.0",
-    "pyyaml>=6.0",
+    "plotly>=5.18.0",
     "tqdm>=4.60.0",
+    "h5py>=3.8.0",
+    "joblib>=1.2.0",
 ]
 
 [project.optional-dependencies]
-tf-addons = [
-    "tensorflow-addons>=0.20.0; python_version < '3.11'",
-]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    "pytest-mock>=3.10.0",
     "black>=22.0",
     "flake8>=5.0",
     "mypy>=0.990",
+    "isort>=5.12.0",
+    "pre-commit>=3.0.0",
 ]
 docs = [
     "sphinx>=5.0",
     "sphinx-rtd-theme>=1.0",
     "sphinx-autodoc-typehints>=1.19",
+    "myst-parser>=1.0.0",
 ]
+viz = [
+    "plotly>=5.0.0",
+    "dash>=2.0.0",
+]
+
+[project.scripts]
+tempest = "tempest.cli:app"
 
 [project.urls]
 Homepage = "https://github.com/biobenkj/tempest"
@@ -79,7 +100,7 @@ include = ["tempest*"]
 exclude = ["tests*", "examples*", "backup*", "docs*"]
 
 [tool.setuptools.package-data]
-tempest = ["config/*.yaml"]
+tempest = ["config/*.yaml", "data/*.yaml", "templates/*.yaml"]
 
 [tool.black]
 line-length = 88
@@ -87,7 +108,6 @@ target-version = ['py38', 'py39', 'py310', 'py311']
 include = '\.pyi?$'
 extend-exclude = '''
 /(
-  # directories
   \.eggs
   | \.git
   | \.hg
@@ -99,6 +119,15 @@ extend-exclude = '''
   | backup
 )/
 '''
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+line_length = 88
 
 [tool.pytest.ini_options]
 minversion = "7.0"
@@ -114,3 +143,23 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
 ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+
+[tool.coverage.run]
+source = ["tempest"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/backup/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
