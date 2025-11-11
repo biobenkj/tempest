@@ -17,6 +17,7 @@ import yaml
 from rich.console import Console
 from rich.progress import Progress
 from rich.table import Table
+from tempest.main import main as tempest_main
 
 __version__ = "0.3.0"
 console = Console()
@@ -41,12 +42,22 @@ from tempest.visualize import visualize_app
 
 # Register subcommands
 app.add_typer(simulate_app, name="simulate", help="Generate synthetic sequence data")
-app.add_typer(train_app, name="train", help="Train Tempest models")
+@app.command("train")
+def train_command(
+    config: Path = typer.Option(..., "--config", "-c", help="Path to config YAML or JSON"),
+    output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o", help="Output directory"),
+    mode: str = typer.Option("standard", "--mode", "-m", help="Training mode: standard | hybrid | ensemble"),
+    **kwargs,
+):
+    """
+    Train Tempest models with various approaches (standard, hybrid, ensemble).
+    """
+    tempest_main("train", config, output=output_dir, subcommand=mode, **kwargs)
 app.add_typer(evaluate_app, name="evaluate", help="Evaluate trained models")
 app.add_typer(visualize_app, name="visualize", help="Visualize results and models")
 app.add_typer(compare_app, name="compare", help="Compare multiple models")
 app.add_typer(combine_app, name="combine", help="Combine models using ensemble methods")
-app.add_typer(demux_app, name="demux", help="Demultiplex FASTQ files")
+app.add_typer(demux_app, name="demux", help="Demultiplex FASTQ files with sample assignment")
 
 
 def setup_logging(level: str = "INFO", log_file: Optional[str] = None):

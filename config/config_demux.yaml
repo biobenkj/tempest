@@ -1,0 +1,180 @@
+# Tempest Configuration with Sample-Based Demultiplexing
+# This configuration supports both architecture validation and sample assignment
+
+# Model configuration (for reference)
+model:
+  vocab_size: 5
+  embedding_dim: 128
+  lstm_units: 128
+  num_labels: 12
+  use_cnn: true
+  use_bilstm: true
+  use_crf: true
+
+# Demux configuration for architecture validation and sample assignment
+demux:
+  # Expected segment architecture (11-segment structure)
+  expected_segments: 
+    - "p7"      # 5' adapter
+    - "i7"      # Sample index (will be extracted for matching)
+    - "RP2"     # Read primer 2
+    - "UMI"     # Unique molecular identifier
+    - "ACC"     # ACC motif
+    - "cDNA"    # Insert/transcript
+    - "polyA"   # PolyA tail
+    - "CBC"     # Cell barcode (will be extracted for matching)
+    - "RP1"     # Read primer 1
+    - "i5"      # Sample index (will be extracted for matching)
+    - "p5"      # 3' adapter
+  
+  # Required segments for valid architecture
+  required_segments: 
+    - "UMI"     # Essential for deduplication
+    - "ACC"     # Essential for classification
+    - "CBC"     # Essential for sample assignment
+    - "i5"      # Essential for sample assignment
+    - "i7"      # Essential for sample assignment
+  
+  # Optional segments (can be missing)
+  optional_segments:
+    - "polyA"   # May be trimmed
+    - "RP2"     # May be partial
+    - "RP1"     # May be partial
+  
+  # Architecture validation parameters
+  min_segment_match: 0.8          # 80% of segments must be in correct order
+  allow_reverse_orientation: true  # Check both orientations
+  strict_order: false              # Allow gaps for optional segments
+  
+  # Confidence threshold for model predictions
+  confidence_threshold: 0.85
+  
+  # Barcode extraction and matching
+  barcode_matching:
+    max_edit_distance: 2          # Maximum edit distance for barcode correction
+    
+    # Expected barcode lengths (for validation)
+    barcode_lengths:
+      CBC: 16    # 10x v3 cell barcode length
+      i5: 8      # Illumina index length
+      i7: 8      # Illumina index length
+    
+    # Barcode correction strategy
+    correction_strategy: "closest"  # "closest", "unique", or "none"
+    
+    # Minimum quality score for barcode bases (optional)
+    min_barcode_quality: 20
+  
+  # Sample assignment
+  sample_assignment:
+    # How to handle reads with no barcode match
+    unmatched_handling: "undetermined"  # Put in "undetermined" file
+    
+    # How to handle reads with invalid architecture
+    invalid_handling: "undetermined"    # Put in "undetermined" file
+    
+    # Whether to include barcode info in read header
+    annotate_headers: true
+    
+    # Header format (if annotate_headers is true)
+    header_format: "{read_id} BC:Z:{cbc}_{i5}_{i7} SM:Z:{sample}"
+  
+  # Output configuration
+  output:
+    # File compression
+    compress: true              # Gzip output files
+    compression_level: 6        # 1-9, higher = more compression
+    
+    # File naming
+    file_suffix: ".fastq.gz"    # ".fastq.gz" or ".fastq"
+    
+    # Include statistics file
+    generate_stats: true
+    stats_filename: "demux_statistics.json"
+    
+    # Include per-sample metrics
+    per_sample_metrics: true
+    
+    # Create index file for sample mapping
+    create_index: true
+    index_filename: "sample_index.txt"
+
+# Processing parameters
+processing:
+  # Batch size for model inference
+  batch_size: 32
+  
+  # Number of reads to process before updating statistics
+  stats_update_interval: 10000
+  
+  # Maximum reads to process (for testing, 0 = all)
+  max_reads: 0
+  
+  # Parallel processing (if available)
+  num_workers: 1
+  
+  # Memory settings
+  max_reads_in_memory: 100000
+
+# File handling
+files:
+  # Input file patterns
+  fastq_patterns:
+    - "*.fastq"
+    - "*.fastq.gz"
+    - "*.fq"
+    - "*.fq.gz"
+  
+  # How to handle multiple input files
+  merge_inputs: false  # If true, merge all inputs; if false, process separately
+  
+  # Temporary file location (for large datasets)
+  temp_dir: "/tmp/tempest_demux"
+
+# Quality control
+qc:
+  # Minimum read length
+  min_read_length: 100
+  
+  # Maximum read length (0 = no limit)
+  max_read_length: 0
+  
+  # Minimum average quality score
+  min_avg_quality: 20
+  
+  # Check for adapter contamination
+  check_adapters: false
+  
+  # Adapters to check (if check_adapters is true)
+  adapter_sequences:
+    - "CAAGCAGAAGACGGCATACGAGAT"  # p7
+    - "GTGTAGATCTCGGTGGTCGCCGTATCATT"  # p5
+
+# Logging
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  level: "INFO"
+  
+  # Log file location
+  log_file: "./demux.log"
+  
+  # Include timestamp in log
+  timestamp: true
+  
+  # Log format
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Output paths
+output:
+  base_dir: "./tempest_output"
+  demux_dir: "./demux_samples"
+  validation_dir: "./validation_results"
+  
+# Notes
+notes:
+  description: "Sample-based demultiplexing configuration for Tempest"
+  version: "1.0"
+  usage: |
+    This configuration is used with the 'tempest demux samples' command
+    to process FASTQ files and assign reads to samples based on their
+    barcodes (CBC, i5, i7) after validating the read architecture.

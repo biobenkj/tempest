@@ -14,6 +14,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 # Import config and data loading from main
+from tempest.main import main as tempest_main
 from tempest.main import load_config, load_data
 from tempest.config import TempestConfig
 
@@ -154,23 +155,19 @@ def standard_command(
             val_dataset = load_data(val_data)
         console.print(f"[green][/green] Loaded {len(val_dataset)} validation sequences")
     
-    # Import and run the actual training
-    from tempest.training import run_training
-    
     # Build training arguments
     train_args = {
-        'mode': 'standard',
         'train_data': train_dataset,
         'val_data': val_dataset,
         'checkpoint_every': checkpoint_every,
         'early_stopping': early_stopping,
         'patience': patience,
         'use_gpu': use_gpu,
-        'verbose': verbose
+        'verbose': verbose,
     }
-    
-    # Run training
-    result = run_training(config_obj, output_dir=output_dir, **train_args)
+
+    # Dispatch via unified main entrypoint
+    result = tempest_main("train", config, output=output_dir, subcommand="standard", **train_args)
     
     # Display results
     if result and 'metrics' in result:
@@ -327,25 +324,20 @@ def hybrid_command(
             val_dataset = load_data(val_data)
         console.print(f"[green][/green] Loaded {len(val_dataset)} validation sequences")
     
-    # Import and run the actual training
-    from tempest.training import run_training
-    
     # Build training arguments
     train_args = {
-        'mode': 'hybrid',
         'train_data': train_dataset,
         'val_data': val_dataset,
         'constraint_weight': constraint_weight,
         'constraint_type': constraint_type,
         'use_gpu': use_gpu,
-        'verbose': verbose
+        'verbose': verbose,
     }
-    
     if unlabeled_data:
         train_args["unlabeled_path"] = unlabeled_data
 
-    # Run training
-    result = run_training(config_obj, output_dir=output_dir, **train_args)
+    # Dispatch via unified main entrypoint
+    result = tempest_main("train", config, output=output_dir, subcommand="hybrid", **train_args)
     
     # Display results
     if result and 'metrics' in result:
@@ -560,28 +552,23 @@ def ensemble_command(
             val_dataset = load_data(val_data)
         console.print(f"[green][/green] Loaded {len(val_dataset)} validation sequences")
     
-    # Import the correct training function
-    from tempest.training import run_ensemble_training
-    
     # Build training arguments
     train_args = {
         'train_data': train_dataset,
         'val_data': val_dataset,
         'num_models': num_models,
-        'model_types': model_types_list,  # Pass the list if specified
+        'model_types': model_types_list,
         'hybrid_ratio': hybrid_ratio,
         'variation_type': variation_type,
         'use_gpu': use_gpu,
         'parallel': parallel,
-        'verbose': verbose
+        'verbose': verbose,
     }
-    
-    # Add unlabeled path if provided
     if unlabeled_data:
-        train_args['unlabeled_path'] = str(unlabeled_data)
-    
-    # Run ensemble training
-    result = run_ensemble_training(config_obj, output_dir=output_dir, **train_args)
+        train_args["unlabeled_path"] = str(unlabeled_data)
+
+    # Dispatch via unified main entrypoint
+    result = tempest_main("train", config, output=output_dir, subcommand="ensemble", **train_args)
     
     # Display results
     if result and 'metrics' in result:
@@ -678,9 +665,6 @@ def resume_command(
         config_obj = load_config(config)
         console.print(f"[cyan]Using configuration:[/cyan] {config}")
     
-    # Import and run the actual training
-    from tempest.training import resume_training
-    
     # Build training arguments
     train_args = {
         'checkpoint_path': checkpoint,
@@ -690,11 +674,11 @@ def resume_command(
     }
     
     # Run training
-    result = resume_training(
-        config=config_obj, 
-        output_dir=output_dir,
-        **train_args
-    )
+    result = tempest_main("train",
+                          config or checkpoint,
+                          output=output_dir,
+                          subcommand="resume",
+                          **train_args)
     
     # Display results
     if result and 'metrics' in result:
