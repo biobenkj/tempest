@@ -397,6 +397,47 @@ visualization:
   save_plots: true
   plot_dir: "./plots"
 
+# Demultiplexing Configuration
+demux:
+  # Sequence architecture - your specific read structure
+  sequence_order:
+    - p7
+    - i7
+    - RP2
+    - UMI
+    - ACC
+    - cDNA
+    - polyA
+    - CBC
+    - RP1
+    - i5
+    - p5
+  
+  # Model path
+  # Usually will be a trained model derived from above train command
+  model_path: "/path/to/model.h5"
+
+  # Set the minimum edit distance allowed
+  edit_distance:
+    i7: 2
+    i5: 2
+    CBC: 1
+  
+  # Whitelist files
+  whitelist_files:
+    i7: "/varidata/research/projects/shen/tools/benkj/tempest/whitelist/udi_i7.txt"
+    i5: "/varidata/research/projects/shen/tools/benkj/tempest/whitelist/udi_i5.txt"
+    CBC: "/varidata/research/projects/shen/tools/benkj/tempest/whitelist/cbc.txt"
+  
+  # Sample file
+  # Must be tab delimited and have the configuration of 'sample_id', 'CBC', 'i5', 'i7'
+  sample_file: "/path/to/sample_file.txt"
+
+  # How to save the files
+  save_fastq: true
+  save_fasta: false
+  output_dir: "/path/to/demux/dir"
+
 # Logging Configuration
 logging:
   level: "INFO"

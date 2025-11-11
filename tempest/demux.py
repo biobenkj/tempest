@@ -9,7 +9,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
 
 from tempest.inference.demultiplexer import Demultiplexer
-from tempest.utils import load_config
+from tempest.main import load_config
 
 # Create the demux sub-application
 demux_app = typer.Typer(help="Demultiplex FASTQ files using trained models")
