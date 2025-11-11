@@ -25,7 +25,7 @@ from .inference_utils import (
 
 # Import combination module (configs now come from tempest.config)
 from tempest.config import BMAConfig, EnsembleConfig
-from .combine import ModelCombiner
+from .combiner import ModelCombiner
 
 # Import visualization components (with graceful fallback)
 _HAS_VISUALIZATION = False

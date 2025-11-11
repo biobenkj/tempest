@@ -8,7 +8,7 @@ from typing import Optional, List
 from rich.console import Console
 
 from tempest.visualization import Visualizer
-from tempest.utils import load_config
+from tempest.main import load_config
 
 # Create the visualize sub-application
 visualize_app = typer.Typer(help="Create visualizations for models and results")

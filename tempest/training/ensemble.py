@@ -10,7 +10,7 @@ Part of: tempest/training/ module
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
-from typing import List, Dict, Tuple, Optional, Union
+from typing import List, Dict, Tuple, Optional, Union, Any
 import logging
 from pathlib import Path
 import json
@@ -21,14 +21,60 @@ from tempest.data.simulator import SimulatedRead, reads_to_arrays
 from tempest.config import TempestConfig
 from tempest.utils.io import ensure_dir
 from tempest.training.trainer import StandardTrainer
-from tempest.training.hybrid_trainer import (
-    HybridTrainer,
-    build_model_from_config,
-    pad_sequences,
-    convert_labels_to_categorical
-)
+from tempest.training.hybrid_trainer import HybridTrainer
 
 logger = logging.getLogger(__name__)
+
+
+# Utility functions (should be moved to tempest.utils in future refactor)
+ArrayLike = Union[np.ndarray, tf.Tensor]
+
+
+def pad_sequences(sequences: ArrayLike, labels: ArrayLike, max_length: int) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Pad sequences and labels to max_length, handling both NumPy and TensorFlow inputs.
+    
+    Note: This is a duplicate of the function in hybrid_trainer. Should be moved to
+    a shared utils module (e.g., tempest.utils.preprocessing).
+    """
+    # Convert to NumPy if TensorFlow tensors
+    if isinstance(sequences, tf.Tensor):
+        sequences = sequences.numpy()
+    if isinstance(labels, tf.Tensor):
+        labels = labels.numpy()
+
+    # Ensure NumPy-compatible dtypes
+    seq_dtype = getattr(sequences.dtype, "as_numpy_dtype", sequences.dtype)
+    lab_dtype = getattr(labels.dtype, "as_numpy_dtype", labels.dtype)
+
+    n, curr_len = sequences.shape
+    if curr_len == max_length:
+        return sequences, labels
+
+    pad_len = min(curr_len, max_length)
+    padded_seq = np.zeros((n, max_length), dtype=seq_dtype)
+    padded_lab = np.zeros((n, max_length), dtype=lab_dtype)
+
+    padded_seq[:, :pad_len] = sequences[:, :pad_len]
+    padded_lab[:, :pad_len] = labels[:, :pad_len]
+    return padded_seq, padded_lab
+
+
+def convert_labels_to_categorical(labels: np.ndarray, num_classes: int) -> np.ndarray:
+    """
+    Convert integer labels to one-hot encoding.
+    
+    Note: This is a duplicate of the function in hybrid_trainer. Should be moved to
+    a shared utils module (e.g., tempest.utils.preprocessing).
+    
+    Args:
+        labels: Integer label array [batch, seq_len]
+        num_classes: Number of label classes
+        
+    Returns:
+        One-hot encoded labels [batch, seq_len, num_classes]
+    """
+    return tf.keras.utils.to_categorical(labels, num_classes=num_classes)
 
 
 class EnsembleTrainer:
@@ -39,6 +85,9 @@ class EnsembleTrainer:
     - All standard models
     - All hybrid models  
     - Mixed standard and hybrid models
+    
+    Models are built using the refactored StandardTrainer and HybridTrainer,
+    which in turn use the centralized build_model_from_config() factory.
     """
     
     def __init__(self,
@@ -226,6 +275,9 @@ class EnsembleTrainer:
         """
         Train ensemble of mixed standard and hybrid models.
         
+        Each model is trained using the refactored StandardTrainer or HybridTrainer,
+        which internally use the centralized build_model_from_config() factory.
+        
         Args:
             train_data: Training data (X, y) or list of dicts
             val_data: Optional validation data (X, y) or list of dicts
@@ -258,10 +310,11 @@ class EnsembleTrainer:
                 np.random.seed(config.seed)
                 random.seed(config.seed)
             
-            # Create appropriate trainer
+            # Create appropriate trainer (both use centralized model builder)
             model_checkpoint_dir = self.checkpoint_dir / f"model_{i}_{model_type}"
             
             if model_type == 'standard':
+                # StandardTrainer uses build_model_from_config internally
                 trainer = StandardTrainer(
                     config=config,
                     output_dir=model_checkpoint_dir,
@@ -276,6 +329,7 @@ class EnsembleTrainer:
                 )
                 
             elif model_type == 'hybrid':
+                # HybridTrainer uses build_model_from_config internally
                 trainer = HybridTrainer(
                     config=config,
                     output_dir=model_checkpoint_dir,
@@ -348,84 +402,120 @@ class EnsembleTrainer:
         # Compute BMA weights
         self._compute_bma_weights()
         
-        # Save ensemble with metadata
-        self.save_ensemble()
+        # Save ensemble metadata
+        self._save_ensemble_metadata()
         
-        # Prepare comprehensive results
-        results = {
-            'models': self.models,
-            'model_types': self.model_types,
-            'model_weights': self.model_weights,
-            'model_performances': self.model_performances,
-            'training_results': training_results,
-            'ensemble_dir': str(self.checkpoint_dir),
-            'metrics': self._compute_ensemble_metrics()
-        }
+        # Save individual models
+        for i, model in enumerate(self.models):
+            model_path = self.checkpoint_dir / f"ensemble_model_{i}.h5"
+            model.save(str(model_path))
         
         logger.info("\n" + "="*80)
-        logger.info("MIXED ENSEMBLE TRAINING COMPLETE")
+        logger.info("ENSEMBLE TRAINING COMPLETE")
         logger.info("="*80)
-        self._print_ensemble_summary()
+        logger.info(f"Total models trained: {len(self.models)}")
+        logger.info(f"Average validation accuracy: {np.mean([p['val_accuracy'] for p in self.model_performances]):.4f}")
+        logger.info(f"BMA weights computed using: {self.bma_method}")
+        
+        results = {
+            'checkpoint_dir': str(self.checkpoint_dir),
+            'num_models': len(self.models),
+            'model_types': self.model_types,
+            'model_performances': self.model_performances,
+            'bma_weights': self.model_weights.tolist() if isinstance(self.model_weights, np.ndarray) else self.model_weights,
+            'training_results': training_results
+        }
         
         return results
     
     def _compute_bma_weights(self):
         """
-        Compute BMA weights with support for type bonuses and performance metrics.
-        """
-        if self.bma_prior == 'uniform':
-            # Equal weights for all models
-            self.model_weights = [1.0 / self.num_models] * self.num_models
-            logger.info("Using uniform BMA prior (equal weights)")
+        Compute Bayesian Model Averaging weights based on validation performance.
         
-        elif self.bma_prior == 'performance':
-            # Get performance metrics
-            if self.bma_method == 'validation_accuracy':
-                scores = [perf.get('val_accuracy', 0.0) for perf in self.model_performances]
-            elif self.bma_method == 'validation_loss':
-                # Invert loss (lower is better)
-                scores = [1.0 / (perf.get('val_loss', 1.0) + 1e-6) for perf in self.model_performances]
+        Supports multiple methods:
+        - validation_accuracy: Weight by validation accuracy
+        - validation_loss: Weight by inverse validation loss
+        - uniform: Equal weights
+        """
+        if not self.model_performances:
+            logger.warning("No model performances available, using uniform weights")
+            self.model_weights = np.ones(self.num_models) / self.num_models
+            return
+        
+        # Extract metrics
+        val_accs = np.array([p['val_accuracy'] for p in self.model_performances])
+        val_losses = np.array([p.get('val_loss', float('inf')) for p in self.model_performances])
+        
+        # Compute weights based on method
+        if self.bma_method == 'validation_accuracy':
+            # Weight by validation accuracy
+            weights = val_accs ** self.bma_temperature
+        elif self.bma_method == 'validation_loss':
+            # Weight by inverse validation loss (lower loss = higher weight)
+            # Handle infinite losses
+            finite_losses = val_losses[np.isfinite(val_losses)]
+            if len(finite_losses) > 0:
+                max_loss = np.max(finite_losses)
+                weights = (max_loss - val_losses) ** self.bma_temperature
+                weights[~np.isfinite(val_losses)] = 0
             else:
-                # Default to accuracy
-                scores = [perf.get('val_accuracy', 0.0) for perf in self.model_performances]
+                weights = np.ones(len(val_losses))
+        elif self.bma_method == 'uniform':
+            weights = np.ones(len(self.model_performances))
+        else:
+            logger.warning(f"Unknown BMA method '{self.bma_method}', using validation accuracy")
+            weights = val_accs ** self.bma_temperature
         
-            # Apply type bonuses if configured
-            if hasattr(self, 'type_bonus') and self.type_bonus:
-                for i, model_type in enumerate(self.model_types):
-                    bonus = self.type_bonus.get(model_type, 1.0)
-                    scores[i] *= bonus
-                    if bonus != 1.0:
-                        logger.info(f"Applied {bonus}x bonus to {model_type} model {i+1}")
+        # Apply type bonuses if configured
+        if self.type_bonus:
+            for i, perf in enumerate(self.model_performances):
+                model_type = perf['model_type']
+                if model_type in self.type_bonus:
+                    bonus = self.type_bonus[model_type]
+                    weights[i] *= (1.0 + bonus)
+                    logger.info(f"Applied {bonus:.2%} bonus to {model_type} model {i}")
         
-            # Apply temperature scaling
-            scores_array = np.array(scores) / self.bma_temperature
+        # Normalize weights
+        weights = np.maximum(weights, self.min_weight)  # Ensure minimum weight
+        weights = weights / np.sum(weights)
         
-            # Softmax to get weights
-            exp_scores = np.exp(scores_array - np.max(scores_array))  # Numerical stability
-            weights = exp_scores / np.sum(exp_scores)
+        self.model_weights = weights
         
-            # Apply minimum weight constraint
-            weights = np.maximum(weights, self.min_weight)
-            weights = weights / np.sum(weights)  # Re-normalize
-        
-            self.model_weights = weights.tolist()
-        
-            logger.info(f"Using performance-based BMA (method={self.bma_method}, temp={self.bma_temperature})")
+        logger.info(f"BMA weights computed: {weights}")
+        logger.info(f"Weight range: [{weights.min():.4f}, {weights.max():.4f}]")
     
-        # Log weights with model types
-        for i, (weight, model_type) in enumerate(zip(self.model_weights, self.model_types)):
-            logger.info(f"Model {i+1} ({model_type}): BMA weight = {weight:.4f}")
+    def _save_ensemble_metadata(self):
+        """Save ensemble configuration and weights."""
+        metadata = {
+            'num_models': self.num_models,
+            'model_types': self.model_types,
+            'model_weights': self.model_weights.tolist() if isinstance(self.model_weights, np.ndarray) else self.model_weights,
+            'model_performances': self.model_performances,
+            'bma_method': self.bma_method,
+            'bma_temperature': self.bma_temperature,
+            'variation_type': self.variation_type,
+            'label_to_idx': self.label_to_idx,
+            'idx_to_label': self.idx_to_label
+        }
+        
+        metadata_path = self.checkpoint_dir / "ensemble_metadata.json"
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        logger.info(f"Saved ensemble metadata to {metadata_path}")
     
-    def predict(self, reads: List[SimulatedRead], return_uncertainty: bool = False) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+    def predict(self,
+                reads: List[SimulatedRead],
+                return_uncertainty: bool = False) -> Union[np.ndarray, Tuple[np.ndarray, Dict]]:
         """
-        Make ensemble predictions using BMA.
+        Make predictions using BMA ensemble.
         
         Args:
             reads: List of SimulatedRead objects
-            return_uncertainty: Whether to return prediction uncertainty
+            return_uncertainty: Whether to return uncertainty estimates
             
         Returns:
-            Predictions array, optionally with uncertainty estimates
+            BMA-weighted predictions, optionally with uncertainty dict
         """
         if not self.models:
             raise ValueError("No models in ensemble. Train the ensemble first.")
@@ -498,190 +588,49 @@ class EnsembleTrainer:
         # Mask for non-padding
         mask = np.sum(y_val_cat, axis=-1) > 0
         
-        # Overall accuracy
-        correct = np.sum((pred_classes == true_classes) * mask)
-        total = np.sum(mask)
-        accuracy = correct / total if total > 0 else 0.0
+        # Accuracy
+        correct = (pred_classes == true_classes) & mask
+        accuracy = np.sum(correct) / np.sum(mask)
         
-        # Cross-entropy loss
-        epsilon = 1e-10
-        predictions_clipped = np.clip(predictions, epsilon, 1 - epsilon)
-        loss = -np.sum(y_val_cat * np.log(predictions_clipped) * mask[:, :, np.newaxis])
-        loss = loss / total if total > 0 else 0.0
+        # Per-label accuracy
+        label_accuracies = {}
+        for label_name, label_idx in self.label_to_idx.items():
+            label_mask = (true_classes == label_idx) & mask
+            if np.sum(label_mask) > 0:
+                label_correct = correct & label_mask
+                label_acc = np.sum(label_correct) / np.sum(label_mask)
+                label_accuracies[label_name] = label_acc
         
-        metrics = {
-            'ensemble_accuracy': accuracy,
-            'ensemble_loss': loss,
-            'num_models': self.num_models,
-            'effective_models': sum(w > 0.01 for w in self.model_weights)  # Models with >1% weight
+        results = {
+            'accuracy': accuracy,
+            'label_accuracies': label_accuracies
         }
         
-        # Add individual model performances
-        for i, perf in enumerate(self.model_performances):
-            metrics[f'model_{i+1}_val_acc'] = perf['val_accuracy']
-            metrics[f'model_{i+1}_weight'] = self.model_weights[i]
-        
-        return metrics
+        return results
     
-    def _compute_ensemble_metrics(self) -> Dict[str, Any]:
-        """Compute overall ensemble metrics."""
-        metrics = {
-            'num_models': self.num_models,
-            'num_standard': self.model_types.count('standard'),
-            'num_hybrid': self.model_types.count('hybrid'),
-            'avg_val_accuracy': np.mean([p['val_accuracy'] for p in self.model_performances]),
-            'avg_val_loss': np.mean([p['val_loss'] for p in self.model_performances]),
-            'best_val_accuracy': max([p['val_accuracy'] for p in self.model_performances]),
-            'worst_val_accuracy': min([p['val_accuracy'] for p in self.model_performances]),
-        }
-        
-        # Add model type specific metrics
-        standard_perfs = [p for p in self.model_performances if p['model_type'] == 'standard']
-        hybrid_perfs = [p for p in self.model_performances if p['model_type'] == 'hybrid']
-        
-        if standard_perfs:
-            metrics['avg_standard_accuracy'] = np.mean([p['val_accuracy'] for p in standard_perfs])
-        if hybrid_perfs:
-            metrics['avg_hybrid_accuracy'] = np.mean([p['val_accuracy'] for p in hybrid_perfs])
-        
-        return metrics
-    
-    def save_ensemble(self, filepath: Optional[str] = None):
+    def compute_diversity(self, val_data: Union[tuple, List[SimulatedRead]]) -> float:
         """
-        Save ensemble with enhanced metadata including model types.
-        """
-        if filepath is None:
-            filepath = self.checkpoint_dir
-        else:
-            filepath = Path(filepath)
-            ensure_dir(str(filepath))
-    
-        # Save each model with type in filename
-        for i, (model, model_type) in enumerate(zip(self.models, self.model_types)):
-            model_path = filepath / f"ensemble_model_{i}_{model_type}.h5"
-            model.save(str(model_path))
-            logger.info(f"Saved {model_type} model {i+1} to: {model_path}")
-    
-        # Enhanced metadata
-        metadata = {
-            'num_models': self.num_models,
-            'model_types': self.model_types,
-            'variation_type': self.variation_type,
-            'model_weights': self.model_weights,
-            'model_performances': self.model_performances,
-            'bma_prior': self.bma_prior,
-            'bma_temperature': self.bma_temperature,
-            'bma_method': getattr(self, 'bma_method', 'validation_accuracy'),
-            'label_to_idx': self.label_to_idx,
-            'idx_to_label': self.idx_to_label,
-            'ensemble_statistics': {
-                'num_standard': self.model_types.count('standard'),
-                'num_hybrid': self.model_types.count('hybrid'),
-                'avg_weight_standard': np.mean([w for w, t in zip(self.model_weights, self.model_types) if t == 'standard']) if 'standard' in self.model_types else 0,
-                'avg_weight_hybrid': np.mean([w for w, t in zip(self.model_weights, self.model_types) if t == 'hybrid']) if 'hybrid' in self.model_types else 0,
-            },
-            'model_configs': [
-                {
-                    'model_type': model_type,
-                    'model_index': i,
-                    'lstm_units': config.model.lstm_units,
-                    'lstm_layers': config.model.lstm_layers,
-                    'dropout': config.model.dropout,
-                    'embedding_dim': config.model.embedding_dim,
-                    'cnn_filters': getattr(config.model, 'cnn_filters', None),
-                    'seed': getattr(config, 'seed', None),
-                    'weight': self.model_weights[i] if i < len(self.model_weights) else 0
-                }
-                for i, (config, model_type) in enumerate(zip(self.model_configs, self.model_types))
-            ]
-        }
-    
-        # Save metadata
-        metadata_path = filepath / "ensemble_metadata.json"
-        with open(metadata_path, 'w') as f:
-            json.dump(metadata, f, indent=2, default=str)
-    
-        logger.info(f"Saved enhanced ensemble metadata to: {metadata_path}")
-    
-    def load_ensemble(self, filepath: str):
-        """
-        Load ensemble models and metadata.
+        Compute ensemble diversity metric.
         
         Args:
-            filepath: Directory containing ensemble files
+            val_data: Validation data (X, y) or list of SimulatedRead objects
+            
+        Returns:
+            Diversity score (pairwise disagreement rate)
         """
-        filepath = Path(filepath)
+        if isinstance(val_data, tuple):
+            X_val, _ = val_data
+        else:
+            X_val, _, _ = reads_to_arrays(val_data, label_to_idx=self.label_to_idx)
+            max_len = self.base_config.model.max_seq_len
+            X_val, _ = pad_sequences(X_val, np.zeros_like(X_val), max_len)
         
-        # Load metadata
-        metadata_path = filepath / "ensemble_metadata.json"
-        with open(metadata_path, 'r') as f:
-            metadata = json.load(f)
-        
-        self.num_models = metadata['num_models']
-        self.variation_type = metadata['variation_type']
-        self.model_weights = metadata['model_weights']
-        self.model_performances = metadata['model_performances']
-        self.bma_prior = metadata['bma_prior']
-        self.bma_temperature = metadata['bma_temperature']
-        self.label_to_idx = metadata['label_to_idx']
-        self.idx_to_label = {str(k): v for k, v in metadata['idx_to_label'].items()}
-        
-        # Load models
-        self.models = []
-        for i, model_type in enumerate(metadata["model_types"]):
-            model_path = filepath / f"ensemble_model_{i}_{model_type}.h5"
-            model = keras.models.load_model(str(model_path))
-            self.models.append(model)
-        
-        logger.info(f"Loaded ensemble with {self.num_models} models from: {filepath}")
-        self._print_ensemble_summary()
-    
-    def _print_ensemble_summary(self):
-        """Ensemble summary that shows model types."""
-        logger.info("\nEnsemble Summary:")
-        logger.info(f"  Total models: {self.num_models}")
-        logger.info(f"  Standard models: {self.model_types.count('standard')}")
-        logger.info(f"  Hybrid models: {self.model_types.count('hybrid')}")
-        logger.info(f"  Variation type: {self.variation_type}")
-        logger.info(f"  BMA prior: {self.bma_prior}")
-        
-        if self.model_weights:
-            logger.info("\nModel Weights and Performance:")
-            for i, (weight, perf, model_type) in enumerate(zip(
-                self.model_weights, 
-                self.model_performances,
-                self.model_types
-            )):
-                val_acc = perf.get('val_accuracy', 0.0)
-                logger.info(f"  Model {i+1} ({model_type}): weight={weight:.4f}, val_acc={val_acc:.4f}")
-        
-        # Calculate effective number of models (based on weight entropy)
-        if self.model_weights:
-            weights = np.array(self.model_weights)
-            entropy = -np.sum(weights * np.log(weights + 1e-10))
-            effective_models = np.exp(entropy)
-            logger.info(f"\nEffective number of models: {effective_models:.2f}")
-    
-    def compute_diversity(self, val_data: Optional[Union[np.ndarray, tuple, list]] = None) -> float:
-        """
-        Compute diversity metric for the ensemble.
-        """
-        if not self.models or len(self.models) < 2:
-            return 0.0
-    
-        if val_data is None:
-            logger.warning("No validation data provided for diversity computation")
-            return 0.0
-    
         # Get predictions from each model
         predictions = []
         for model in self.models:
-            if hasattr(model, 'predict'):
-                pred = model.predict(val_data[0] if isinstance(val_data, tuple) else val_data)
-                predictions.append(np.argmax(pred, axis=-1))
-    
-        if len(predictions) < 2:
-            return 0.0
+            pred = model.predict(X_val, batch_size=self.batch_size, verbose=0)
+            pred_classes = np.argmax(pred, axis=-1)
+            predictions.append(pred_classes)
     
         # Compute pairwise disagreement
         disagreement = 0.0
@@ -696,6 +645,7 @@ class EnsembleTrainer:
         logger.info(f"Ensemble diversity (disagreement rate): {diversity:.4f}")
     
         return diversity
+
 
 class BMAPredictor:
     """
@@ -798,6 +748,7 @@ class BMAPredictor:
         
         return predicted_labels, np.array(confidence_scores)
     
+
 def run_ensemble_training(
     config: TempestConfig,
     output_dir: Optional[Path] = None,
@@ -805,6 +756,10 @@ def run_ensemble_training(
 ) -> Dict[str, Any]:
     """
     Enhanced orchestration function for mixed ensemble training.
+    
+    This function creates an EnsembleTrainer which internally uses
+    StandardTrainer and HybridTrainer - both of which have been refactored
+    to use the centralized build_model_from_config() factory.
     """
     # Extract parameters
     train_data = kwargs.get('train_data')
