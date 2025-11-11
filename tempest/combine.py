@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import List, Optional
 from rich.console import Console
 
-from tempest.training.ensemble import EnsembleBuilder
-from tempest.utils import load_config
+from tempest.inference.combiner import ModelCombiner
+from tempest.main import load_config
 
 # Create the combine sub-application
-combine_app = typer.Typer(help="Combine models using ensemble methods")
+combine_app = typer.Typer(help="Combine models using BMA/ensemble methods")
 
 console = Console()
 
@@ -21,18 +21,18 @@ def ensemble(
     model_paths: List[Path] = typer.Option(
         ...,
         "--models", "-m",
-        help="Paths to models to combine (specify multiple times)",
+        help="Paths to models to combine (can specify multiple times)",
         exists=True
     ),
     output: Path = typer.Option(
         ...,
         "--output", "-o",
-        help="Output path for ensemble model"
+        help="Output path for combined model"
     ),
     method: str = typer.Option(
         "voting",
         "--method",
-        help="Ensemble method",
+        help="Combine method",
         callback=lambda v: v if v in ["voting", "averaging", "stacking", "bma"] 
                           else typer.BadParameter(f"Invalid method: {v}")
     ),
@@ -89,7 +89,7 @@ def ensemble(
         cfg = load_config(str(config))
     
     # Create ensemble builder
-    builder = EnsembleBuilder(
+    builder = ModelCombiner(
         model_paths=[str(p) for p in model_paths],
         config=cfg
     )

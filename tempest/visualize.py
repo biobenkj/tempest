@@ -115,6 +115,9 @@ def run_visualization(
     
     This function serves as the entry point for the visualization subcommand
     when called through the main pipeline runner.
+
+    This is a conceptual shift from other subcommands below that are meant for
+    more post-hoc analysis and are not called through the main pipeline runner.
     
     Parameters
     ----------
@@ -712,3 +715,6 @@ def confusion_matrix(
     plt.close()
     
     console.print(f"[green]Confusion matrix saved to: {output_path}[/green]")
+
+if __name__ == "__main__":
+    visualize_app()

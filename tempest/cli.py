@@ -54,7 +54,7 @@ def train_command(
     """
     tempest_main("train", config, output=output_dir, subcommand=mode, **kwargs)
 app.add_typer(evaluate_app, name="evaluate", help="Evaluate trained models")
-app.add_typer(visualize_app, name="visualize", help="Visualize results and models")
+app.add_typer(visualize_app, name="visualize", help="Visualize predictions, training history, and data distributions")
 app.add_typer(compare_app, name="compare", help="Compare multiple models")
 app.add_typer(combine_app, name="combine", help="Combine models using ensemble methods")
 app.add_typer(demux_app, name="demux", help="Demultiplex FASTQ files with sample assignment")
