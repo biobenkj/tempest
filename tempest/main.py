@@ -110,7 +110,6 @@ def run_pipeline(
         # Default dispatch map
         dispatch_map = {
             "simulate": lambda: __import__("tempest.simulate", fromlist=["run_simulation"]).run_simulation,
-            "evaluate": lambda: __import__("tempest.evaluate", fromlist=["run_evaluation"]).run_evaluation,
             "visualize": lambda: __import__("tempest.visualize", fromlist=["run_visualization"]).run_visualization,
         }
         if command not in dispatch_map:

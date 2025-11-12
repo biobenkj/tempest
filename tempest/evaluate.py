@@ -23,11 +23,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Initialize Rich console
-console = Console()
 evaluate_app = typer.Typer(help="Evaluate trained Tempest models")
+console = Console()
 
-
-@app.command("single")
+@evaluate_app.command("single")
 def evaluate_single_model(
     model: Path = typer.Argument(..., help="Path to trained model file"),
     test_data: Path = typer.Argument(..., help="Path to test data (pickle, npz, or directory)"),
@@ -101,7 +100,7 @@ def evaluate_single_model(
             raise typer.Exit(1)
 
 
-@app.command("compare")
+@evaluate_app.command("compare")
 def compare_models(
     models_dir: Path = typer.Argument(..., help="Directory containing models to compare"),
     test_data: Path = typer.Argument(..., help="Path to test data"),
@@ -157,7 +156,7 @@ def compare_models(
             raise typer.Exit(1)
 
 
-@app.command("batch")
+@evaluate_app.command("batch")
 def batch_predict(
     model: Path = typer.Argument(..., help="Path to trained model"),
     sequences: Path = typer.Argument(..., help="Path to sequences file (FASTA/FASTQ/pickle)"),
@@ -226,7 +225,7 @@ def batch_predict(
         raise typer.Exit(1)
 
 
-@app.command("metrics")
+@evaluate_app.command("metrics")
 def show_metrics(
     results_file: Path = typer.Argument(..., help="Path to evaluation results JSON file"),
     metric: Optional[str] = typer.Option(None, "--metric", "-m", help="Specific metric to display"),
