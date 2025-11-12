@@ -17,11 +17,10 @@ import json
 from copy import deepcopy
 import random
 
-from tempest.data.simulator import SimulatedRead, reads_to_arrays
+from tempest.data import SimulatedRead, reads_to_arrays
 from tempest.config import TempestConfig
-from tempest.utils.io import ensure_dir
-from tempest.training.trainer import StandardTrainer
-from tempest.training.hybrid_trainer import HybridTrainer
+from tempest.utils import ensure_dir
+from tempest.training import StandardTrainer, HybridTrainer
 
 logger = logging.getLogger(__name__)
 

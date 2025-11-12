@@ -18,9 +18,8 @@ from .hybrid_trainer import (
 )
 
 from .trainer import (
-    ModelTrainer,
-    PerTokenAccuracy,
-    PerLabelMetrics
+    StandardTrainer,
+    run_training
 )
 
 from .ensemble import (
@@ -30,7 +29,7 @@ from .ensemble import (
 
 __all__ = [
     # Single model trainer
-    'ModelTrainer',
+    'StandardTrainer',
     
     # Ensemble trainer
     'EnsembleTrainer',
@@ -43,13 +42,10 @@ __all__ = [
     'ArchitectureDiscriminator',
     'PseudoLabelGenerator',
     
-    # Metrics and callbacks
-    'PerTokenAccuracy',
-    'PerLabelMetrics',
-    
     # Utility functions
     'pad_sequences',
     'convert_labels_to_categorical',
     'build_model_from_config',
     'print_model_summary',
+    'run_training',
 ]

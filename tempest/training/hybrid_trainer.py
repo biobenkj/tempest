@@ -20,10 +20,9 @@ from pathlib import Path
 # Proper Tempest imports
 try:
     from tempest.config import TempestConfig, HybridTrainingConfig
-    from tempest.core.models import build_model_from_config, print_model_summary
-    from tempest.utils.io import ensure_dir
-    from tempest.data.invalid_generator import InvalidReadGenerator
-    from tempest.data.simulator import SimulatedRead, reads_to_arrays
+    from tempest.core import build_model_from_config, print_model_summary
+    from tempest.utils import ensure_dir
+    from tempest.data import InvalidReadGenerator, SimulatedRead, reads_to_arrays
 except ImportError:
     SimulatedRead = None
     reads_to_arrays = None

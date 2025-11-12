@@ -22,7 +22,7 @@ from tensorflow.keras.callbacks import (
 )
 
 from tempest.config import TempestConfig, TrainingConfig
-from tempest.core.models import build_model_from_config
+from tempest.core import build_model_from_config
 
 logger = logging.getLogger(__name__)
 
