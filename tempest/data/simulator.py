@@ -8,7 +8,7 @@ import time
 import pickle
 import gzip
 import json
-from typing import List, Dict, Tuple, Optional, Union, Any
+from typing import List, Dict, Tuple, Optional, Union, Any, Callable
 from dataclasses import dataclass, field
 import logging
 from pathlib import Path
@@ -312,12 +312,36 @@ class WhitelistManager:
             logger.warning(f"Whitelist file not found for {segment}: {filepath}")
             return
 
+        # Valid IUPAC codes that can be resolved to actual bases
+        valid_iupac = set('ACGTNRYSWKMBDHV')
+        
         sequences = []
         with open(filepath, "r") as f:
             for line in f:
-                seq = line.strip().upper()
-                if seq and not seq.startswith("#"):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                
+                # Handle tab-separated format (ID<TAB>SEQUENCE)
+                if '\t' in line:
+                    parts = line.split('\t')
+                    if len(parts) >= 2:
+                        seq = parts[1].strip().upper()
+                    else:
+                        continue
+                else:
+                    # Simple format with just sequences
+                    seq = line.upper()
+                
+                # Validate that sequence contains only valid IUPAC codes
+                if seq and all(base in valid_iupac for base in seq):
                     sequences.append(seq)
+                else:
+                    invalid_chars = set(seq) - valid_iupac
+                    logger.warning(
+                        f"Skipping invalid sequence in {segment} "
+                        f"(contains {invalid_chars}): {seq[:20] if len(seq) > 20 else seq}..."
+                    )
 
         if sequences:
             self.whitelists[segment] = sequences
@@ -604,17 +628,39 @@ class SequenceSimulator:
 
     def _load_whitelists(self) -> Dict[str, List[str]]:
         """Load whitelists from configuration (backward compatibility)."""
+        # Valid IUPAC codes that can be resolved to actual bases
+        valid_iupac = set('ACGTNRYSWKMBDHV')
+        
         whitelists = {}
         whitelist_files = self.sim_config.get("whitelist_files", {})
 
         for segment, filepath in whitelist_files.items():
             if Path(filepath).exists():
+                sequences = []
                 with open(filepath, "r") as f:
-                    sequences = [line.strip() for line in f if line.strip()]
-                whitelists[segment] = sequences
-                logger.info(
-                    f"Loaded {len(sequences)} sequences for {segment}"
-                )
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        
+                        # Handle tab-separated format (ID<TAB>SEQUENCE)
+                        if '\t' in line:
+                            parts = line.split('\t')
+                            if len(parts) >= 2:
+                                seq = parts[1].strip().upper()
+                            else:
+                                continue
+                        else:
+                            # Simple format with just sequences
+                            seq = line.upper()
+                        
+                        # Validate that sequence contains only valid IUPAC codes
+                        if seq and all(base in valid_iupac for base in seq):
+                            sequences.append(seq)
+                
+                if sequences:
+                    whitelists[segment] = sequences
+                    logger.info(f"Loaded {len(sequences)} sequences for {segment}")
 
         return whitelists
 
@@ -798,12 +844,16 @@ class SequenceSimulator:
             seq = self.whitelist_manager.sample(
                 segment_name, self.random_state
             )
+            # Resolve any IUPAC codes (N, R, Y, etc.) to actual bases
+            seq = self._resolve_iupac_codes(seq)
             qual = 35.0 if include_quality else None  # Very high quality for whitelist
             return seq, qual, "whitelist"
 
         # Check legacy whitelists
         if segment_name in self.whitelists:
             seq = self.random_state.choice(self.whitelists[segment_name])
+            # Resolve any IUPAC codes (N, R, Y, etc.) to actual bases
+            seq = self._resolve_iupac_codes(seq)
             qual = 35.0 if include_quality else None
             return seq, qual, "whitelist"
 
@@ -811,6 +861,8 @@ class SequenceSimulator:
         if segment_name in self.sequence_configs:
             seq = self.sequence_configs[segment_name]
             if seq not in ["random", "transcript", "polya"]:
+                # Resolve any IUPAC codes (N, R, Y, etc.) to actual bases
+                seq = self._resolve_iupac_codes(seq)
                 qual = 40.0 if include_quality else None  # Perfect quality for fixed
                 return seq, qual, "fixed"
 
@@ -881,6 +933,58 @@ class SequenceSimulator:
         """Generate random DNA sequence."""
         bases = ["A", "C", "G", "T"]
         return "".join(self.random_state.choice(bases, size=length))
+    
+    def _resolve_iupac_codes(self, sequence: str) -> str:
+        """
+        Resolve IUPAC ambiguity codes to actual bases.
+        
+        IUPAC codes:
+        N = A/C/G/T (any)
+        R = A/G (purine)
+        Y = C/T (pyrimidine)
+        S = G/C (strong)
+        W = A/T (weak)
+        K = G/T (keto)
+        M = A/C (amino)
+        B = C/G/T (not A)
+        D = A/G/T (not C)
+        H = A/C/T (not G)
+        V = A/C/G (not T)
+        
+        Args:
+            sequence: Sequence that may contain IUPAC codes
+            
+        Returns:
+            Sequence with all ambiguity codes resolved to actual bases
+        """
+        iupac_map = {
+            'N': ['A', 'C', 'G', 'T'],
+            'R': ['A', 'G'],
+            'Y': ['C', 'T'],
+            'S': ['G', 'C'],
+            'W': ['A', 'T'],
+            'K': ['G', 'T'],
+            'M': ['A', 'C'],
+            'B': ['C', 'G', 'T'],
+            'D': ['A', 'G', 'T'],
+            'H': ['A', 'C', 'T'],
+            'V': ['A', 'C', 'G']
+        }
+        
+        resolved = []
+        for base in sequence.upper():
+            if base in iupac_map:
+                # Resolve ambiguity code to random base from allowed set
+                resolved.append(self.random_state.choice(iupac_map[base]))
+            elif base in ['A', 'C', 'G', 'T']:
+                # Keep standard bases as-is
+                resolved.append(base)
+            else:
+                # Unknown character - replace with random base and warn
+                logger.warning(f"Unknown base '{base}' in sequence, replacing with random base")
+                resolved.append(self.random_state.choice(['A', 'C', 'G', 'T']))
+        
+        return "".join(resolved)
 
     def _reverse_complement(
         self, sequence: Union[List[str], str]
@@ -935,11 +1039,17 @@ class SequenceSimulator:
             reads.append(read)
 
             # Update Rich progress bar if callback is provided
-            if progress_callback and (i + 1) % 100 == 0:
+            # Update every 10 sequences for smoother progress
+            if progress_callback and (i + 1) % 10 == 0:
                 progress_callback(i + 1)
 
-            if (i + 1) % 1000 == 0:
+            if (i + 1) % 1000 == 0 and not progress_callback:
+                # Only log if not using an interactive progress bar
                 logger.info(f"Generated {i + 1}/{n} reads")
+        
+        # Final progress update to ensure bar reaches 100%
+        if progress_callback:
+            progress_callback(n)
 
         self._log_generation_stats(reads)
 

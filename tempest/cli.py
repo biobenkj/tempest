@@ -9,21 +9,22 @@ import os
 import warnings
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 warnings.filterwarnings('ignore', category=UserWarning, module='tensorflow')
+from tempest.utils.logging_utils import setup_rich_logging, console, status
+setup_rich_logging("INFO")
 
 import typer
 import sys
-import logging
 from pathlib import Path
 from typing import Optional
 from textwrap import dedent
 import yaml
-from rich.console import Console
 from rich.progress import Progress
 from rich.table import Table
+from rich.logging import RichHandler
 from tempest.main import main as tempest_main
+import logging
 
 __version__ = "0.3.0"
-console = Console()
 
 # Main application
 app = typer.Typer(
@@ -61,21 +62,35 @@ app.add_typer(demux_app, name="demux", help="Demultiplex FASTQ files with sample
 
 
 def setup_logging(level: str = "INFO", log_file: Optional[str] = None):
-    """Set up logging configuration."""
-    numeric_level = getattr(logging, level.upper(), None)
-    if not isinstance(numeric_level, int):
-        raise ValueError(f"Invalid log level: {level}")
-    
-    handlers = [logging.StreamHandler()]
-    if log_file:
-        handlers.append(logging.FileHandler(log_file))
-    
-    logging.basicConfig(
-        level=numeric_level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=handlers,
-    )
+    """
+    Configure logging for Tempest CLI with Rich integration.
+
+    """
+
+    # Ensure the global RichHandler baseline exists
+    setup_rich_logging(level)
+
+    numeric_level = getattr(logging, level.upper(), logging.INFO)
+    root_logger = logging.getLogger()
+    root_logger.setLevel(numeric_level)
+
+    # Update level for all existing RichHandlers
+    for handler in root_logger.handlers:
+        if isinstance(handler, RichHandler):
+            handler.setLevel(numeric_level)
+            handler.console = console  # unify with Typer's Console
+
+    # Add a file handler if requested (only once)
+    if log_file and not any(
+        isinstance(h, logging.FileHandler) and h.baseFilename == str(log_file)
+        for h in root_logger.handlers
+    ):
+        fh = logging.FileHandler(log_file)
+        fh.setLevel(numeric_level)
+        formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s",
+                                      datefmt="%Y-%m-%d %H:%M:%S")
+        fh.setFormatter(formatter)
+        root_logger.addHandler(fh)
 
 
 @app.callback()
@@ -112,58 +127,85 @@ def main_callback(
     newly generated data.
     """
     if version:
+        with status("Retrieving Tempest version..."):
+            pass  # minimal delay keeps spinner clean
         console.print(f"[bold blue]Tempest[/bold blue] version {__version__}")
         raise typer.Exit()
     
+    # Resolve final log level
+    resolved_level = "DEBUG" if debug else log_level.upper()
+
+    # Make this globally visible to all imported modules (e.g., tempest.simulate)
+    os.environ["TEMPEST_LOG_LEVEL"] = resolved_level
+
+    # Initialize logging with Rich
     setup_logging(
-        level="DEBUG" if debug else log_level,
+        level=resolved_level,
         log_file=str(log_file) if log_file else None,
     )
     
     if debug:
         logging.getLogger().setLevel(logging.DEBUG)
         os.environ["TEMPEST_DEBUG"] = "1"
+        console.print(f"[bold yellow]Debug mode active[/bold yellow] (TEMPEST_LOG_LEVEL={resolved_level})")
 
 
 @app.command()
 def info():
     """Display system and environment information."""
     import platform
-    
     console.print("\n[bold blue]System Information[/bold blue]")
     console.print("=" * 60)
     console.print(f"[cyan]Python:[/cyan] {sys.version.split()[0]}")
     console.print(f"[cyan]Platform:[/cyan] {platform.platform()}")
     console.print(f"[cyan]Tempest Version:[/cyan] {__version__}")
-    
-    try:
-        import tensorflow as tf
-        console.print(f"[cyan]TensorFlow:[/cyan] {tf.__version__}")
-        gpus = tf.config.list_physical_devices("GPU")
+
+    # Use Rich status spinner for environment probing
+    with status("Checking environment and hardware..."):
+        # TensorFlow info
+        try:
+            import tensorflow as tf
+            tf_version = tf.__version__
+            gpus = tf.config.list_physical_devices("GPU")
+        except ImportError:
+            tf_version = None
+            gpus = None
+
+        # NumPy info
+        try:
+            import numpy as np
+            np_version = np.__version__
+        except ImportError:
+            np_version = None
+
+        # Memory info
+        try:
+            import psutil
+            memory = psutil.virtual_memory()
+        except ImportError:
+            memory = None
+
+    # Now display results after spinner completes
+    if tf_version:
+        console.print(f"[cyan]TensorFlow:[/cyan] {tf_version}")
         if gpus:
             console.print(f"[cyan]GPUs Available:[/cyan] {len(gpus)}")
             for i, gpu in enumerate(gpus):
                 console.print(f"  GPU {i}: {gpu.name}")
         else:
             console.print("[yellow]No GPUs detected[/yellow]")
-    except ImportError:
+    else:
         console.print("[red]TensorFlow not installed[/red]")
-    
-    try:
-        import numpy as np
-        console.print(f"[cyan]NumPy:[/cyan] {np.__version__}")
-    except ImportError:
+
+    if np_version:
+        console.print(f"[cyan]NumPy:[/cyan] {np_version}")
+    else:
         console.print("[red]NumPy not installed[/red]")
-    
-    # Display memory information
-    try:
-        import psutil
-        memory = psutil.virtual_memory()
+
+    if memory:
         console.print(f"[cyan]System Memory:[/cyan] {memory.total / (1024**3):.1f} GB")
         console.print(f"[cyan]Available Memory:[/cyan] {memory.available / (1024**3):.1f} GB")
-    except ImportError:
-        pass
-    
+
     console.print("")
 
 
@@ -193,6 +235,7 @@ def init(
         project_dir / "configs",
         project_dir / "data" / "raw",
         project_dir / "data" / "processed",
+        project_dir / "data" / "simulated",
         project_dir / "models",
         project_dir / "results",
         project_dir / "logs",
@@ -200,11 +243,11 @@ def init(
         project_dir / "whitelist",
     ]
     
-    with Progress() as progress:
-        task = progress.add_task("[cyan]Creating directories...", total=len(dirs))
+    with status("Creating directories..."):
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)
-            progress.advance(task)
+
+    console.log(f"[green]Created {len(dirs)} directories successfully[/green]")
     
     # Create minimal default configuration
     if with_examples:
@@ -296,7 +339,7 @@ def init(
         config_path = project_dir / "configs" / "config.yaml"
         with open(config_path, 'w') as f:
             yaml.safe_dump(example_config, f, default_flow_style=False)
-        console.print(f"[green][/green] Created example configuration: {config_path}")
+        console.print(f"[green]Created example configuration:[/green] {config_path}")
         
         # Create example workflow script
         workflow_script = project_dir / "run_workflow.sh"
@@ -329,7 +372,7 @@ def init(
         """)
         workflow_script.write_text(workflow_content)
         workflow_script.chmod(0o755)
-        console.print("[green][/green] Created example workflow script")
+        console.print("[green]Created example workflow script[/green]")
         
         # Create example whitelist files
         i7_whitelist = project_dir / "whitelist" / "udi_i7.txt"
@@ -346,7 +389,7 @@ def init(
         
         acc_pwm = project_dir / "whitelist" / "acc_pwm.txt"
         acc_pwm.write_text("# ACC PWM Matrix\nA: 0.9 0.1 0.1 0.3 0.3 0.25\nC: 0.03 0.8 0.8 0.2 0.2 0.25\nG: 0.03 0.05 0.05 0.3 0.2 0.25\nT: 0.04 0.05 0.05 0.2 0.3 0.25\n")
-        console.print("[green][/green] Created ACC PWM file")
+        console.print("[green]Created ACC PWM file[/green] ")
     
     # Create README
     readme = project_dir / "README.md"
@@ -361,7 +404,8 @@ def init(
         ├── configs/         # Configuration files
         ├── data/           # Data directory
         │   ├── raw/        # Raw sequence data
-        │   └── processed/  # Processed/simulated data
+        │   ├── processed/  # Processed data
+        │   └── simulated/  # Simulated data
         ├── models/         # Trained models
         ├── results/        # Evaluation results
         ├── logs/           # Training logs
@@ -398,7 +442,7 @@ def init(
         For more information, see the [Tempest documentation](https://github.com/tempest/docs).
     """)
     readme.write_text(readme_content)
-    console.print("[green][/green] Created README.md")
+    console.print("[green]Created README.md[/green]")
     
     # Display summary
     table = Table(title="Project Initialized", show_header=True, header_style="bold magenta")
@@ -406,12 +450,12 @@ def init(
     table.add_column("Status", style="green")
     
     table.add_row("Project Directory", str(project_dir))
-    table.add_row("Configuration", " Created" if with_examples else "Ready for creation")
-    table.add_row("Directories", " Created")
+    table.add_row("Configuration", "Created" if with_examples else "Ready for creation")
+    table.add_row("Directories", "Created")
     if with_examples:
-        table.add_row("Example Config", " Included")
-        table.add_row("Workflow Script", " Generated")
-        table.add_row("Whitelists", " Generated")
+        table.add_row("Example Config", "Included")
+        table.add_row("Workflow Script", "Generated")
+        table.add_row("Whitelists", "Generated")
     
     console.print("\n", table)
     console.print("\n[bold green]Project initialized successfully![/bold green]")

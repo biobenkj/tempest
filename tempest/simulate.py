@@ -1,40 +1,43 @@
 """
-Tempest simulation module - refactored with pickle format support.
+Tempest simulation module
 
 This module provides functionality for generating synthetic sequence reads
 for training and testing TEMPEST models. Now saves to pickle format by default
 for efficiency, with a preview text file for inspection.
 """
 
+import os
+import logging
 import typer
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple
-import logging
+from typing import Optional, Dict, Any, List, Tuple, Callable
 import yaml
 import json
 import pickle
 import gzip
 import numpy as np
-from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
+from tempest.utils.logging_utils import setup_rich_logging, console, status
 
-# Import the data simulator components
+# Determine log level dynamically (default INFO, can be overridden via env var)
+log_level = os.getenv("TEMPEST_LOG_LEVEL", "INFO").upper()
+setup_rich_logging(log_level)
+
+logger = logging.getLogger(__name__)
+logger.setLevel(getattr(logging, log_level, logging.INFO))
+
 from tempest.data import (
     SequenceSimulator,
     SimulatedRead,
     InvalidReadGenerator,
-    create_simulator_from_config
+    create_simulator_from_config,
 )
 from tempest.config import TempestConfig, SimulationConfig
 
-logger = logging.getLogger(__name__)
-console = Console()
-
-# Create the simulate Typer sub-application
 simulate_app = typer.Typer(
     help="Generate synthetic sequence reads for training and testing",
-    rich_markup_mode="rich"
+    rich_markup_mode="rich",
 )
 
 
@@ -63,6 +66,8 @@ def run_simulation(
         sim_config.random_seed = kwargs['seed']
     if 'train_fraction' in kwargs:
         sim_config.train_split = kwargs['train_fraction']
+    if 'invalid_fraction' in kwargs and kwargs['invalid_fraction'] is not None:
+        sim_config.invalid_fraction = kwargs['invalid_fraction']
     
     # Get format preference (default to pickle)
     output_format = kwargs.get('format', 'pickle')
@@ -80,13 +85,26 @@ def run_simulation(
     
     if kwargs.get('split', False):
         # Generate train/validation split
-        logger.info(f"Generating {sim_config.num_sequences} sequences with {sim_config.train_split}/{1.0 - sim_config.train_split} train/val split")
+        logger.info(f"Generating {sim_config.num_sequences} sequences with {sim_config.train_split:.2f}/{1.0 - sim_config.train_split:.2f} train/val split")
         
         n_train = int(sim_config.num_sequences * sim_config.train_split)
         n_val = sim_config.num_sequences - n_train
         
-        train_reads = simulator.generate_batch(n_train)
-        val_reads = simulator.generate_batch(n_val)
+        # Get progress callback if provided
+        progress_callback = kwargs.get('progress_callback', None)
+        
+        # Generate training sequences with progress tracking
+        train_reads = simulator.generate_batch(n_train, progress_callback=progress_callback)
+        
+        # Generate validation sequences with progress tracking
+        # Continue from where training left off
+        if progress_callback:
+            def val_progress_callback(n_generated):
+                # Offset by n_train to continue the progress bar
+                progress_callback(n_train + n_generated)
+            val_reads = simulator.generate_batch(n_val, progress_callback=val_progress_callback)
+        else:
+            val_reads = simulator.generate_batch(n_val)
 
         if getattr(sim_config, "invalid_fraction", 0.0) > 0.0:
             invalid_ratio = sim_config.invalid_fraction
@@ -95,18 +113,22 @@ def run_simulation(
             )
             invalid_gen = InvalidReadGenerator(sim_config)
 
-            for r in train_reads:
-                if r.metadata is None:
-                    r.metadata = {}
-                r.metadata.setdefault("is_invalid", False)
+            # Ensure metadata exists for marking invalids
+            for dataset_name, reads in [("train", train_reads), ("validation", val_reads)]:
+                for r in reads:
+                    if r.metadata is None:
+                        r.metadata = {}
+                    r.metadata.setdefault("is_invalid", False)
 
-            for r in val_reads:
-                if r.metadata is None:
-                    r.metadata = {}
-                r.metadata.setdefault("is_invalid", False)
+                corrupted = invalid_gen.generate_batch(reads, invalid_ratio=invalid_ratio)
+                logger.info(
+                    f"{dataset_name.capitalize()} set: {len(corrupted)} total reads (includes invalid fraction)"
+                )
 
-            train_reads = invalid_gen.generate_batch(train_reads, invalid_ratio=invalid_ratio)
-            val_reads = invalid_gen.generate_batch(val_reads, invalid_ratio=invalid_ratio)
+                if dataset_name == "train":
+                    train_reads = corrupted
+                else:
+                    val_reads = corrupted
         
         # Save sequences based on format
         if output_format == 'pickle':
@@ -360,6 +382,10 @@ def generate_command(
         min=0.1,
         max=0.9
     ),
+    invalid_fraction: float = typer.Option(
+        None,
+        help="Optional override for fraction of invalid reads to generate (default from config).",
+    ),
     seed: Optional[int] = typer.Option(
         None,
         "--seed", "-r",
@@ -411,14 +437,10 @@ def generate_command(
     
     try:
         # Load configuration
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console
-        ) as progress:
-            task = progress.add_task("Loading configuration...", total=None)
+        with status("Loading configuration..."):
             cfg = TempestConfig.from_yaml(str(config))
-            progress.update(task, completed=True, description="Configuration loaded")
+
+        console.log("[green]Configuration loaded successfully[/green]")
         
         # Override parameters from command line
         kwargs = {
@@ -431,6 +453,8 @@ def generate_command(
             kwargs['seed'] = seed
         if train_fraction != 0.8:
             kwargs['train_fraction'] = train_fraction
+        if invalid_fraction is not None:
+            kwargs['invalid_fraction'] = invalid_fraction
         if output:
             kwargs['output_file'] = output.name
         kwargs['split'] = split
@@ -456,7 +480,7 @@ def generate_command(
             console.print()
         
         # Run simulation with progress tracking
-        with Progress(console=console) as progress:
+        with Progress(console=console, transient=True) as progress:
             total = kwargs.get('num_sequences', cfg.simulation.num_sequences)
             task = progress.add_task("[cyan]Generating sequences...", total=total)
 
@@ -887,6 +911,7 @@ def simulate_command(args):
             num_sequences=args.num_sequences if hasattr(args, 'num_sequences') else None,
             split=True,
             train_fraction=args.train_fraction if hasattr(args, 'train_fraction') else 0.8,
+            invalid_fraction=args.invalid_fraction if hasattr(args, 'invalid_fraction') else 0.0,
             seed=args.seed if hasattr(args, 'seed') else None,
             format='pickle',  # Default to pickle
             no_compress=False,
@@ -898,6 +923,7 @@ def simulate_command(args):
             output=Path(args.output) if hasattr(args, 'output') and args.output else None,
             num_sequences=args.num_sequences if hasattr(args, 'num_sequences') else None,
             split=False,
+            invalid_fraction=args.invalid_fraction if hasattr(args, 'invalid_fraction') else 0.0,
             seed=args.seed if hasattr(args, 'seed') else None,
             format='pickle',  # Default to pickle
             no_compress=False,

@@ -33,7 +33,9 @@ from .io import (
 )
 
 from .logging_utils import (
-    suppress_tensorflow_logging
+    setup_rich_logging,
+    console,
+    status
 )
 
 __all__ = [
@@ -63,5 +65,7 @@ __all__ = [
     'get_base_to_index',
     'get_index_to_base',
     # Logging utils
-    'suppress_tensorflow_logging',
+    'setup_rich_logging',
+    'console',
+    'status',
 ]

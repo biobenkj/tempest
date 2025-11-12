@@ -14,16 +14,21 @@ import os
 import warnings
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 warnings.filterwarnings('ignore', category=UserWarning, module='tensorflow')
+from tempest.utils.logging_utils import setup_rich_logging, console, status
+log_level = os.getenv("TEMPEST_LOG_LEVEL", "INFO")
+setup_rich_logging(log_level)
+from rich.logging import RichHandler
 
 from pathlib import Path
 from typing import Optional, Union, Dict, Any, List
-import logging
 import pickle
 import gzip
 
 from tempest.config import TempestConfig, load_config as config_load_config
 
+import logging
 logger = logging.getLogger(__name__)
+logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
 
 
 # ---------------------------------------------------------------------
@@ -124,7 +129,11 @@ def run_pipeline(
         raise ValueError(f"No valid function found for {command} {subcommand or ''}")
 
     logger.debug(f"Dispatching to {func.__module__}.{func.__name__}")
-    return func(config, output_dir=output_dir, **extra_args)
+    with status(f"Running {command}{' ' + subcommand if subcommand else ''}..."):
+        result = func(config, output_dir=output_dir, **extra_args)
+
+    logger.info(f"Completed {command}{' ' + subcommand if subcommand else ''} successfully")
+    return result
 
 
 # ---------------------------------------------------------------------
@@ -144,6 +153,7 @@ def main(
         return result
     except Exception as e:
         logger.exception(f"TEMPEST {command} {subcommand or ''} failed: {e}")
+        console.print(f"[bold red]Error:[/bold red] {e}")
         raise
 
 
@@ -151,13 +161,14 @@ def main(
 # CLI integration
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
+    import os
+    if "TEMPEST_LOG_LEVEL" not in os.environ:
+        os.environ["TEMPEST_LOG_LEVEL"] = "INFO"
     import sys
     import logging
 
-    logging.basicConfig(level=logging.INFO)
-
     if len(sys.argv) < 3:
-        print("Usage: python -m tempest.main <command> <config_path> [subcommand] [output_dir]")
+        console.print("[bold red]Usage:[/bold red] python -m tempest.main <command> <config_path> [subcommand] [output_dir]")
         sys.exit(1)
 
     cmd = sys.argv[1]

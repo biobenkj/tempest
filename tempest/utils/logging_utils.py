@@ -1,34 +1,44 @@
 # tempest/utils/logging_utils.py
-import os
-import sys
+"""
+Rich-based logging utilities for Tempest.
+
+Ensures all modules share a consistent RichHandler setup
+and suppresses TensorFlow C++ verbosity globally.
+"""
+
 import logging
-import warnings
+import os
+from rich.console import Console
+from rich.logging import RichHandler
 
-def suppress_tensorflow_logging():
-    """
-    Fully suppress TensorFlow logging (both Python and C++ backends),
-    unless '--debug' in sys.argv or TEMPEST_DEBUG=1.
-    """
-    # Respect debug flags
-    if "--debug" in sys.argv or os.getenv("TEMPEST_DEBUG", "0") == "1":
-        return
+# Create one global console shared across modules
+console = Console(log_path=False)
 
-    # MUST set these before importing tensorflow
-    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"   # 0=all, 1=filter INFO, 2=filter WARNING, 3=filter ERROR
-    os.environ["TF_CPP_MIN_VLOG_LEVEL"] = "0"
-    os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
-    os.environ.setdefault("TF_DISABLE_PLUGIN_REGISTRATION", "1")
-    os.environ.setdefault("TF_ENABLE_DEPRECATION_WARNINGS", "0")
+def status(msg: str):
+    """Simple shared status context."""
+    return console.status(f"[cyan]{msg}[/cyan]", spinner="dots")
 
-    # Silence Python warnings/loggers
-    warnings.filterwarnings("ignore", category=UserWarning)
-    warnings.filterwarnings("ignore", category=FutureWarning)
+def setup_rich_logging(level: str = "INFO") -> None:
+    """Initialize RichHandler-based logging if not already active."""
+    root_logger = logging.getLogger()
 
-    # Try to catch Python-level TF logs *if imported later*
-    try:
-        import tensorflow as tf
-        tf.get_logger().setLevel(logging.ERROR)
-        logging.getLogger("tensorflow").setLevel(logging.ERROR)
-        logging.getLogger("tensorflow").propagate = False
-    except Exception:
-        pass
+    # Only configure if not already using RichHandler
+    if not any(isinstance(h, RichHandler) for h in root_logger.handlers):
+        numeric_level = getattr(logging, level.upper(), logging.INFO)
+        logging.basicConfig(
+            level=numeric_level,
+            format="%(message)s",
+            datefmt="[%X]",
+            handlers=[RichHandler(
+                rich_tracebacks=True,
+                console=console,
+                show_time=True,
+                show_path=False,
+                markup=True,
+                keywords=["INFO", "WARNING", "ERROR"],
+                )],
+        )
+
+        # Silence TensorFlow C++ backend chatter
+        os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+        root_logger.debug("Rich logging initialized with level %s", level)
