@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tempest-bio"
+name = "tempest"
 version = "0.3.0"
 description = "Modular sequence annotation using length-constrained CRFs with PWM priors"
 readme = "README.md"

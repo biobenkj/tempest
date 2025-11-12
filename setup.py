@@ -93,7 +93,7 @@ extras_require["all"] = sorted({pkg for group in extras_require.values() for pkg
 # Setup configuration
 # ---------------------------------------------------------------------
 setup(
-    name="tempest-bio",
+    name="tempest",
     version="0.3.0",
     author="Ben Johnson",
     author_email="ben.johnson@vai.org",
