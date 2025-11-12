@@ -115,7 +115,6 @@ def main_callback(
         console.print(f"[bold blue]Tempest[/bold blue] version {__version__}")
         raise typer.Exit()
     
-    suppress_tensorflow_logging()
     setup_logging(
         level="DEBUG" if debug else log_level,
         log_file=str(log_file) if log_file else None,
