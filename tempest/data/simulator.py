@@ -1267,17 +1267,24 @@ class SequenceSimulator:
         return reads
 
 
-def create_simulator_from_config(config_file: str) -> SequenceSimulator:
+def create_simulator_from_config(config_source) -> SequenceSimulator:
     """
-    Convenience function to create simulator from config file.
-
-    Args:
-        config_file: Path to YAML configuration file
-
-    Returns:
-        Configured simulator instance
+    Create a SequenceSimulator instance from either a config file path,
+    TempestConfig object, or a dictionary.
     """
-    return SequenceSimulator(config_file=config_file)
+    if isinstance(config_source, TempestConfig):
+        # Convert to dictionary for SequenceSimulator
+        return SequenceSimulator(config=config_source._to_dict())
+    elif isinstance(config_source, (str, bytes, Path)):
+        # Treat as file path
+        return SequenceSimulator(config_file=str(config_source))
+    elif isinstance(config_source, dict):
+        return SequenceSimulator(config=config_source)
+    else:
+        raise TypeError(
+            f"Unsupported config source type: {type(config_source)} "
+            "(expected TempestConfig, dict, or path string)"
+        )
 
 
 def reads_to_arrays(

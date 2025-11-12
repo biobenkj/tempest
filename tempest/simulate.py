@@ -465,7 +465,7 @@ def generate_command(
             progress.update(task, completed=True)
         
         # Report results
-        console.print("\n[bold green]✓ Simulation complete![/bold green]")
+        console.print("\n[bold green] Simulation complete![/bold green]")
         
         if split:
             console.print(f"  Training sequences: {result['n_train']}")
@@ -577,7 +577,7 @@ def convert_command(
             _save_reads_text(reads, output_file)
             console.print(f"  Saved to: [green]{output_file}[/green]")
         
-        console.print("[bold green]✓ Conversion complete![/bold green]")
+        console.print("[bold green] Conversion complete![/bold green]")
         
     except Exception as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
@@ -662,7 +662,7 @@ def validate_command(
                 console.print(f"  ✗ {error}")
             raise typer.Exit(1)
         
-        console.print("[bold green]✓ Configuration is valid![/bold green]")
+        console.print("[bold green] Configuration is valid![/bold green]")
         
         if warnings:
             console.print("\n[yellow]Warnings:[/yellow]")
