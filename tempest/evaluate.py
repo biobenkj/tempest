@@ -1,384 +1,366 @@
 """
-Tempest evaluation commands using Typer.
+Tempest Evaluate Command - Model evaluation and comparison CLI.
+
+This module provides the 'evaluate' subcommand for assessing model performance,
+comparing multiple models, and generating evaluation reports.
 """
 
 import typer
 from pathlib import Path
 from typing import Optional, List
-import json
+import logging
 from rich.console import Console
 from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, TextColumn
+import json
+import numpy as np
 
-from tempest.compare.evaluator import ModelEvaluator
-from tempest.main import load_config
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-# Create the evaluate sub-application
-evaluate_app = typer.Typer(help="Evaluate trained Tempest models")
-
+# Initialize Rich console
 console = Console()
+app = typer.Typer(help="Evaluate trained Tempest models")
 
 
-@evaluate_app.command()
-def performance(
-    model: Path = typer.Option(
-        ...,
-        "--model", "-m",
-        help="Path to trained model",
-        exists=True
-    ),
-    test_data: Path = typer.Option(
-        ...,
-        "--test-data", "-t",
-        help="Path to test data file",
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        readable=True
-    ),
-    config: Optional[Path] = typer.Option(
-        None,
-        "--config", "-c",
-        help="Path to configuration YAML file"
-    ),
-    output: Optional[Path] = typer.Option(
-        None,
-        "--output", "-o",
-        help="Save metrics to JSON file"
-    ),
-    metrics: List[str] = typer.Option(
-        ["accuracy", "f1", "precision", "recall"],
-        "--metrics",
-        help="Metrics to compute"
-    ),
-    per_segment: bool = typer.Option(
-        False,
-        "--per-segment",
-        help="Compute per-segment metrics"
-    ),
-    batch_size: int = typer.Option(
-        32,
-        "--batch-size",
-        help="Batch size for evaluation"
-    )
+@app.command("single")
+def evaluate_single_model(
+    model: Path = typer.Argument(..., help="Path to trained model file"),
+    test_data: Path = typer.Argument(..., help="Path to test data (pickle, npz, or directory)"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Configuration file (optional)"),
+    batch_size: int = typer.Option(32, "--batch-size", "-b", help="Batch size for evaluation"),
+    output_dir: Path = typer.Option("./evaluation_results", "--output", "-o", help="Output directory"),
+    metrics: Optional[List[str]] = typer.Option(None, "--metrics", "-m", help="Specific metrics to compute"),
+    per_segment: bool = typer.Option(False, "--per-segment", help="Compute per-segment metrics"),
+    format: str = typer.Option("auto", "--format", "-f", help="Input data format (auto, pickle, npz, fastq)"),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress progress output")
 ):
     """
-    Evaluate model performance on test data.
+    Evaluate a single trained model on test data.
     
     Examples:
-        # Basic evaluation
-        tempest evaluate performance --model model.h5 --test-data test.txt
-        
-        # Evaluate with per-segment metrics
-        tempest evaluate performance --model model.h5 --test-data test.txt --per-segment
+        tempest evaluate single model.h5 test_data.pkl
+        tempest evaluate single model.h5 test_data.pkl --per-segment --output results/
+        tempest evaluate single model.h5 test_fastq/ --format fastq --config config.yaml
     """
-    console.print("[bold blue]TEMPEST Model Evaluation[/bold blue]")
-    console.print("=" * 60)
+    from tempest.compare.evaluator import ModelEvaluator
     
-    # Load configuration
-    cfg = None
-    if config:
-        cfg = load_config(str(config))
+    if not quiet:
+        console.print("[bold green]Evaluating single model...[/bold green]")
     
-    # Create evaluator
-    evaluator = ModelEvaluator(
-        model_path=str(model),
-        config=cfg
-    )
-    
-    # Load test data
-    console.print(f"Loading test data from: {test_data}")
-    test_dataset = evaluator.load_test_data(str(test_data))
-    
-    # Evaluate
-    console.print(f"Evaluating on {len(test_dataset)} sequences...")
-    results = evaluator.evaluate(
-        test_dataset,
-        batch_size=batch_size,
-        metrics=metrics,
-        per_segment=per_segment
-    )
-    
-    # Display results
-    _display_metrics(results, per_segment)
-    
-    # Save if requested
-    if output:
-        with open(output, 'w') as f:
-            json.dump(results, f, indent=2)
-        console.print(f"\n[green]✓[/green] Metrics saved to: {output}")
-
-
-@evaluate_app.command()
-def compare(
-    models: List[Path] = typer.Option(
-        ...,
-        "--models", "-m",
-        help="Paths to models to compare (can specify multiple)"
-    ),
-    test_data: Path = typer.Option(
-        ...,
-        "--test-data", "-t",
-        help="Path to test data file",
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        readable=True
-    ),
-    config: Optional[Path] = typer.Option(
-        None,
-        "--config", "-c",
-        help="Path to configuration YAML file"
-    ),
-    output: Optional[Path] = typer.Option(
-        None,
-        "--output", "-o",
-        help="Save comparison to JSON file"
-    ),
-    plot: bool = typer.Option(
-        False,
-        "--plot",
-        help="Generate comparison plots"
-    )
-):
-    """
-    Compare multiple models on the same test set.
-    
-    Examples:
-        # Compare two models
-        tempest evaluate compare --models model1.h5 --models model2.h5 --test-data test.txt
+    # Initialize evaluator
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        disable=quiet
+    ) as progress:
+        task = progress.add_task("Loading model and configuration...", total=None)
         
-        # Compare with plots
-        tempest evaluate compare --models model1.h5 --models model2.h5 --test-data test.txt --plot
-    """
-    if len(models) < 2:
-        console.print("[red]Error: Need at least 2 models to compare[/red]")
-        raise typer.Exit(1)
-    
-    console.print("[bold blue]TEMPEST Model Comparison[/bold blue]")
-    console.print("=" * 60)
-    console.print(f"Comparing {len(models)} models")
-    
-    # Load configuration
-    cfg = None
-    if config:
-        cfg = load_config(str(config))
-    
-    results = {}
-    for model_path in models:
-        model_name = model_path.stem
-        console.print(f"\nEvaluating: {model_name}")
-        
-        evaluator = ModelEvaluator(
-            model_path=str(model_path),
-            config=cfg
-        )
-        
-        test_dataset = evaluator.load_test_data(str(test_data))
-        metrics = evaluator.evaluate(test_dataset)
-        results[model_name] = metrics
-    
-    # Display comparison table
-    _display_comparison(results)
-    
-    # Generate plots if requested
-    if plot:
-        import matplotlib.pyplot as plt
-        _generate_comparison_plots(results)
-        console.print("\n[green]✓[/green] Comparison plots saved")
-    
-    # Save if requested
-    if output:
-        with open(output, 'w') as f:
-            json.dump(results, f, indent=2)
-        console.print(f"\n[green]✓[/green] Comparison saved to: {output}")
-
-
-@evaluate_app.command()
-def inference_speed(
-    model: Path = typer.Option(
-        ...,
-        "--model", "-m",
-        help="Path to trained model",
-        exists=True
-    ),
-    test_data: Path = typer.Option(
-        ...,
-        "--test-data", "-t",
-        help="Path to test data file",
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        readable=True
-    ),
-    batch_sizes: List[int] = typer.Option(
-        [1, 8, 16, 32, 64],
-        "--batch-sizes",
-        help="Batch sizes to test"
-    ),
-    warmup: int = typer.Option(
-        10,
-        "--warmup",
-        help="Number of warmup iterations"
-    ),
-    iterations: int = typer.Option(
-        100,
-        "--iterations",
-        help="Number of timing iterations"
-    )
-):
-    """
-    Benchmark inference speed at different batch sizes.
-    
-    Examples:
-        # Test inference speed
-        tempest evaluate inference-speed --model model.h5 --test-data test.txt
-        
-        # Test specific batch sizes
-        tempest evaluate inference-speed --model model.h5 --test-data test.txt --batch-sizes 1 --batch-sizes 32 --batch-sizes 128
-    """
-    import time
-    import numpy as np
-    
-    console.print("[bold blue]TEMPEST Inference Speed Benchmark[/bold blue]")
-    console.print("=" * 60)
-    
-    evaluator = ModelEvaluator(model_path=str(model))
-    test_dataset = evaluator.load_test_data(str(test_data))
-    
-    # Prepare results table
-    table = Table(title="Inference Speed Results")
-    table.add_column("Batch Size", style="cyan", no_wrap=True)
-    table.add_column("Throughput (seq/s)", style="magenta")
-    table.add_column("Latency (ms/seq)", style="yellow")
-    table.add_column("GPU Memory (MB)", style="green")
-    
-    for batch_size in batch_sizes:
-        console.print(f"\nTesting batch size: {batch_size}")
-        
-        # Warmup
-        for _ in range(warmup):
-            _ = evaluator.predict_batch(test_dataset[:batch_size], batch_size=batch_size)
-        
-        # Time iterations
-        times = []
-        for _ in range(iterations):
-            start = time.perf_counter()
-            _ = evaluator.predict_batch(test_dataset[:batch_size], batch_size=batch_size)
-            times.append(time.perf_counter() - start)
-        
-        # Calculate metrics
-        avg_time = np.mean(times)
-        throughput = batch_size / avg_time
-        latency = (avg_time / batch_size) * 1000
-        
-        # Try to get GPU memory if available
-        gpu_mem = "N/A"
         try:
-            import tensorflow as tf
-            if tf.config.list_physical_devices('GPU'):
-                # This is a placeholder - actual GPU memory tracking would need nvidia-ml-py
-                gpu_mem = f"~{batch_size * 10}"  
-        except:
-            pass
+            evaluator = ModelEvaluator(
+                config_path=str(config) if config else None,
+                model_path=str(model)
+            )
+            
+            # Load test data
+            progress.update(task, description="Loading test data...")
+            test_dataset = evaluator.load_test_data(str(test_data), format=format)
+            
+            # Run evaluation
+            progress.update(task, description="Running evaluation...")
+            results = evaluator.evaluate(
+                test_dataset,
+                batch_size=batch_size,
+                metrics=metrics,
+                per_segment=per_segment
+            )
+            
+            # Save results
+            progress.update(task, description="Saving results...")
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Save metrics
+            metrics_file = output_dir / "evaluation_metrics.json"
+            with open(metrics_file, 'w') as f:
+                json.dump(results, f, indent=2, default=str)
+            
+            # Display results
+            if not quiet:
+                _display_single_model_results(results)
+            
+            console.print(f"\n[green]✓[/green] Results saved to: {output_dir}")
+            
+        except Exception as e:
+            console.print(f"[red]✗ Evaluation failed:[/red] {str(e)}")
+            raise typer.Exit(1)
+
+
+@app.command("compare")
+def compare_models(
+    models_dir: Path = typer.Argument(..., help="Directory containing models to compare"),
+    test_data: Path = typer.Argument(..., help="Path to test data"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Configuration file"),
+    output_dir: Path = typer.Option("./comparison_results", "--output", "-o", help="Output directory"),
+    format: str = typer.Option("auto", "--format", "-f", help="Input data format"),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress progress output")
+):
+    """
+    Compare multiple models on the same test dataset.
+    
+    Expects models_dir to contain:
+    - standard_model.h5
+    - soft_constraint_model.h5
+    - hard_constraint_model.h5
+    - hybrid_model.h5
+    - ensemble/ (directory with ensemble models)
+    
+    Examples:
+        tempest evaluate compare models/ test_data.pkl
+        tempest evaluate compare models/ test_data.pkl --config config.yaml
+    """
+    from tempest.compare.evaluator import compare_models as run_comparison
+    
+    if not quiet:
+        console.print("[bold green]Comparing models...[/bold green]")
+    
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        disable=quiet
+    ) as progress:
+        task = progress.add_task("Running model comparison...", total=None)
         
-        table.add_row(
-            str(batch_size),
-            f"{throughput:.2f}",
-            f"{latency:.2f}",
-            gpu_mem
+        try:
+            # Run comparison
+            framework = run_comparison(
+                models_dir=str(models_dir),
+                test_data_path=str(test_data),
+                config_path=str(config) if config else None,
+                output_dir=str(output_dir)
+            )
+            
+            # Display comparison results
+            if not quiet:
+                _display_comparison_results(framework)
+            
+            console.print(f"\n[green]✓[/green] Comparison complete. Results saved to: {output_dir}")
+            
+        except Exception as e:
+            console.print(f"[red]✗ Comparison failed:[/red] {str(e)}")
+            raise typer.Exit(1)
+
+
+@app.command("batch")
+def batch_predict(
+    model: Path = typer.Argument(..., help="Path to trained model"),
+    sequences: Path = typer.Argument(..., help="Path to sequences file (FASTA/FASTQ/pickle)"),
+    output: Path = typer.Option("predictions.json", "--output", "-o", help="Output file"),
+    batch_size: int = typer.Option(32, "--batch-size", "-b", help="Batch size"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Configuration file"),
+    format: str = typer.Option("auto", "--format", "-f", help="Input format"),
+    confidence: bool = typer.Option(False, "--confidence", help="Include confidence scores"),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress progress output")
+):
+    """
+    Run batch prediction on sequences using a trained model.
+    
+    Examples:
+        tempest evaluate batch model.h5 sequences.fasta -o predictions.json
+        tempest evaluate batch model.h5 sequences.pkl --confidence
+    """
+    from tempest.compare.evaluator import ModelEvaluator
+    from tempest.main import load_data
+    
+    if not quiet:
+        console.print("[bold green]Running batch predictions...[/bold green]")
+    
+    try:
+        # Initialize evaluator
+        evaluator = ModelEvaluator(
+            config_path=str(config) if config else None,
+            model_path=str(model)
         )
-    
-    console.print("\n")
-    console.print(table)
-
-
-def _display_metrics(metrics: dict, per_segment: bool = False):
-    """Display evaluation metrics in a formatted table."""
-    # Overall metrics table
-    table = Table(title="Overall Performance Metrics")
-    table.add_column("Metric", style="cyan", no_wrap=True)
-    table.add_column("Value", style="magenta")
-    
-    for key, value in metrics.get('overall', {}).items():
-        if isinstance(value, float):
-            table.add_row(key.capitalize(), f"{value:.4f}")
+        
+        # Load sequences
+        data = load_data(str(sequences), format=format)
+        
+        # Extract sequences
+        if isinstance(data, dict) and 'X_test' in data:
+            sequences_array = data['X_test']
+        elif isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+            sequences_array = np.array([x['sequence'] for x in data])
         else:
-            table.add_row(key.capitalize(), str(value))
+            sequences_array = np.array(data)
+        
+        # Run predictions
+        with console.status("Predicting...") if not quiet else nullcontext():
+            predictions = evaluator.predict_batch(sequences_array, batch_size=batch_size)
+        
+        # Format output
+        output_data = {
+            'model': str(model),
+            'num_sequences': len(sequences_array),
+            'predictions': predictions.tolist() if isinstance(predictions, np.ndarray) else predictions
+        }
+        
+        if confidence:
+            # Add confidence scores if available
+            output_data['confidence'] = "Not implemented yet"  # TODO: Add confidence extraction
+        
+        # Save predictions
+        output = Path(output)
+        with open(output, 'w') as f:
+            json.dump(output_data, f, indent=2)
+        
+        console.print(f"[green]✓[/green] Predictions saved to: {output}")
+        
+    except Exception as e:
+        console.print(f"[red]✗ Batch prediction failed:[/red] {str(e)}")
+        raise typer.Exit(1)
+
+
+@app.command("metrics")
+def show_metrics(
+    results_file: Path = typer.Argument(..., help="Path to evaluation results JSON file"),
+    metric: Optional[str] = typer.Option(None, "--metric", "-m", help="Specific metric to display"),
+    format: str = typer.Option("table", "--format", "-f", help="Output format (table, json, csv)")
+):
+    """
+    Display metrics from a previous evaluation.
+    
+    Examples:
+        tempest evaluate metrics evaluation_results/metrics.json
+        tempest evaluate metrics results.json --metric accuracy
+        tempest evaluate metrics results.json --format csv
+    """
+    try:
+        with open(results_file) as f:
+            results = json.load(f)
+        
+        if metric:
+            if metric in results:
+                console.print(f"{metric}: {results[metric]}")
+            else:
+                console.print(f"[red]Metric '{metric}' not found[/red]")
+                console.print(f"Available metrics: {', '.join(results.keys())}")
+        else:
+            if format == "table":
+                _display_metrics_table(results)
+            elif format == "json":
+                console.print_json(json.dumps(results, indent=2, default=str))
+            elif format == "csv":
+                import csv
+                import sys
+                writer = csv.writer(sys.stdout)
+                writer.writerow(["Metric", "Value"])
+                for k, v in results.items():
+                    writer.writerow([k, v])
+    
+    except Exception as e:
+        console.print(f"[red]Failed to load metrics:[/red] {str(e)}")
+        raise typer.Exit(1)
+
+
+# Helper functions for displaying results
+
+def _display_single_model_results(results: dict):
+    """Display evaluation results for a single model."""
+    console.print("\n[bold]Evaluation Results:[/bold]")
+    
+    # Main metrics table
+    table = Table(title="Overall Metrics")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+    
+    # Add main metrics
+    for key in ['accuracy', 'f1_score', 'precision', 'recall']:
+        if key in results:
+            value = results[key]
+            if isinstance(value, float):
+                table.add_row(key.replace('_', ' ').title(), f"{value:.4f}")
+            else:
+                table.add_row(key.replace('_', ' ').title(), str(value))
     
     console.print(table)
     
     # Per-segment metrics if available
-    if per_segment and 'per_segment' in metrics:
-        console.print("\n[bold]Per-Segment Metrics:[/bold]")
-        for segment, segment_metrics in metrics['per_segment'].items():
-            seg_table = Table(title=f"Segment: {segment}")
-            seg_table.add_column("Metric", style="cyan")
-            seg_table.add_column("Value", style="magenta")
-            
-            for key, value in segment_metrics.items():
-                if isinstance(value, float):
-                    seg_table.add_row(key.capitalize(), f"{value:.4f}")
+    if 'per_segment' in results:
+        seg_table = Table(title="Per-Segment Accuracy")
+        seg_table.add_column("Segment", style="cyan")
+        seg_table.add_column("Accuracy", style="green")
+        
+        for segment, acc in results['per_segment'].items():
+            seg_table.add_row(segment, f"{acc:.4f}")
+        
+        console.print(seg_table)
+
+
+def _display_comparison_results(framework):
+    """Display model comparison results."""
+    console.print("\n[bold]Model Comparison Results:[/bold]")
+    
+    # Get summary from framework
+    if hasattr(framework, 'results_df'):
+        import pandas as pd
+        df = framework.results_df
+        
+        # Create comparison table
+        table = Table(title="Model Performance Comparison")
+        table.add_column("Model", style="cyan")
+        table.add_column("Accuracy", style="green")
+        table.add_column("F1 Score", style="green")
+        table.add_column("Precision", style="yellow")
+        table.add_column("Recall", style="yellow")
+        
+        for _, row in df.iterrows():
+            table.add_row(
+                row.get('model', 'Unknown'),
+                f"{row.get('accuracy', 0):.4f}",
+                f"{row.get('f1_score', 0):.4f}",
+                f"{row.get('precision', 0):.4f}",
+                f"{row.get('recall', 0):.4f}"
+            )
+        
+        console.print(table)
+
+
+def _display_metrics_table(metrics: dict):
+    """Display metrics in a formatted table."""
+    table = Table(title="Evaluation Metrics")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+    
+    for key, value in metrics.items():
+        if isinstance(value, (int, float)):
+            table.add_row(key.replace('_', ' ').title(), f"{value:.4f}" if isinstance(value, float) else str(value))
+        elif isinstance(value, dict):
+            # Nested metrics
+            for sub_key, sub_value in value.items():
+                formatted_key = f"{key.replace('_', ' ').title()} - {sub_key}"
+                if isinstance(sub_value, float):
+                    table.add_row(formatted_key, f"{sub_value:.4f}")
                 else:
-                    seg_table.add_row(key.capitalize(), str(value))
-            
-            console.print(seg_table)
-
-
-def _display_comparison(results: dict):
-    """Display model comparison in a formatted table."""
-    # Get all metrics
-    all_metrics = set()
-    for model_metrics in results.values():
-        all_metrics.update(model_metrics.get('overall', {}).keys())
-    
-    # Create comparison table
-    table = Table(title="Model Comparison")
-    table.add_column("Model", style="cyan", no_wrap=True)
-    for metric in sorted(all_metrics):
-        table.add_column(metric.capitalize(), style="magenta")
-    
-    # Add rows for each model
-    for model_name, metrics in results.items():
-        row = [model_name]
-        for metric in sorted(all_metrics):
-            value = metrics.get('overall', {}).get(metric, 'N/A')
-            if isinstance(value, float):
-                row.append(f"{value:.4f}")
-            else:
-                row.append(str(value))
-        table.add_row(*row)
+                    table.add_row(formatted_key, str(sub_value))
     
     console.print(table)
 
 
-def _generate_comparison_plots(results: dict):
-    """Generate comparison plots for multiple models."""
-    import matplotlib.pyplot as plt
-    
-    # Extract data for plotting
-    models = list(results.keys())
-    metrics_data = {}
-    
-    for model, metrics in results.items():
-        for metric_name, value in metrics.get('overall', {}).items():
-            if metric_name not in metrics_data:
-                metrics_data[metric_name] = []
-            metrics_data[metric_name].append(value if isinstance(value, (int, float)) else 0)
-    
-    # Create bar plot
-    fig, axes = plt.subplots(1, len(metrics_data), figsize=(15, 5))
-    if len(metrics_data) == 1:
-        axes = [axes]
-    
-    for idx, (metric, values) in enumerate(metrics_data.items()):
-        axes[idx].bar(models, values)
-        axes[idx].set_title(metric.capitalize())
-        axes[idx].set_ylabel('Score')
-        axes[idx].set_xticklabels(models, rotation=45)
-    
-    plt.tight_layout()
-    plt.savefig('model_comparison.png')
-    plt.close()
+# For importing nullcontext if Python < 3.7
+try:
+    from contextlib import nullcontext
+except ImportError:
+    from contextlib import contextmanager
+    @contextmanager
+    def nullcontext():
+        yield
+
 
 if __name__ == "__main__":
-    evaluate_app()
+    app()

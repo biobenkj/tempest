@@ -3,6 +3,8 @@ Tempest Model Evaluator and Comparison Tools.
 
 This module provides specialized evaluation capabilities for Tempest models,
 including standard, constraint-aware, hybrid, and ensemble approaches.
+Now integrates Tempest's unified data loader (from main.py) and batch predictor
+(from inference_utils) for consistent CLI compatibility.
 """
 
 import pickle
@@ -13,14 +15,17 @@ import tensorflow as tf
 from tensorflow import keras
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Union, Any
 import json
 import logging
 
+from tempest.main import load_data
+from tempest.inference import predict_sequences
 from tempest.compare.evaluation_framework import ModelEvaluationFramework
 from tempest.core.models import build_cnn_bilstm_crf
 from tempest.core.hybrid_decoder import HybridConstraintDecoder
 from sklearn.preprocessing import LabelBinarizer
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, confusion_matrix
 
 # Configure logging
 logging.basicConfig(
@@ -31,66 +36,222 @@ logger = logging.getLogger(__name__)
 
 
 class ModelEvaluator:
-    """
-    Specialized evaluator for Tempest models incorporating domain-specific metrics.
-    """
-    
-    def __init__(self, config_path: str = None):
-        """
-        Initialize evaluator with Tempest configuration.
-        
-        Args:
-            config_path: Path to Tempest config file
-        """
+    """Specialized evaluator for Tempest models incorporating domain-specific metrics."""
+
+    def __init__(self, config_path: Optional[str] = None, model_path: Optional[str] = None):
+        """Initialize evaluator with Tempest configuration and optional model path."""
+        self.model_path = model_path
         self.config = self._load_config(config_path)
         self.setup_evaluation_params()
-        
+
     def _load_config(self, config_path):
-        """Load Tempest configuration."""
+        """Load configuration from file or use defaults."""
         if config_path and Path(config_path).exists():
             with open(config_path) as f:
                 return json.load(f)
-        else:
-            # Default configuration
-            return {
-                'label_names': ['ADAPTER5', 'UMI', 'ACC', 'BARCODE', 'INSERT', 'ADAPTER3', 'PAD'],
-                'length_constraints': {
-                    'UMI': (8, 8),
-                    'ACC': (6, 6),
-                    'BARCODE': (16, 16)
-                },
-                'model': {
-                    'max_seq_len': 512,
-                    'num_labels': 7,
-                    'vocab_size': 5
-                }
+        # Default configuration
+        return {
+            'label_names': ['p7', 'i7', 'RP2', 'UMI', 'ACC', 'cDNA', 'polyA', 'CBC', 'RP1', 'i5', 'p5', 'PAD'],
+            'length_constraints': {
+                'UMI': (8, 8),
+                'ACC': (6, 6),
+                'CBC': (16, 16)
+            },
+            'model': {
+                'max_seq_len': 512,
+                'num_labels': 12,
+                'vocab_size': 5
             }
-    
+        }
+
     def setup_evaluation_params(self):
-        """Setup evaluation parameters from config."""
+        """Set up evaluation parameters from configuration."""
         self.label_names = self.config['label_names']
         self.length_constraints = self.config.get('length_constraints', {})
         self.max_seq_len = self.config['model']['max_seq_len']
         self.num_labels = self.config['model']['num_labels']
-        
-        # Initialize label binarizer
-        self.label_binarizer = LabelBinarizer()
-        self.label_binarizer.fit(self.label_names)
-        
-    def load_models(self, models_dir: str) -> Dict:
+        self.label_binarizer = LabelBinarizer().fit(self.label_names)
+
+    def load_test_data(self, data_path: str, format: str = "auto"):
         """
-        Load all trained models from directory.
+        Wrapper around Tempest's unified data loader.
         
         Args:
-            models_dir: Directory containing trained models
+            data_path: Path to test data
+            format: Data format (auto, pickle, npz, fastq, etc.)
             
         Returns:
-            Dictionary mapping model_name -> (model, decoder, type)
+            Loaded test dataset
         """
+        return load_data(data_path, format)
+
+    def evaluate(self, test_dataset: Union[Dict, np.ndarray, List], 
+                 batch_size: int = 32, 
+                 metrics: Optional[List[str]] = None, 
+                 per_segment: bool = False) -> Dict[str, Any]:
+        """
+        Simplified single-model evaluation entry point for CLI.
+        
+        Args:
+            test_dataset: Test data (various formats supported)
+            batch_size: Batch size for prediction
+            metrics: Specific metrics to compute
+            per_segment: Whether to compute per-segment metrics
+            
+        Returns:
+            Dictionary containing evaluation results
+        """
+        if not self.model_path or not Path(self.model_path).exists():
+            raise FileNotFoundError(f"Model path not found: {self.model_path}")
+
+        # Load model
+        model = keras.models.load_model(self.model_path, compile=False)
+
+        # Prepare input data
+        X_test, y_test = self._prepare_test_data(test_dataset)
+
+        # Predict using batch predictor
+        y_pred = self.predict_batch(X_test, batch_size=batch_size)
+
+        # Compute metrics
+        results = self._compute_metrics(y_test, y_pred, metrics)
+
+        # Add per-segment metrics if requested
+        if per_segment:
+            results['per_segment'] = self._compute_segment_metrics(y_test, y_pred)
+
+        return results
+
+    def predict_batch(self, sequences: np.ndarray, batch_size: int = 32) -> np.ndarray:
+        """
+        Predict a batch of sequences using Tempest's inference utilities.
+        
+        Args:
+            sequences: Input sequences
+            batch_size: Batch size for prediction
+            
+        Returns:
+            Predictions array
+        """
+        if not self.model_path or not Path(self.model_path).exists():
+            raise FileNotFoundError(f"Model path not found: {self.model_path}")
+        
+        model = keras.models.load_model(self.model_path, compile=False)
+        return predict_sequences(model, sequences, batch_size=batch_size)
+
+    def _prepare_test_data(self, test_dataset: Union[Dict, np.ndarray, List]) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """
+        Prepare test data from various input formats.
+        
+        Args:
+            test_dataset: Input test data in various formats
+            
+        Returns:
+            Tuple of (X_test, y_test) where y_test may be None
+        """
+        # Handle dictionary format
+        if isinstance(test_dataset, dict):
+            X_test = test_dataset.get('X_test', test_dataset.get('sequences'))
+            y_test = test_dataset.get('y_test', test_dataset.get('labels'))
+            
+        # Handle list of dictionaries format
+        elif isinstance(test_dataset, list) and test_dataset and isinstance(test_dataset[0], dict):
+            X_test = np.array([x['sequence'] for x in test_dataset])
+            y_test = np.array([x.get('labels') for x in test_dataset]) if 'labels' in test_dataset[0] else None
+            
+        # Handle numpy array format
+        elif isinstance(test_dataset, np.ndarray):
+            X_test = test_dataset
+            y_test = None
+            
+        # Handle tuple format (X, y)
+        elif isinstance(test_dataset, tuple) and len(test_dataset) == 2:
+            X_test, y_test = test_dataset
+            
+        else:
+            raise ValueError(f"Unsupported test dataset format: {type(test_dataset)}")
+        
+        return X_test, y_test
+
+    def _compute_metrics(self, y_true: Optional[np.ndarray], 
+                        y_pred: np.ndarray, 
+                        metrics: Optional[List[str]] = None) -> Dict[str, float]:
+        """
+        Compute evaluation metrics.
+        
+        Args:
+            y_true: True labels (may be None)
+            y_pred: Predicted labels
+            metrics: Specific metrics to compute
+            
+        Returns:
+            Dictionary of computed metrics
+        """
+        results = {}
+        
+        if y_true is None:
+            logger.warning("No ground truth labels provided - skipping metrics computation")
+            return {'predictions_shape': y_pred.shape}
+        
+        # Flatten arrays for metrics computation
+        mask = y_true > 0  # Ignore padding
+        y_true_flat = y_true[mask]
+        y_pred_flat = y_pred[mask] if len(y_pred.shape) == len(y_true.shape) else y_pred.flatten()
+        
+        # Default metrics
+        if metrics is None:
+            metrics = ['accuracy', 'f1_score', 'precision', 'recall']
+        
+        # Compute requested metrics
+        if 'accuracy' in metrics:
+            results['accuracy'] = accuracy_score(y_true_flat, y_pred_flat)
+        
+        if 'f1_score' in metrics:
+            results['f1_score'] = f1_score(y_true_flat, y_pred_flat, average='weighted', zero_division=0)
+        
+        if 'precision' in metrics:
+            results['precision'] = precision_score(y_true_flat, y_pred_flat, average='weighted', zero_division=0)
+        
+        if 'recall' in metrics:
+            results['recall'] = recall_score(y_true_flat, y_pred_flat, average='weighted', zero_division=0)
+        
+        return results
+
+    def _compute_segment_metrics(self, y_true: Optional[np.ndarray], 
+                                 y_pred: np.ndarray) -> Dict[str, float]:
+        """
+        Compute per-segment accuracy metrics.
+        
+        Args:
+            y_true: True labels
+            y_pred: Predicted labels
+            
+        Returns:
+            Dictionary with per-segment accuracies
+        """
+        if y_true is None:
+            return {}
+        
+        segment_metrics = {}
+        
+        for i, label_name in enumerate(self.label_names):
+            if label_name == 'PAD':
+                continue
+            
+            # Find positions with this label
+            mask = y_true == i
+            if np.any(mask):
+                segment_acc = accuracy_score(y_true[mask], y_pred[mask])
+                segment_metrics[label_name] = segment_acc
+        
+        return segment_metrics
+
+    def load_models(self, models_dir: str) -> Dict:
+        """Load multiple models from a directory for comparison."""
         models_dir = Path(models_dir)
         models = {}
         
-        # Load standard model
+        # Standard model
         standard_path = models_dir / 'standard_model.h5'
         if standard_path.exists():
             logger.info(f"Loading standard model from {standard_path}")
@@ -98,7 +259,7 @@ class ModelEvaluator:
             decoder = self._create_standard_decoder(model)
             models['Standard'] = (model, decoder, 'standard')
         
-        # Load soft constraint model
+        # Soft constraint model
         soft_path = models_dir / 'soft_constraint_model.h5'
         if soft_path.exists():
             logger.info(f"Loading soft constraint model from {soft_path}")
@@ -111,7 +272,7 @@ class ModelEvaluator:
             )
             models['Soft Constraints'] = (model, decoder, 'soft_constraint')
         
-        # Load hard constraint model
+        # Hard constraint model
         hard_path = models_dir / 'hard_constraint_model.h5'
         if hard_path.exists():
             logger.info(f"Loading hard constraint model from {hard_path}")
@@ -124,7 +285,7 @@ class ModelEvaluator:
             )
             models['Hard Constraints'] = (model, decoder, 'hard_constraint')
         
-        # Load hybrid model
+        # Hybrid model
         hybrid_path = models_dir / 'hybrid_model.h5'
         if hybrid_path.exists():
             logger.info(f"Loading hybrid model from {hybrid_path}")
@@ -137,16 +298,17 @@ class ModelEvaluator:
             )
             models['Hybrid'] = (model, decoder, 'hybrid')
         
-        # Load ensemble models
+        # Ensemble models
         ensemble_path = models_dir / 'ensemble'
         if ensemble_path.exists():
             logger.info(f"Loading ensemble models from {ensemble_path}")
             ensemble_model = self._load_ensemble_models(ensemble_path)
-            models['Ensemble'] = (ensemble_model, ensemble_model, 'ensemble')
+            if ensemble_model:
+                models['Ensemble'] = (ensemble_model, ensemble_model, 'ensemble')
         
         logger.info(f"Loaded {len(models)} models")
         return models
-    
+
     def _create_standard_decoder(self, model):
         """Create a standard decoder wrapper for consistency."""
         class StandardDecoder:
@@ -160,17 +322,17 @@ class ModelEvaluator:
                 return predictions
         
         return StandardDecoder(model)
-    
+
     def _load_ensemble_models(self, ensemble_dir):
-        """Load and wrap ensemble models."""
+        """Load ensemble models from directory."""
         class EnsembleModel:
             def __init__(self, models):
                 self.models = models
             
             def decode(self, X):
                 predictions = []
-                for model in self.models:
-                    pred = model.predict(X)
+                for m in self.models:
+                    pred = m.predict(X)
                     if len(pred.shape) == 3:
                         pred = np.argmax(pred, axis=-1)
                     predictions.append(pred)
@@ -179,25 +341,7 @@ class ModelEvaluator:
                 stacked = np.stack(predictions)
                 from scipy import stats
                 return stats.mode(stacked, axis=0)[0].squeeze()
-            
-            def get_model_predictions(self, X):
-                predictions = []
-                for model in self.models:
-                    pred = model.predict(X)
-                    if len(pred.shape) == 3:
-                        pred = np.argmax(pred, axis=-1)
-                    predictions.append(pred)
-                return predictions
-            
-            def get_prediction_uncertainty(self, X):
-                predictions = self.get_model_predictions(X)
-                stacked = np.stack(predictions)
-                # Calculate entropy as uncertainty
-                from scipy import stats
-                entropy = stats.entropy(stacked, axis=0)
-                return entropy
         
-        # Load individual ensemble members
         models = []
         for model_file in sorted(ensemble_dir.glob('model_*.h5')):
             logger.info(f"  Loading ensemble member: {model_file.name}")
@@ -205,365 +349,153 @@ class ModelEvaluator:
             models.append(model)
         
         return EnsembleModel(models) if models else None
-    
+
     def evaluate_all_models(self, models: Dict, X_test: np.ndarray, 
-                           y_test: np.ndarray) -> ModelEvaluationFramework:
+                           y_test: Optional[np.ndarray] = None) -> ModelEvaluationFramework:
         """
-        Evaluate all loaded models.
+        Evaluate all loaded models using the evaluation framework.
         
         Args:
             models: Dictionary of loaded models
             X_test: Test sequences
-            y_test: Test labels
+            y_test: Test labels (optional)
             
         Returns:
-            Evaluation framework with results
+            ModelEvaluationFramework with results
         """
-        # Initialize evaluation framework
-        evaluator = ModelEvaluationFramework(
+        framework = ModelEvaluationFramework(
             label_names=self.label_names,
             length_constraints=self.length_constraints
         )
         
-        # Evaluate each model
         for model_name, (model, decoder, model_type) in models.items():
-            logger.info(f"\nEvaluating {model_name}...")
-            
-            # Wrap decoder for consistent interface
-            class DecoderWrapper:
-                def __init__(self, decoder):
-                    self.decoder = decoder
-                
-                def decode(self, X):
-                    return self.decoder.decode(X)
-                
-                def predict(self, X):
-                    return self.decoder.decode(X)
-            
-            wrapped_model = DecoderWrapper(decoder)
-            
-            # Evaluate
-            evaluator.evaluate_model(
+            logger.info(f"Evaluating {model_name}...")
+            framework.evaluate_model(
                 model_name=model_name,
-                model=wrapped_model,
+                model=decoder,
                 X_test=X_test,
                 y_test=y_test,
                 model_type=model_type
             )
         
-        return evaluator
-    
-    def generate_detailed_comparison(self, evaluator: ModelEvaluationFramework, 
-                                    output_dir: str = './evaluation_results'):
+        return framework
+
+    def generate_detailed_comparison(self, framework: ModelEvaluationFramework, 
+                                    output_dir: str):
         """
         Generate detailed comparison reports and visualizations.
         
         Args:
-            evaluator: Evaluation framework with results
+            framework: Evaluation framework with results
             output_dir: Directory to save outputs
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        # 1. Generate comparison table
-        comparison_df = evaluator.compare_models()
-        comparison_df.to_csv(output_dir / 'model_comparison.csv', index=False)
-        logger.info(f"Comparison table saved to {output_dir / 'model_comparison.csv'}")
+        # Generate and save report
+        report = framework.generate_report()
         
-        # 2. Generate detailed report
-        report = evaluator.generate_report(str(output_dir / 'evaluation_report.json'))
+        # Save JSON report
+        json_path = output_dir / 'comparison_report.json'
+        with open(json_path, 'w') as f:
+            json.dump(report, f, indent=2, default=str)
+        logger.info(f"Saved JSON report to {json_path}")
         
-        # 3. Create comprehensive visualization
-        self._create_comprehensive_plots(evaluator, output_dir)
+        # Save CSV summary
+        if hasattr(framework, 'results_df') and framework.results_df is not None:
+            csv_path = output_dir / 'comparison_summary.csv'
+            framework.results_df.to_csv(csv_path, index=False)
+            logger.info(f"Saved CSV summary to {csv_path}")
         
-        # 4. Generate markdown report
-        self._generate_markdown_report(evaluator, output_dir)
-        
-        logger.info(f"All evaluation results saved to {output_dir}")
-    
-    def _create_comprehensive_plots(self, evaluator: ModelEvaluationFramework, 
+        # Generate visualizations
+        self._generate_comparison_plots(framework, output_dir)
+
+    def _generate_comparison_plots(self, framework: ModelEvaluationFramework, 
                                    output_dir: Path):
-        """Create comprehensive visualization plots."""
-        fig = plt.figure(figsize=(20, 12))
-        
-        # 1. Overall metrics comparison
-        ax1 = plt.subplot(2, 3, 1)
-        df = evaluator.compare_models()
-        metrics = ['Accuracy', 'F1']
-        x = np.arange(len(df))
-        width = 0.35
-        
-        for i, metric in enumerate(metrics):
-            ax1.bar(x + i*width, df[metric], width, label=metric)
-        
-        ax1.set_xlabel('Model')
-        ax1.set_xticks(x + width/2)
-        ax1.set_xticklabels(df['Model'], rotation=45, ha='right')
-        ax1.set_ylabel('Score')
-        ax1.set_title('Performance Metrics')
-        ax1.legend()
-        ax1.grid(axis='y', alpha=0.3)
-        
-        # 2. Constraint satisfaction
-        ax2 = plt.subplot(2, 3, 2)
-        if 'Constraint Sat.' in df.columns:
-            ax2.bar(range(len(df)), df['Constraint Sat.'])
-            ax2.set_xticks(range(len(df)))
-            ax2.set_xticklabels(df['Model'], rotation=45, ha='right')
-            ax2.set_ylabel('Satisfaction Rate')
-            ax2.set_title('Constraint Satisfaction')
-            ax2.axhline(y=1.0, color='r', linestyle='--', alpha=0.5)
-            ax2.grid(axis='y', alpha=0.3)
-        
-        # 3. Robustness comparison
-        ax3 = plt.subplot(2, 3, 3)
-        if 'Robustness' in df.columns:
-            ax3.bar(range(len(df)), df['Robustness'])
-            ax3.set_xticks(range(len(df)))
-            ax3.set_xticklabels(df['Model'], rotation=45, ha='right')
-            ax3.set_ylabel('Robustness Score')
-            ax3.set_title('Model Robustness')
-            ax3.grid(axis='y', alpha=0.3)
-        
-        # 4. Inference time
-        ax4 = plt.subplot(2, 3, 4)
-        ax4.bar(range(len(df)), df['Inference (ms)'])
-        ax4.set_xticks(range(len(df)))
-        ax4.set_xticklabels(df['Model'], rotation=45, ha='right')
-        ax4.set_ylabel('Time (ms)')
-        ax4.set_title('Inference Speed')
-        ax4.grid(axis='y', alpha=0.3)
-        
-        # 5. Radar chart for multi-metric comparison
-        ax5 = plt.subplot(2, 3, 5, projection='polar')
-        
-        # Normalize metrics to 0-1 scale for radar chart
-        metrics_for_radar = ['Accuracy', 'F1']
-        if 'Constraint Sat.' in df.columns:
-            metrics_for_radar.append('Constraint Sat.')
-        if 'Robustness' in df.columns:
-            metrics_for_radar.append('Robustness')
-        
-        angles = np.linspace(0, 2*np.pi, len(metrics_for_radar), endpoint=False)
-        angles = np.concatenate((angles, [angles[0]]))
-        
-        for idx, row in df.iterrows():
-            values = [row[m] for m in metrics_for_radar]
-            values += [values[0]]
-            ax5.plot(angles, values, 'o-', linewidth=2, label=row['Model'])
-        
-        ax5.set_xticks(angles[:-1])
-        ax5.set_xticklabels(metrics_for_radar)
-        ax5.set_ylim(0, 1.1)
-        ax5.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
-        ax5.set_title('Multi-Metric Comparison')
-        ax5.grid(True)
-        
-        # 6. Performance vs Efficiency trade-off
-        ax6 = plt.subplot(2, 3, 6)
-        ax6.scatter(df['Inference (ms)'], df['F1'], s=100)
-        for idx, row in df.iterrows():
-            ax6.annotate(row['Model'], (row['Inference (ms)'], row['F1']),
-                        xytext=(5, 5), textcoords='offset points')
-        ax6.set_xlabel('Inference Time (ms)')
-        ax6.set_ylabel('F1 Score')
-        ax6.set_title('Performance vs Efficiency Trade-off')
-        ax6.grid(True, alpha=0.3)
-        
-        plt.suptitle('Comprehensive Model Evaluation', fontsize=16, fontweight='bold')
-        plt.tight_layout()
-        
-        plt.savefig(output_dir / 'comprehensive_evaluation.png', dpi=150, bbox_inches='tight')
-        logger.info(f"Comprehensive plot saved to {output_dir / 'comprehensive_evaluation.png'}")
-        plt.close()
-    
-    def _generate_markdown_report(self, evaluator: ModelEvaluationFramework, 
-                                 output_dir: Path):
-        """Generate a markdown report summarizing results."""
-        df = evaluator.compare_models()
-        report = evaluator.generate_report()
-        
-        markdown_content = f"""# Tempest Model Evaluation Report
-
-## Executive Summary
-
-Evaluated {len(df)} models on sequence annotation task with length constraints.
-
-### Best Models by Metric:
-"""
-        
-        # Add recommendations
-        for key, value in report['recommendations'].items():
-            markdown_content += f"- **{key.replace('_', ' ').title()}**: {value['model']} ({value['reason']})\n"
-        
-        markdown_content += f"""
-
-## Model Comparison Table
-
-{df.to_markdown(index=False)}
-
-## Detailed Analysis
-
-### 1. Performance Metrics
-
-The evaluation considered multiple performance dimensions:
-- **Accuracy**: Overall correctness of predictions
-- **F1 Score**: Balanced measure of precision and recall
-- **Constraint Satisfaction**: Adherence to specified length constraints
-- **Robustness**: Performance degradation under various error conditions
-- **Inference Speed**: Computational efficiency
-
-### 2. Model Types Evaluated
-
-1. **Standard Model**: Baseline CNN-BiLSTM-CRF without constraints
-2. **Soft Constraints**: Length regularization during training
-3. **Hard Constraints**: Enforcement during inference
-4. **Hybrid**: Combination of soft training and hard inference
-5. **Ensemble**: Multiple models with voting/averaging
-
-### 3. Key Findings
-
-"""
-        
-        # Add key findings based on results
-        best_f1_model = df.loc[df['F1'].idxmax()]
-        markdown_content += f"- Best overall performance: **{best_f1_model['Model']}** (F1: {best_f1_model['F1']:.4f})\n"
-        
-        if 'Constraint Sat.' in df.columns:
-            best_constraint = df.loc[df['Constraint Sat.'].idxmax()]
-            markdown_content += f"- Best constraint satisfaction: **{best_constraint['Model']}** ({best_constraint['Constraint Sat.']:.4f})\n"
-        
-        fastest = df.loc[df['Inference (ms)'].idxmin()]
-        markdown_content += f"- Fastest inference: **{fastest['Model']}** ({fastest['Inference (ms)']:.2f} ms)\n"
-        
-        markdown_content += """
-
-### 4. Recommendations
-
-Based on the evaluation results:
-
-"""
-        
-        # Add use-case specific recommendations
-        if 'Constraint Sat.' in df.columns:
-            constraint_models = df[df['Constraint Sat.'] > 0.95]
-            if not constraint_models.empty:
-                best_constrained = constraint_models.loc[constraint_models['F1'].idxmax()]
-                markdown_content += f"""
-**For applications requiring strict length constraints:**
-- Use **{best_constrained['Model']}** model
-- Achieves {best_constrained['Constraint Sat.']:.1%} constraint satisfaction
-- Maintains {best_constrained['F1']:.4f} F1 score
-"""
-        
-        # Speed-critical applications
-        speed_threshold = df['Inference (ms)'].quantile(0.25)
-        fast_models = df[df['Inference (ms)'] <= speed_threshold]
-        if not fast_models.empty:
-            best_fast = fast_models.loc[fast_models['F1'].idxmax()]
-            markdown_content += f"""
-**For real-time/high-throughput applications:**
-- Use **{best_fast['Model']}** model
-- Inference time: {best_fast['Inference (ms)']:.2f} ms
-- F1 score: {best_fast['F1']:.4f}
-"""
-        
-        markdown_content += """
-
-### 5. Model Selection Guide
-
-| Use Case | Recommended Model | Reason |
-|----------|------------------|---------|
-"""
-        
-        # Add selection guide
-        use_cases = {
-            "High accuracy required": df.loc[df['F1'].idxmax()]['Model'],
-            "Strict constraints": df.loc[df.get('Constraint Sat.', pd.Series()).idxmax()]['Model'] if 'Constraint Sat.' in df.columns else 'N/A',
-            "Real-time processing": df.loc[df['Inference (ms)'].idxmin()]['Model'],
-            "Robust to errors": df.loc[df.get('Robustness', pd.Series()).idxmax()]['Model'] if 'Robustness' in df.columns else 'N/A'
-        }
-        
-        for use_case, model in use_cases.items():
-            if model != 'N/A':
-                model_data = df[df['Model'] == model].iloc[0]
-                reason = f"F1: {model_data['F1']:.3f}"
-                if use_case == "Real-time processing":
-                    reason = f"Time: {model_data['Inference (ms)']:.1f}ms"
-                elif use_case == "Strict constraints" and 'Constraint Sat.' in model_data:
-                    reason = f"Satisfaction: {model_data['Constraint Sat.']:.1%}"
-                markdown_content += f"| {use_case} | {model} | {reason} |\n"
-        
-        markdown_content += """
-
-## Conclusion
-
-The evaluation demonstrates clear trade-offs between different modeling approaches:
-- Standard models offer baseline performance
-- Constraint-aware models improve adherence to specifications
-- Hybrid approaches balance multiple objectives
-- Ensemble methods may provide improved robustness
-
-Select the appropriate model based on your specific requirements for accuracy, 
-constraint satisfaction, robustness, and computational efficiency.
-
----
-*Generated by Tempest Model Evaluation Framework*
-"""
-        
-        # Save markdown report
-        report_path = output_dir / 'evaluation_report.md'
-        with open(report_path, 'w') as f:
-            f.write(markdown_content)
-        
-        logger.info(f"Markdown report saved to {report_path}")
+        """Generate comparison visualizations."""
+        try:
+            # Performance comparison bar chart
+            if hasattr(framework, 'results_df') and framework.results_df is not None:
+                df = framework.results_df
+                
+                fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+                
+                # Accuracy comparison
+                ax = axes[0, 0]
+                df.plot(x='model', y='accuracy', kind='bar', ax=ax, legend=False)
+                ax.set_title('Model Accuracy Comparison')
+                ax.set_ylabel('Accuracy')
+                ax.set_xlabel('Model')
+                ax.set_ylim([0, 1])
+                
+                # F1 Score comparison
+                ax = axes[0, 1]
+                df.plot(x='model', y='f1_score', kind='bar', ax=ax, legend=False, color='orange')
+                ax.set_title('F1 Score Comparison')
+                ax.set_ylabel('F1 Score')
+                ax.set_xlabel('Model')
+                ax.set_ylim([0, 1])
+                
+                # Precision comparison
+                ax = axes[1, 0]
+                df.plot(x='model', y='precision', kind='bar', ax=ax, legend=False, color='green')
+                ax.set_title('Precision Comparison')
+                ax.set_ylabel('Precision')
+                ax.set_xlabel('Model')
+                ax.set_ylim([0, 1])
+                
+                # Recall comparison
+                ax = axes[1, 1]
+                df.plot(x='model', y='recall', kind='bar', ax=ax, legend=False, color='red')
+                ax.set_title('Recall Comparison')
+                ax.set_ylabel('Recall')
+                ax.set_xlabel('Model')
+                ax.set_ylim([0, 1])
+                
+                plt.tight_layout()
+                plot_path = output_dir / 'model_comparison.png'
+                plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+                plt.close()
+                logger.info(f"Saved comparison plot to {plot_path}")
+                
+        except Exception as e:
+            logger.warning(f"Could not generate comparison plots: {e}")
 
 
 def compare_models(models_dir: str, test_data_path: str, 
-                  config_path: Optional[str] = None,
-                  output_dir: str = './evaluation_results') -> ModelEvaluationFramework:
+                   config_path: Optional[str] = None, 
+                   output_dir: str = './evaluation_results') -> ModelEvaluationFramework:
     """
-    Main function to compare Tempest models.
+    Main function to compare multiple models.
     
     Args:
-        models_dir: Directory containing trained models
-        test_data_path: Path to test data (pickled X_test, y_test)
-        config_path: Path to Tempest config file (optional)
-        output_dir: Directory for evaluation outputs
+        models_dir: Directory containing models
+        test_data_path: Path to test data
+        config_path: Configuration file path
+        output_dir: Output directory for results
         
     Returns:
-        ModelEvaluationFramework with results
+        ModelEvaluationFramework with comparison results
     """
-    logger = logging.getLogger(__name__)
-    
-    # Initialize evaluator
     logger.info("Initializing evaluator...")
     evaluator = ModelEvaluator(config_path=config_path)
     
-    # Load models
     logger.info(f"Loading models from {models_dir}...")
     models = evaluator.load_models(models_dir)
-    
     if not models:
         raise ValueError(f"No models found in {models_dir}")
     
-    # Load test data
     logger.info(f"Loading test data from {test_data_path}...")
-    with open(test_data_path, 'rb') as f:
-        test_data = pickle.load(f)
-        X_test = test_data['X_test']
-        y_test = test_data['y_test']
+    test_data = load_data(test_data_path)
     
-    logger.info(f"Test data shape: X={X_test.shape}, y={y_test.shape}")
+    # Prepare test data
+    X_test, y_test = evaluator._prepare_test_data(test_data)
     
-    # Evaluate models
-    logger.info("Starting model evaluation...")
+    # Evaluate all models
     framework = evaluator.evaluate_all_models(models, X_test, y_test)
     
-    # Generate comprehensive comparison
-    logger.info("Generating comparison reports...")
+    # Generate detailed comparison
     evaluator.generate_detailed_comparison(framework, output_dir)
     
     logger.info(f"Evaluation complete. Results saved to: {output_dir}")
-    
     return framework
