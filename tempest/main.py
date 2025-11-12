@@ -10,7 +10,8 @@ commands such as:
     tempest train hybrid
     tempest train ensemble
 """
-
+from tempest.utils import suppress_tensorflow_logging
+suppress_tensorflow_logging()
 from pathlib import Path
 from typing import Optional, Union, Dict, Any, List
 import logging
@@ -18,8 +19,6 @@ import pickle
 import gzip
 
 from tempest.config import TempestConfig, load_config as config_load_config
-from tempest.utils import suppress_tensorflow_logging
-suppress_tensorflow_logging()
 
 logger = logging.getLogger(__name__)
 
