@@ -476,19 +476,24 @@ class TempestConfig:
         with open(output_path, 'w') as f:
             json.dump(config_dict, f, indent=2)
     
-    def _to_dict(self):
-        """Convert configuration to dictionary."""
+    def _to_dict(self) -> Dict[str, Any]:
+        """
+        Convert the TempestConfig (and all nested dataclasses) to pure dictionaries.
+        Ensures nested dataclasses are flattened recursively.
+        """
+        from dataclasses import asdict, is_dataclass
+
         def convert_obj(obj):
-            """Recursively convert dataclasses and tuples."""
-            if hasattr(obj, '__dataclass_fields__'):
+            """Recursively convert dataclasses, lists, tuples, and dicts to plain Python types."""
+            if is_dataclass(obj):
                 return {k: convert_obj(v) for k, v in asdict(obj).items()}
             elif isinstance(obj, dict):
                 return {k: convert_obj(v) for k, v in obj.items()}
             elif isinstance(obj, (list, tuple)):
-                return [convert_obj(item) for item in obj]
+                return [convert_obj(i) for i in obj]
             else:
                 return obj
-        
+
         return convert_obj(self)
 
 

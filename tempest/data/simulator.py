@@ -15,7 +15,11 @@ from pathlib import Path
 import yaml
 import sys
 
+# import the TempestConfig
+from tempest.config import TempestConfig
+
 # Conditional import for PWM generator
+# TODO: remove this conditional import and assume it's always there
 try:
     from tempest.core.pwm_probabilistic import (
         ProbabilisticPWMGenerator,
@@ -1269,21 +1273,25 @@ class SequenceSimulator:
 
 def create_simulator_from_config(config_source) -> SequenceSimulator:
     """
-    Create a SequenceSimulator instance from either a config file path,
-    TempestConfig object, or a dictionary.
+    Convenience factory for SequenceSimulator from file, dict, or TempestConfig.
     """
+    from tempest.config import TempestConfig
+
     if isinstance(config_source, TempestConfig):
-        # Convert to dictionary for SequenceSimulator
-        return SequenceSimulator(config=config_source._to_dict())
+        # Use TempestConfig's own recursive dict converter
+        cfg_dict = config_source._to_dict()
+        return SequenceSimulator(config=cfg_dict)
+
     elif isinstance(config_source, (str, bytes, Path)):
-        # Treat as file path
         return SequenceSimulator(config_file=str(config_source))
+
     elif isinstance(config_source, dict):
         return SequenceSimulator(config=config_source)
+
     else:
         raise TypeError(
-            f"Unsupported config source type: {type(config_source)} "
-            "(expected TempestConfig, dict, or path string)"
+            f"Unsupported config source type: {type(config_source)}. "
+            "Expected TempestConfig, dict, or path string."
         )
 
 
