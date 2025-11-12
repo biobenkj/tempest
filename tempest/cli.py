@@ -33,9 +33,7 @@ app = typer.Typer(
 
 # Import sub-applications
 from tempest.simulate import simulate_app
-from tempest.train import train_app
 from tempest.evaluate import evaluate_app
-from tempest.compare import compare_app
 from tempest.combine import combine_app
 from tempest.demux import demux_app
 from tempest.visualize import visualize_app
