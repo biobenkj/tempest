@@ -9,8 +9,8 @@ import json
 from rich.console import Console
 from rich.table import Table
 
-from tempest.compare.evaluate import ModelEvaluator
-from tempest.utils import load_config
+from tempest.compare.evaluator import ModelEvaluator
+from tempest.main import load_config
 
 # Create the evaluate sub-application
 evaluate_app = typer.Typer(help="Evaluate trained Tempest models")
@@ -379,3 +379,6 @@ def _generate_comparison_plots(results: dict):
     plt.tight_layout()
     plt.savefig('model_comparison.png')
     plt.close()
+
+if __name__ == "__main__":
+    evaluate_app()

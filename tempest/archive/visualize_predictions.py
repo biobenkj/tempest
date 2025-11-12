@@ -12,33 +12,12 @@ import argparse
 import logging
 from pathlib import Path
 import numpy as np
-
-# TensorFlow import (optional - only needed if loading models directly)
-try:
-    import tensorflow as tf
-    _HAS_TF = True
-except ImportError:
-    _HAS_TF = False
-
-# Add parent directory to path for standalone execution
-if __name__ == "__main__":
-    sys.path.insert(0, str(Path(__file__).parent.parent))
+import tensorflow as tf
 
 # Import from Tempest modules
 from tempest.core import build_model_from_config
-from tempest.inference.inference_utils import encode_sequences  # Import from utils, not __init__
-
-# Optional imports with graceful fallback
-try:
-    from tempest.visualization import TempestVisualizer
-    _HAS_VISUALIZER = True
-except ImportError:
-    _HAS_VISUALIZER = False
-    TempestVisualizer = None
-
-# Note: These imports may not exist yet - comment out if they cause issues
-# from tempest.data import DataGenerator, SequenceEncoder
-# from tempest.utils import load_model_weights
+from tempest.inference.inference_utils import encode_sequences
+from tempest.visualization import TempestVisualizer
 
 # Configure logging
 logging.basicConfig(
@@ -67,13 +46,6 @@ class TempestInferenceVisualizer:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Check TensorFlow availability
-        if not _HAS_TF:
-            raise ImportError(
-                "TensorFlow is required for TempestInferenceVisualizer. "
-                "Install with: pip install tensorflow"
-            )
-        
         # Load configuration
         with open(config_path, 'r') as f:
             self.config = json.load(f)
@@ -82,19 +54,11 @@ class TempestInferenceVisualizer:
         self.model = self._build_model()
         
         # Initialize visualizer if available
-        if _HAS_VISUALIZER and TempestVisualizer is not None:
-            self.visualizer = TempestVisualizer(
+        self.visualizer = TempestVisualizer(
                 label_names=self.config.get('label_names', self._default_labels()),
                 output_dir=str(self.output_dir / "visualizations")
             )
-            self._has_visualizer = True
-        else:
-            logger.warning(
-                "TempestVisualizer not available. Visualization features will be disabled. "
-                "Ensure tempest.visualization module is properly installed."
-            )
-            self.visualizer = None
-            self._has_visualizer = False
+        self._has_visualizer = True
         
         logger.info(f"Initialized TempestInferenceVisualizer")
         logger.info(f"  Config: {config_path}")

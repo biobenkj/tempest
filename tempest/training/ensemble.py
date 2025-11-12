@@ -130,16 +130,45 @@ class EnsembleTrainer:
         if hasattr(config, 'ensemble') and config.ensemble:
             ensemble_config = config.ensemble
         
-            # BMA configuration
+            # BMA configuration - support both old and new formats
             self.bma_prior = getattr(ensemble_config, 'bma_prior', 'performance')
             self.bma_temperature = getattr(ensemble_config, 'bma_temperature', 1.0)
         
-            # Get BMA config details
-            if hasattr(ensemble_config, 'bma_config'):
-                self.bma_method = ensemble_config.bma_config.get('method', 'validation_accuracy')
-                self.min_weight = ensemble_config.bma_config.get('min_weight', 0.01)
-                self.type_bonus = ensemble_config.bma_config.get('type_bonus', {})
+            # Get BMA config details - handle both dict and dataclass
+            if hasattr(ensemble_config, 'bma_config') and ensemble_config.bma_config is not None:
+                bma_cfg = ensemble_config.bma_config
+                
+                # Check if it's a dataclass (new format) or dict (old format)
+                if hasattr(bma_cfg, '__dataclass_fields__'):
+                    # New format: BMAConfig dataclass
+                    # Note: The new BMAConfig doesn't have 'method', it's for ModelCombiner inference
+                    # For training, we just need min_weight and type_bonus
+                    self.bma_method = 'validation_accuracy'  # Default for training
+                    self.min_weight = getattr(bma_cfg, 'min_posterior_weight', 0.01)
+                    
+                    # type_bonus is in weighted_average_config, not bma_config
+                    if hasattr(ensemble_config, 'weighted_average_config') and ensemble_config.weighted_average_config:
+                        wac = ensemble_config.weighted_average_config
+                        if isinstance(wac, dict):
+                            self.type_bonus = wac.get('type_bonus', {})
+                        else:
+                            self.type_bonus = getattr(wac, 'type_bonus', {})
+                    else:
+                        self.type_bonus = {}
+                        
+                elif isinstance(bma_cfg, dict):
+                    # Old format: dictionary
+                    self.bma_method = bma_cfg.get('method', 'validation_accuracy')
+                    self.min_weight = bma_cfg.get('min_weight', 0.01)
+                    self.type_bonus = bma_cfg.get('type_bonus', {})
+                else:
+                    # Unknown format, use defaults
+                    logger.warning("Unknown bma_config format, using defaults")
+                    self.bma_method = 'validation_accuracy'
+                    self.min_weight = 0.01
+                    self.type_bonus = {}
             else:
+                # No bma_config, use defaults
                 self.bma_method = 'validation_accuracy'
                 self.min_weight = 0.01
                 self.type_bonus = {}

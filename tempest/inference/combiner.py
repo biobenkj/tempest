@@ -70,24 +70,14 @@ class ModelCombiner:
         self.idx_to_label = None
         
     def _parse_config_dict(self, config_dict: dict) -> EnsembleConfig:
-        """Parse configuration dictionary into EnsembleConfig."""
-        ensemble_config = EnsembleConfig()
-        
-        # Parse BMA config if present
-        if 'bma_config' in config_dict:
-            bma_dict = config_dict['bma_config']
-            bma_config = BMAConfig(**{
-                k: v for k, v in bma_dict.items() 
-                if k in BMAConfig.__annotations__
-            })
-            ensemble_config.bma_config = bma_config
-        
-        # Parse other ensemble settings
-        for key, value in config_dict.items():
-            if key != 'bma_config' and hasattr(ensemble_config, key):
-                setattr(ensemble_config, key, value)
-                
-        return ensemble_config
+        """
+        Parse configuration dictionary into EnsembleConfig.
+    
+        Uses EnsembleConfig.from_dict() to properly handle nested structures
+        and legacy field conversion.
+        """
+        # Use the proper from_dict method that handles nested structures
+        return EnsembleConfig.from_dict(config_dict)
     
     def load_models(self, model_paths: Union[List[str], Dict[str, str]]):
         """

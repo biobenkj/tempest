@@ -1,14 +1,21 @@
 """
 Tempest model combination/ensemble commands using Typer.
+
+Integrates with tempest.inference.combiner.ModelCombiner for BMA and ensemble methods.
 """
 
 import typer
 from pathlib import Path
 from typing import List, Optional
 from rich.console import Console
+from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, TextColumn
+import json
+import pickle
+import numpy as np
 
 from tempest.inference.combiner import ModelCombiner
-from tempest.main import load_config
+from tempest.config import load_config, EnsembleConfig
 
 # Create the combine sub-application
 combine_app = typer.Typer(help="Combine models using BMA/ensemble methods")
@@ -16,360 +23,481 @@ combine_app = typer.Typer(help="Combine models using BMA/ensemble methods")
 console = Console()
 
 
-@combine_app.command()
-def ensemble(
+@combine_app.command(name="combine")
+def combine_models(
     model_paths: List[Path] = typer.Option(
         ...,
         "--models", "-m",
         help="Paths to models to combine (can specify multiple times)",
         exists=True
     ),
-    output: Path = typer.Option(
+    validation_data: Path = typer.Option(
         ...,
+        "--validation-data", "-v",
+        help="Validation data for computing weights (.pkl or .txt)",
+        exists=True
+    ),
+    output_dir: Path = typer.Option(
+        "./ensemble_results",
         "--output", "-o",
-        help="Output path for combined model"
-    ),
-    method: str = typer.Option(
-        "voting",
-        "--method",
-        help="Combine method",
-        callback=lambda v: v if v in ["voting", "averaging", "stacking", "bma"] 
-                          else typer.BadParameter(f"Invalid method: {v}")
-    ),
-    weights: Optional[List[float]] = typer.Option(
-        None,
-        "--weights", "-w",
-        help="Model weights (must match number of models)"
-    ),
-    validation_data: Optional[Path] = typer.Option(
-        None,
-        "--validation-data",
-        help="Validation data for weight optimization"
+        help="Output directory for ensemble results"
     ),
     config: Optional[Path] = typer.Option(
         None,
         "--config", "-c",
-        help="Configuration file for ensemble settings"
-    )
-):
-    """
-    Combine multiple models into an ensemble.
-    
-    Examples:
-        # Simple voting ensemble
-        tempest combine ensemble --models m1.h5 --models m2.h5 --models m3.h5 \\
-            --output ensemble.h5 --method voting
-        
-        # Weighted average with custom weights
-        tempest combine ensemble --models m1.h5 --models m2.h5 \\
-            --output ensemble.h5 --method averaging --weights 0.6 --weights 0.4
-        
-        # BMA ensemble with validation data for weight learning
-        tempest combine ensemble --models m1.h5 --models m2.h5 --models m3.h5 \\
-            --output ensemble.h5 --method bma --validation-data val.txt
-    """
-    console.print("[bold blue]Creating Model Ensemble[/bold blue]")
-    console.print("=" * 60)
-    console.print(f"Method: {method.upper()}")
-    console.print(f"Number of models: {len(model_paths)}")
-    
-    # Validate weights if provided
-    if weights:
-        if len(weights) != len(model_paths):
-            console.print("[red]Error: Number of weights must match number of models[/red]")
-            raise typer.Exit(1)
-        if abs(sum(weights) - 1.0) > 0.01:
-            console.print("[yellow]Warning: Weights do not sum to 1.0, normalizing...[/yellow]")
-            total = sum(weights)
-            weights = [w/total for w in weights]
-    
-    # Load configuration if provided
-    cfg = None
-    if config:
-        cfg = load_config(str(config))
-    
-    # Create ensemble builder
-    builder = ModelCombiner(
-        model_paths=[str(p) for p in model_paths],
-        config=cfg
-    )
-    
-    # Build ensemble based on method
-    if method == "voting":
-        console.print("Building voting ensemble...")
-        ensemble_model = builder.build_voting_ensemble(weights=weights)
-        
-    elif method == "averaging":
-        console.print("Building averaging ensemble...")
-        ensemble_model = builder.build_averaging_ensemble(weights=weights)
-        
-    elif method == "stacking":
-        if not validation_data:
-            console.print("[red]Error: Stacking requires validation data[/red]")
-            raise typer.Exit(1)
-        console.print("Building stacking ensemble...")
-        console.print("Training meta-learner on validation data...")
-        ensemble_model = builder.build_stacking_ensemble(
-            validation_data=str(validation_data)
-        )
-        
-    elif method == "bma":
-        console.print("Building Bayesian Model Averaging ensemble...")
-        if validation_data:
-            console.print("Learning BMA weights from validation data...")
-            ensemble_model = builder.build_bma_ensemble(
-                validation_data=str(validation_data)
-            )
-        else:
-            console.print("Using uniform BMA weights...")
-            ensemble_model = builder.build_bma_ensemble()
-    
-    # Save ensemble
-    console.print(f"Saving ensemble to: {output}")
-    builder.save_ensemble(ensemble_model, str(output))
-    
-    # Display ensemble information
-    _display_ensemble_info(method, model_paths, weights)
-    
-    console.print(f"\n[green]✓[/green] Ensemble created successfully: {output}")
-
-
-@combine_app.command()
-def optimize_weights(
-    model_paths: List[Path] = typer.Option(
-        ...,
-        "--models", "-m",
-        help="Paths to models to combine (specify multiple times)",
-        exists=True
-    ),
-    validation_data: Path = typer.Option(
-        ...,
-        "--validation-data", "-v",
-        help="Validation data for weight optimization",
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        readable=True
+        help="Configuration file with ensemble settings"
     ),
     method: str = typer.Option(
-        "grid_search",
+        "bayesian_model_averaging",
         "--method",
-        help="Optimization method",
-        callback=lambda v: v if v in ["grid_search", "random_search", "bayesian"] 
-                          else typer.BadParameter(f"Invalid method: {v}")
+        help="Combination method: bayesian_model_averaging, weighted_average, voting, stacking"
     ),
-    metric: str = typer.Option(
-        "accuracy",
-        "--metric",
-        help="Metric to optimize"
-    ),
-    n_trials: int = typer.Option(
-        100,
-        "--n-trials",
-        help="Number of optimization trials",
-        min=10,
-        max=1000
-    ),
-    output: Optional[Path] = typer.Option(
+    test_data: Optional[Path] = typer.Option(
         None,
-        "--output", "-o",
-        help="Save optimal weights to file"
+        "--test-data", "-t",
+        help="Optional test data for evaluation"
+    ),
+    calibrate: bool = typer.Option(
+        False,
+        "--calibrate",
+        help="Enable prediction calibration"
     )
 ):
     """
-    Find optimal ensemble weights using validation data.
+    Combine multiple trained models into an ensemble using BMA or other methods.
+    
+    This command implements the full Bayesian Model Averaging workflow with
+    support for multiple approximation methods (BIC, Laplace, Variational, CV).
     
     Examples:
-        # Grid search for optimal weights
-        tempest combine optimize-weights --models m1.h5 --models m2.h5 --models m3.h5 \\
-            --validation-data val.txt --method grid_search
+        # BMA with default settings (BIC approximation)
+        tempest combine combine --models m1.h5 --models m2.h5 --models m3.h5 \\
+            --validation-data val.pkl --output results/
         
-        # Bayesian optimization
-        tempest combine optimize-weights --models m1.h5 --models m2.h5 \\
-            --validation-data val.txt --method bayesian --n-trials 200
+        # BMA with config file specifying Laplace approximation
+        tempest combine combine --models model*.h5 \\
+            --validation-data val.pkl \\
+            --config config.yaml \\
+            --output ensemble_output/
+        
+        # With calibration and test evaluation
+        tempest combine combine --models m1.h5 --models m2.h5 \\
+            --validation-data val.pkl \\
+            --test-data test.pkl \\
+            --calibrate \\
+            --output results/
+        
+        # Simple weighted average
+        tempest combine combine --models m1.h5 --models m2.h5 \\
+            --validation-data val.pkl \\
+            --method weighted_average \\
+            --output results/
     """
-    console.print("[bold blue]Optimizing Ensemble Weights[/bold blue]")
-    console.print("=" * 60)
+    console.print("[bold blue]Tempest Model Combination[/bold blue]")
+    console.print("=" * 70)
     console.print(f"Method: {method}")
-    console.print(f"Metric: {metric}")
-    console.print(f"Trials: {n_trials}")
+    console.print(f"Number of models: {len(model_paths)}")
+    console.print(f"Output directory: {output_dir}")
     
-    from tempest.training.ensemble import WeightOptimizer
+    # Load configuration
+    if config:
+        console.print(f"Loading configuration from: {config}")
+        full_config = load_config(str(config))
+        ensemble_config = full_config.ensemble
+        
+        # Override method if specified in CLI
+        if method != "bayesian_model_averaging":
+            ensemble_config.voting_method = method
+    else:
+        # Create minimal config
+        console.print("No config provided, using defaults")
+        ensemble_config = EnsembleConfig(
+            voting_method=method,
+            num_models=len(model_paths)
+        )
     
-    # Create optimizer
-    optimizer = WeightOptimizer(
-        model_paths=[str(p) for p in model_paths],
-        validation_data=str(validation_data)
-    )
+    # Display ensemble configuration
+    _display_config(ensemble_config, method)
     
-    # Run optimization
-    with console.status(f"Running {method} optimization..."):
-        if method == "grid_search":
-            optimal_weights, best_score = optimizer.grid_search(
-                metric=metric,
-                n_points=n_trials
-            )
-        elif method == "random_search":
-            optimal_weights, best_score = optimizer.random_search(
-                metric=metric,
-                n_trials=n_trials
-            )
-        elif method == "bayesian":
-            optimal_weights, best_score = optimizer.bayesian_optimization(
-                metric=metric,
-                n_trials=n_trials
-            )
+    # Initialize ModelCombiner
+    console.print("\n[bold]Step 1: Initializing ModelCombiner[/bold]")
+    combiner = ModelCombiner(config=ensemble_config)
     
-    # Display results
-    console.print("\n[bold green]Optimization Complete![/bold green]")
-    console.print(f"Best {metric}: {best_score:.4f}")
-    console.print("\nOptimal weights:")
+    # Load models
+    console.print("[bold]Step 2: Loading models[/bold]")
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console
+    ) as progress:
+        task = progress.add_task("Loading models...", total=None)
+        combiner.load_models([str(p) for p in model_paths])
+        progress.update(task, completed=True)
     
-    for i, (path, weight) in enumerate(zip(model_paths, optimal_weights)):
-        console.print(f"  Model {i+1} ({path.name}): {weight:.4f}")
+    console.print(f" Loaded {len(combiner.models)} models")
     
-    # Save weights if requested
-    if output:
-        import json
-        weights_data = {
-            'method': method,
-            'metric': metric,
-            'best_score': best_score,
-            'weights': {
-                str(path): weight 
-                for path, weight in zip(model_paths, optimal_weights)
-            }
-        }
-        with open(output, 'w') as f:
-            json.dump(weights_data, f, indent=2)
-        console.print(f"\n[green]✓[/green] Weights saved to: {output}")
+    # Compute weights
+    console.print("[bold]Step 3: Computing ensemble weights[/bold]")
+    console.print(f"Using validation data: {validation_data}")
+    
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console
+    ) as progress:
+        task = progress.add_task("Computing weights...", total=None)
+        combiner.compute_weights(str(validation_data))
+        progress.update(task, completed=True)
+    
+    # Display computed weights
+    _display_weights(combiner, method)
+    
+    # Calibrate if requested
+    if calibrate:
+        console.print("\n[bold]Step 4: Calibrating predictions[/bold]")
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console
+        ) as progress:
+            task = progress.add_task("Calibrating...", total=None)
+            combiner.calibrate(str(validation_data))
+            progress.update(task, completed=True)
+        console.print(f" Calibration complete using {ensemble_config.calibration_method}")
+    
+    # Evaluate on test data if provided
+    if test_data:
+        console.print("\n[bold]Step 5: Evaluating on test data[/bold]")
+        console.print(f"Test data: {test_data}")
+        
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console
+        ) as progress:
+            task = progress.add_task("Evaluating...", total=None)
+            metrics = combiner.evaluate(str(test_data))
+            progress.update(task, completed=True)
+        
+        # Display metrics
+        _display_metrics(metrics)
+    
+    # Save results
+    console.print(f"\n[bold]Step {'6' if test_data else '5'}: Saving results[/bold]")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console
+    ) as progress:
+        task = progress.add_task("Saving ensemble...", total=None)
+        combiner.save_results(str(output_dir))
+        progress.update(task, completed=True)
+    
+    console.print(f"Results saved to: {output_dir}")
+    console.print("\n[green] Ensemble combination complete![/green]")
+    console.print("\nSaved files:")
+    console.print(f"  - {output_dir}/ensemble_weights.json - Model weights")
+    console.print(f"  - {output_dir}/ensemble_config.yaml - Configuration used")
+    console.print(f"  - {output_dir}/ensemble_metadata.json - Ensemble metadata")
+    if test_data:
+        console.print(f"  - {output_dir}/evaluation_metrics.json - Test metrics")
 
 
-@combine_app.command()
-def stack(
-    base_models: List[Path] = typer.Option(
+@combine_app.command(name="predict")
+def predict(
+    ensemble_dir: Path = typer.Option(
         ...,
-        "--base-models", "-b",
-        help="Base model paths (specify multiple times)",
+        "--ensemble", "-e",
+        help="Directory containing ensemble results",
+        exists=True,
+        dir_okay=True,
+        file_okay=False
+    ),
+    input_data: Path = typer.Option(
+        ...,
+        "--input", "-i",
+        help="Input data file (.pkl or .txt)",
         exists=True
     ),
-    meta_learner: str = typer.Option(
-        "logistic",
-        "--meta-learner",
-        help="Type of meta-learner",
-        callback=lambda v: v if v in ["logistic", "neural", "random_forest", "gradient_boost"] 
-                          else typer.BadParameter(f"Invalid meta-learner: {v}")
-    ),
-    train_data: Path = typer.Option(
-        ...,
-        "--train-data",
-        help="Training data for meta-learner",
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        readable=True
-    ),
-    validation_data: Optional[Path] = typer.Option(
-        None,
-        "--validation-data",
-        help="Validation data for meta-learner"
-    ),
     output: Path = typer.Option(
-        ...,
+        "predictions.pkl",
         "--output", "-o",
-        help="Output path for stacked model"
+        help="Output file for predictions"
     ),
-    cv_folds: int = typer.Option(
-        5,
-        "--cv-folds",
-        help="Cross-validation folds for meta-learner training",
-        min=2,
-        max=20
+    uncertainty: bool = typer.Option(
+        True,
+        "--uncertainty/--no-uncertainty",
+        help="Include uncertainty estimates"
+    ),
+    individual: bool = typer.Option(
+        False,
+        "--individual",
+        help="Include individual model predictions"
     )
 ):
     """
-    Create a stacked ensemble with a meta-learner.
-    
-    Stacking trains a meta-learner to combine base model predictions
-    optimally based on their individual strengths.
+    Make predictions using a saved ensemble.
     
     Examples:
-        # Stack with logistic regression meta-learner
-        tempest combine stack --base-models m1.h5 --base-models m2.h5 --base-models m3.h5 \\
-            --train-data train.txt --meta-learner logistic --output stacked.h5
+        # Basic prediction with uncertainty
+        tempest combine predict --ensemble results/ --input new_data.pkl --output pred.pkl
         
-        # Stack with neural network meta-learner
-        tempest combine stack --base-models m1.h5 --base-models m2.h5 \\
-            --train-data train.txt --validation-data val.txt \\
-            --meta-learner neural --output stacked.h5
+        # Include individual model predictions
+        tempest combine predict --ensemble results/ --input data.pkl \\
+            --output pred.pkl --individual
     """
-    console.print("[bold blue]Creating Stacked Ensemble[/bold blue]")
-    console.print("=" * 60)
-    console.print(f"Base models: {len(base_models)}")
-    console.print(f"Meta-learner: {meta_learner}")
-    console.print(f"CV folds: {cv_folds}")
+    console.print("[bold blue]Ensemble Prediction[/bold blue]")
+    console.print("=" * 70)
     
-    from tempest.training.ensemble import StackingEnsemble
+    # Load ensemble
+    console.print(f"Loading ensemble from: {ensemble_dir}")
     
-    # Create stacking ensemble
-    stacker = StackingEnsemble(
-        base_model_paths=[str(p) for p in base_models],
-        meta_learner_type=meta_learner
+    # Load config
+    config_path = ensemble_dir / "ensemble_config.yaml"
+    if not config_path.exists():
+        console.print("[red]Error: ensemble_config.yaml not found in ensemble directory[/red]")
+        raise typer.Exit(1)
+    
+    full_config = load_config(str(config_path))
+    combiner = ModelCombiner(config=full_config.ensemble)
+    
+    # Load models from ensemble directory
+    metadata_path = ensemble_dir / "ensemble_metadata.json"
+    if metadata_path.exists():
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+        model_paths = metadata.get('model_paths', [])
+        
+        if not model_paths:
+            console.print("[red]Error: No model paths in ensemble metadata[/red]")
+            raise typer.Exit(1)
+        
+        combiner.load_models(model_paths)
+    else:
+        console.print("[red]Error: ensemble_metadata.json not found[/red]")
+        raise typer.Exit(1)
+    
+    # Load weights
+    weights_path = ensemble_dir / "ensemble_weights.json"
+    if weights_path.exists():
+        with open(weights_path, 'r') as f:
+            weights_data = json.load(f)
+        combiner.posterior_weights = weights_data.get('posterior_weights', {})
+    
+    # Load calibrator if exists
+    calibrator_path = ensemble_dir / "calibrator.pkl"
+    if calibrator_path.exists():
+        with open(calibrator_path, 'rb') as f:
+            calib_data = pickle.load(f)
+        combiner.calibrator = calib_data.get('calibrator')
+    
+    # Load input data
+    console.print(f"Loading input data from: {input_data}")
+    
+    if input_data.suffix == '.pkl':
+        with open(input_data, 'rb') as f:
+            data = pickle.load(f)
+        if isinstance(data, tuple):
+            X_input = data[0]
+        else:
+            X_input = data
+    else:
+        # Handle text format
+        console.print("[red]Error: Text format not yet implemented, use .pkl[/red]")
+        raise typer.Exit(1)
+    
+    # Make predictions
+    console.print("Making predictions...")
+    
+    result = combiner.predict(
+        X_input,
+        return_uncertainty=uncertainty,
+        return_individual=individual,
+        apply_calibration=(calibrator_path.exists())
     )
     
-    # Train meta-learner
-    console.print("\n[bold]Phase 1:[/bold] Generating base model predictions...")
-    with console.status("Processing training data..."):
-        stacker.generate_meta_features(str(train_data))
+    # Save predictions
+    console.print(f"Saving predictions to: {output}")
+    with open(output, 'wb') as f:
+        pickle.dump(result, f)
     
-    console.print("[bold]Phase 2:[/bold] Training meta-learner...")
-    with console.status(f"Training {meta_learner} meta-learner..."):
-        if validation_data:
-            stacker.train_meta_learner(
-                cv_folds=cv_folds,
-                validation_data=str(validation_data)
-            )
-        else:
-            stacker.train_meta_learner(cv_folds=cv_folds)
+    # Display summary
+    console.print("\n[green] Predictions complete![/green]")
+    console.print(f"Predictions shape: {result['predictions'].shape}")
     
-    # Evaluate if validation data provided
-    if validation_data:
-        console.print("[bold]Phase 3:[/bold] Evaluating on validation set...")
-        val_score = stacker.evaluate(str(validation_data))
-        console.print(f"Validation accuracy: {val_score:.4f}")
-    
-    # Save stacked model
-    console.print(f"\nSaving stacked ensemble to: {output}")
-    stacker.save(str(output))
-    
-    console.print(f"\n[green]✓[/green] Stacked ensemble created successfully!")
+    if uncertainty:
+        console.print("\nUncertainty estimates:")
+        unc = result['uncertainty']
+        console.print(f"  Mean entropy: {np.mean(unc['entropy']):.4f}")
+        console.print(f"  Mean epistemic: {np.mean(unc['epistemic_uncertainty']):.4f}")
+        console.print(f"  Mean aleatoric: {np.mean(unc['aleatoric_uncertainty']):.4f}")
 
 
-def _display_ensemble_info(method: str, model_paths: List[Path], weights: Optional[List[float]]):
-    """Display ensemble information."""
-    from rich.table import Table
+@combine_app.command(name="info")
+def info(
+    ensemble_dir: Path = typer.Argument(
+        ...,
+        help="Directory containing ensemble results",
+        exists=True
+    )
+):
+    """
+    Display information about a saved ensemble.
     
-    table = Table(title="Ensemble Configuration")
-    table.add_column("Model", style="cyan")
-    table.add_column("Weight", style="magenta")
+    Example:
+        tempest combine info results/
+    """
+    console.print("[bold blue]Ensemble Information[/bold blue]")
+    console.print("=" * 70)
     
-    if weights:
-        for path, weight in zip(model_paths, weights):
-            table.add_row(path.name, f"{weight:.4f}")
+    # Load metadata
+    metadata_path = ensemble_dir / "ensemble_metadata.json"
+    if not metadata_path.exists():
+        console.print("[red]Error: ensemble_metadata.json not found[/red]")
+        raise typer.Exit(1)
+    
+    with open(metadata_path, 'r') as f:
+        metadata = json.load(f)
+    
+    # Display general info
+    console.print("\n[bold]General Information:[/bold]")
+    console.print(f"  Number of models: {metadata.get('num_models', 'Unknown')}")
+    console.print(f"  Method: {metadata.get('voting_method', 'Unknown')}")
+    console.print(f"  Created: {metadata.get('created_at', 'Unknown')}")
+    
+    # Display model paths
+    console.print("\n[bold]Models:[/bold]")
+    model_paths = metadata.get('model_paths', [])
+    for i, path in enumerate(model_paths, 1):
+        console.print(f"  {i}. {Path(path).name}")
+    
+    # Load and display weights
+    weights_path = ensemble_dir / "ensemble_weights.json"
+    if weights_path.exists():
+        with open(weights_path, 'r') as f:
+            weights_data = json.load(f)
+        
+        console.print("\n[bold]Ensemble Weights:[/bold]")
+        
+        table = Table(show_header=True, header_style="bold magenta")
+        table.add_column("Model", style="cyan")
+        table.add_column("Weight", justify="right", style="green")
+        table.add_column("Evidence", justify="right", style="yellow")
+        
+        weights = weights_data.get('posterior_weights', {})
+        evidences = weights_data.get('model_evidences', {})
+        
+        for name in weights:
+            weight = weights[name]
+            evidence = evidences.get(name, 'N/A')
+            ev_str = f"{evidence:.4f}" if isinstance(evidence, float) else str(evidence)
+            table.add_row(name, f"{weight:.6f}", ev_str)
+        
+        console.print(table)
+        
+        # BMA specific info
+        if 'bma_config' in weights_data:
+            bma_config = weights_data['bma_config']
+            console.print("\n[bold]BMA Configuration:[/bold]")
+            console.print(f"  Approximation: {bma_config.get('approximation', 'Unknown')}")
+            console.print(f"  Temperature: {bma_config.get('temperature', 'Unknown')}")
+            console.print(f"  Prior type: {bma_config.get('prior_type', 'Unknown')}")
+    
+    # Check for evaluation metrics
+    metrics_path = ensemble_dir / "evaluation_metrics.json"
+    if metrics_path.exists():
+        with open(metrics_path, 'r') as f:
+            metrics = json.load(f)
+        
+        console.print("\n[bold]Evaluation Metrics:[/bold]")
+        for key, value in metrics.items():
+            if isinstance(value, float):
+                console.print(f"  {key}: {value:.4f}")
+            else:
+                console.print(f"  {key}: {value}")
+    
+    # Check for calibrator
+    calibrator_path = ensemble_dir / "calibrator.pkl"
+    if calibrator_path.exists():
+        console.print("\n[green] Calibration enabled[/green]")
     else:
-        # Equal weights
-        equal_weight = 1.0 / len(model_paths)
-        for path in model_paths:
-            table.add_row(path.name, f"{equal_weight:.4f}")
+        console.print("\n[yellow]✗ No calibration[/yellow]")
+
+
+def _display_config(config: EnsembleConfig, method: str):
+    """Display ensemble configuration."""
+    console.print("\n[bold]Ensemble Configuration:[/bold]")
+    console.print(f"  Voting method: {config.voting_method}")
+    
+    if method == "bayesian_model_averaging" and config.bma_config:
+        console.print(f"  BMA approximation: {config.bma_config.approximation}")
+        console.print(f"  BMA temperature: {config.bma_config.temperature}")
+        console.print(f"  Min posterior weight: {config.bma_config.min_posterior_weight}")
+    
+    if config.calibration_enabled:
+        console.print(f"  Calibration: {config.calibration_method}")
+    
+    if config.compute_epistemic or config.compute_aleatoric:
+        unc_types = []
+        if config.compute_epistemic:
+            unc_types.append("epistemic")
+        if config.compute_aleatoric:
+            unc_types.append("aleatoric")
+        console.print(f"  Uncertainty: {', '.join(unc_types)}")
+
+
+def _display_weights(combiner: ModelCombiner, method: str):
+    """Display computed weights."""
+    console.print("\n[bold]Computed Weights:[/bold]")
+    
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("Model", style="cyan", width=30)
+    table.add_column("Weight", justify="right", style="green")
+    
+    if method == "bayesian_model_averaging":
+        table.add_column("Log Evidence", justify="right", style="yellow")
+        
+        for name in sorted(combiner.posterior_weights.keys()):
+            weight = combiner.posterior_weights[name]
+            evidence = combiner.model_evidences.get(name, 0.0)
+            table.add_row(name, f"{weight:.6f}", f"{evidence:.4f}")
+    else:
+        for name in sorted(combiner.model_weights.keys()):
+            weight = combiner.model_weights[name]
+            table.add_row(name, f"{weight:.6f}")
+    
+    console.print(table)
+
+
+def _display_metrics(metrics: dict):
+    """Display evaluation metrics."""
+    console.print("\n[bold]Evaluation Results:[/bold]")
+    
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", justify="right", style="green")
+    
+    # Display main metrics
+    main_metrics = [
+        'ensemble_accuracy', 'mean_entropy', 
+        'mean_epistemic', 'mean_aleatoric'
+    ]
+    
+    for metric in main_metrics:
+        if metric in metrics:
+            value = metrics[metric]
+            table.add_row(metric, f"{value:.4f}")
     
     console.print(table)
     
-    # Method-specific information
-    info_messages = {
-        "voting": "Using majority voting for predictions",
-        "averaging": "Using weighted average of model outputs",
-        "stacking": "Using meta-learner to combine predictions",
-        "bma": "Using Bayesian Model Averaging with uncertainty estimation"
-    }
-    
-    console.print(f"\n[yellow]Method:[/yellow] {info_messages.get(method, method)}")
+    # Display individual model accuracies if present
+    individual = {k: v for k, v in metrics.items() if k.endswith('_accuracy') and k != 'ensemble_accuracy'}
+    if individual:
+        console.print("\n[bold]Individual Model Accuracies:[/bold]")
+        for model_name, acc in individual.items():
+            console.print(f"  {model_name}: {acc:.4f}")
+
+if __name__ == "__main__":
+    combine_app()

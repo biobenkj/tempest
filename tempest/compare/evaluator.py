@@ -17,9 +17,9 @@ from typing import Dict, List, Tuple, Optional
 import json
 import logging
 
-from .evaluation_framework import ModelEvaluationFramework
-from ..core.models import build_cnn_bilstm_crf
-from ..core.hybrid_decoder import HybridConstraintDecoder
+from tempest.compare.evaluation_framework import ModelEvaluationFramework
+from tempest.core.models import build_cnn_bilstm_crf
+from tempest.core.hybrid_decoder import HybridConstraintDecoder
 from sklearn.preprocessing import LabelBinarizer
 
 # Configure logging

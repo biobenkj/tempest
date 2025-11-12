@@ -111,9 +111,6 @@ def run_pipeline(
         dispatch_map = {
             "simulate": lambda: __import__("tempest.simulate", fromlist=["run_simulation"]).run_simulation,
             "evaluate": lambda: __import__("tempest.evaluate", fromlist=["run_evaluation"]).run_evaluation,
-            "combine": lambda: __import__("tempest.combine", fromlist=["run_combination"]).run_combination,
-            "compare": lambda: __import__("tempest.compare", fromlist=["run_comparison"]).run_comparison,
-            "demux": lambda: __import__("tempest.demux", fromlist=["run_demultiplexing"]).run_demultiplexing,
             "visualize": lambda: __import__("tempest.visualize", fromlist=["run_visualization"]).run_visualization,
         }
         if command not in dispatch_map:

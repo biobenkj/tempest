@@ -258,15 +258,11 @@ ensemble:
   enabled: true
   num_models: 5  # Total number of models in ensemble
   
-  # Model type configuration (NEW)
-  # Option 1: Specify exact types for each model
-  # model_types: ["standard", "hybrid", "standard", "hybrid", "standard"]
+  # Voting/combination method
+  voting_method: "bayesian_model_averaging"  # or 'weighted_average', 'voting', 'stacking'
   
-  # Option 2: Use ratio to automatically determine types
+  # Model type configuration
   hybrid_ratio: 0.4  # 40% hybrid models, 60% standard models
-  
-  # If unlabeled data path is provided at runtime, it will be used for hybrid models
-  # unlabeled_data_path: "path/to/unlabeled.fastq"  # Can be set at runtime
   
   # Variation configuration
   variation_type: "both"  # 'architecture', 'initialization', or 'both'
@@ -282,24 +278,76 @@ ensemble:
   # Initialization variations
   random_seeds: [42, 123, 456, 789, 1011]
   
-  # Bayesian Model Averaging (BMA) Configuration
-  bma_prior: "performance"  # 'uniform' or 'performance'
-  bma_temperature: 1.0  # Temperature for softmax when using performance-based weights
-  
-  # BMA weight computation
+  # Comprehensive BMA Configuration
   bma_config:
-    method: "validation_accuracy"  # Use validation accuracy for weights
-    min_weight: 0.01  # Minimum weight for any model
-    normalize: true  # Ensure weights sum to 1
+    # Enable/disable BMA
+    enabled: true
     
-    # Performance metrics to consider
-    metrics_weights:
+    # Prior type: 'uniform', 'informative', 'adaptive'
+    prior_type: "adaptive"
+    
+    # Prior weights (optional, for 'informative' prior)
+    prior_weights: null
+    
+    # Approximation method: 'bic', 'laplace', 'variational', 'cross_validation'
+    approximation: "bic"
+    
+    # Approximation parameters for different methods
+    approximation_params:
+      bic:
+        penalty_factor: 1.0  # Standard BIC penalty
+      
+      laplace:
+        num_samples: 1000    # Number of samples for Laplace approximation
+        damping: 0.01        # Damping factor for numerical stability
+      
+      variational:
+        num_iterations: 100  # VI iterations
+        learning_rate: 0.01  # VI learning rate
+        convergence_threshold: 1e-4
+      
+      cross_validation:
+        num_folds: 5         # K-fold CV
+        stratified: true     # Use stratified splitting
+    
+    # Temperature for posterior computation
+    temperature: 1.0
+    
+    # Compute posterior variance for uncertainty quantification
+    compute_posterior_variance: true
+    
+    # Normalize posterior weights to sum to 1
+    normalize_posteriors: true
+    
+    # Minimum posterior weight threshold
+    min_posterior_weight: 0.01
+    
+    # Model selection criteria (optional)
+    selection_criteria:
+      metric: "validation_accuracy"
+      threshold: 0.05  # Evidence threshold for model selection
+    
+    # Use model averaging vs. model selection
+    use_model_averaging: true
+    
+    # Evidence threshold for inclusion
+    evidence_threshold: 0.05
+  
+  # Weighted average configuration (alternative to BMA)
+  weighted_average_config:
+    optimization: "performance"  # 'fixed', 'performance', 'learned'
+    
+    # Fixed weights (if using 'fixed' optimization)
+    fixed_weights: null
+    
+    # Performance-based weighting
+    performance_metrics:
       val_accuracy: 0.7
       val_loss: 0.3
     
-    # Optional: different weights for different model types
+    # Type-based bonus weights
     type_bonus:
-      hybrid: 1.1  # Give 10% bonus to hybrid models if they use unlabeled data
+      hybrid: 1.1
       standard: 1.0
   
   # Prediction aggregation
@@ -307,18 +355,21 @@ ensemble:
     method: "weighted_average"  # 'weighted_average', 'voting', 'stacking'
     confidence_weighting: true
     uncertainty_estimation: true
+    apply_temperature_scaling: false
+    temperature: 1.0
   
   # Calibration for ensemble predictions
   calibration:
     enabled: true
     method: "isotonic"  # 'isotonic', 'platt', 'temperature_scaling'
+    use_separate_calibration_set: true
     calibration_split: 0.2  # Use 20% of validation for calibration
   
   # Diversity metrics and enforcement
   diversity:
-    measure: "disagreement"  # 'disagreement', 'correlation', 'kl_divergence'
-    min_diversity: 0.1  # Minimum required diversity
-    enforce: true  # Enforce diversity during training
+    enforce_diversity: true
+    diversity_metric: "disagreement"  # 'disagreement', 'correlation', 'kl_divergence'
+    min_diversity_threshold: 0.1
   
   # Ensemble evaluation
   evaluation:
@@ -329,24 +380,25 @@ ensemble:
     
     # Model selection criteria (if you want to select subset)
     selection:
-      enabled: false  # Set to true to select best subset
-      method: "greedy"  # 'greedy', 'genetic', 'exhaustive'
+      enabled: false
+      method: "greedy"
       metric: "val_accuracy"
-      max_models: 3  # Select best 3 models
+      max_models: 3
   
   # Uncertainty quantification
   uncertainty:
     compute_epistemic: true  # Model uncertainty
     compute_aleatoric: true  # Data uncertainty
-    method: "ensemble_variance"  # How to compute uncertainty
-    confidence_level: 0.95
+    method: "ensemble_variance"
+    confidence_intervals: true
+    interval_alpha: 0.95
   
   # Save configuration
   save:
     save_all_models: true
     save_ensemble_metadata: true
     save_predictions: true
-    checkpoint_frequency: 5  # Save ensemble checkpoint every N epochs
+    checkpoint_frequency: 5
 
 # Evaluation Configuration
 evaluation:
@@ -388,8 +440,8 @@ visualization:
     - "length_distribution"
     - "error_patterns"
     - "model_comparison"
-    - "ensemble_weights"  # NEW: Visualize BMA weights
-    - "model_diversity"   # NEW: Visualize model disagreement
+    - "ensemble_weights"
+    - "model_diversity"
     - "acc_pwm_heatmap"
     - "acc_sequence_logo"
     - "acc_score_histogram"
@@ -414,7 +466,6 @@ demux:
     - p5
   
   # Model path
-  # Usually will be a trained model derived from above train command
   model_path: "/path/to/model.h5"
 
   # Set the minimum edit distance allowed
@@ -430,7 +481,6 @@ demux:
     CBC: "/varidata/research/projects/shen/tools/benkj/tempest/whitelist/cbc.txt"
   
   # Sample file
-  # Must be tab delimited and have the configuration of 'sample_id', 'CBC', 'i5', 'i7'
   sample_file: "/path/to/sample_file.txt"
 
   # How to save the files
@@ -446,7 +496,7 @@ logging:
   log_whitelist_usage: true
   log_generation_stats: true
   log_pwm_stats: true
-  log_ensemble_progress: true  # NEW: Log ensemble training progress
+  log_ensemble_progress: true
 
 # Output Configuration
 output:
@@ -456,4 +506,4 @@ output:
   save_config: true
   create_report: true
   save_acc_analysis: true
-  save_ensemble_analysis: true  # NEW: Save ensemble-specific analysis
+  save_ensemble_analysis: true

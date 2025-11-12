@@ -266,6 +266,9 @@ class EnsembleConfig:
     @classmethod
     def from_dict(cls, config: dict):
         """Create EnsembleConfig from dictionary, handling nested BMAConfig."""
+        # Create a copy to avoid modifying original
+        config = config.copy()
+        
         # Handle nested BMA config
         if 'bma_config' in config and config['bma_config'] is not None:
             if isinstance(config['bma_config'], dict):
