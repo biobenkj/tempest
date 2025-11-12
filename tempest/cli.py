@@ -18,6 +18,8 @@ from rich.console import Console
 from rich.progress import Progress
 from rich.table import Table
 from tempest.main import main as tempest_main
+from tempest.utils import suppress_tensorflow_logging
+suppress_tensorflow_logging()
 
 __version__ = "0.3.0"
 console = Console()
@@ -73,28 +75,6 @@ def setup_logging(level: str = "INFO", log_file: Optional[str] = None):
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=handlers,
     )
-
-
-def suppress_tensorflow_logging():
-    """Suppress TensorFlow verbose logging unless debug mode is enabled."""
-    if "--debug" not in sys.argv and os.getenv("TEMPEST_DEBUG", "0") != "1":
-        os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-        os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
-        os.environ.setdefault("TF_DISABLE_PLUGIN_REGISTRATION", "1")
-        os.environ.setdefault("TF_ENABLE_DEPRECATION_WARNINGS", "0")
-        
-        import warnings
-        warnings.filterwarnings("ignore")
-        
-        # Suppress TensorFlow logging
-        try:
-            import tensorflow as tf
-            tf.get_logger().setLevel(logging.ERROR)
-        except ImportError:
-            pass
-        
-        logging.getLogger("tensorflow").setLevel(logging.ERROR)
-        logging.getLogger("tensorflow").propagate = False
 
 
 @app.callback()

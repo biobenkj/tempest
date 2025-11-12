@@ -18,6 +18,8 @@ import pickle
 import gzip
 
 from tempest.config import TempestConfig, load_config as config_load_config
+from tempest.utils import suppress_tensorflow_logging
+suppress_tensorflow_logging()
 
 logger = logging.getLogger(__name__)
 

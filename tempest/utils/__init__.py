@@ -32,6 +32,10 @@ from .io import (
     get_index_to_base
 )
 
+from .logging_utils import (
+    suppress_tensorflow_logging
+)
+
 __all__ = [
     # Config
     'TempestConfig',
@@ -57,5 +61,7 @@ __all__ = [
     'save_annotations_gff',
     'ensure_dir',
     'get_base_to_index',
-    'get_index_to_base'
+    'get_index_to_base',
+    # Logging utils
+    'suppress_tensorflow_logging',
 ]
