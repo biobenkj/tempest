@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize Rich console
 console = Console()
-app = typer.Typer(help="Evaluate trained Tempest models")
+evaluate_app = typer.Typer(help="Evaluate trained Tempest models")
 
 
 @app.command("single")
@@ -363,4 +363,4 @@ except ImportError:
 
 
 if __name__ == "__main__":
-    app()
+    evaluate_app()
