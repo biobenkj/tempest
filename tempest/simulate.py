@@ -22,6 +22,7 @@ from rich.table import Table
 # Import the data simulator components
 from tempest.data import (
     SequenceSimulator,
+    SimulatedRead,
     InvalidReadGenerator,
     create_simulator_from_config
 )
