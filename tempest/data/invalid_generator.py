@@ -423,11 +423,21 @@ class InvalidReadGenerator:
         }
         return handlers.get(error_type, lambda r: r)(valid_read)
 
-    def generate_batch(self, valid_reads: List[SimulatedRead],
-                       invalid_ratio: float = 0.1) -> List[SimulatedRead]:
+    def generate_batch(
+        self,
+        valid_reads: List[SimulatedRead],
+        invalid_ratio: Optional[float] = None,
+        invalid_fraction: Optional[float] = None
+    ) -> List[SimulatedRead]:
         """Generate a batch of invalid reads from valid ones."""
         if not valid_reads:
             return []
+
+        # Normalize argument naming for backward compatibility
+        if invalid_fraction is not None:
+            invalid_ratio = invalid_fraction
+        if invalid_ratio is None:
+            invalid_ratio = 0.1
 
         # Always produce at least one invalid read if ratio > 0
         n_invalid = max(1, int(len(valid_reads) * invalid_ratio)) if invalid_ratio > 0 else 0

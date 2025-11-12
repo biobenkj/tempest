@@ -85,8 +85,8 @@ def run_simulation(
         n_train = int(sim_config.num_sequences * sim_config.train_split)
         n_val = sim_config.num_sequences - n_train
         
-        train_reads = simulator.generate_reads(n_train)
-        val_reads = simulator.generate_reads(n_val)
+        train_reads = simulator.generate_batch(n_train)
+        val_reads = simulator.generate_batch(n_val)
 
         if getattr(sim_config, "invalid_fraction", 0.0) > 0.0:
             invalid_ratio = sim_config.invalid_fraction
@@ -139,8 +139,11 @@ def run_simulation(
     else:
         # Generate single dataset
         logger.info(f"Generating {sim_config.num_sequences} sequences")
+        # Set up progress bar integration if available
+        progress_callback = kwargs.get("progress_callback", None)
         
-        reads = simulator.generate_reads(sim_config.num_sequences)
+        reads = simulator.generate_batch(sim_config.num_sequences,
+                                         progress_callback=progress_callback)
 
         # Generate invalid reads and log
         if getattr(sim_config, "invalid_fraction", 0.0) > 0.0:
@@ -454,15 +457,15 @@ def generate_command(
         
         # Run simulation with progress tracking
         with Progress(console=console) as progress:
-            task = progress.add_task(
-                "[cyan]Generating sequences...",
-                total=kwargs.get('num_sequences', cfg.simulation.num_sequences)
-            )
-            
-            # Run simulation
+            total = kwargs.get('num_sequences', cfg.simulation.num_sequences)
+            task = progress.add_task("[cyan]Generating sequences...", total=total)
+
+            # Define a callback that increments the bar
+            def update_progress(n_generated):
+                progress.update(task, completed=n_generated)
+
+            kwargs['progress_callback'] = update_progress
             result = run_simulation(cfg, output_dir=out_dir, **kwargs)
-            
-            progress.update(task, completed=True)
         
         # Report results
         console.print("\n[bold green] Simulation complete![/bold green]")

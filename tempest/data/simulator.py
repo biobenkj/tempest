@@ -532,7 +532,11 @@ class SequenceSimulator:
         if not PWM_AVAILABLE:
             return None
 
-        pwm_config = self.config.get("pwm", {})
+        # Handle both top-level and nested PWM configs safely
+        pwm_config = self.config.get("pwm") or self.sim_config.get("pwm") or {}
+        if pwm_config is None:
+            pwm_config = {}
+
         pwm_file = pwm_config.get("pwm_file")
 
         # REALLY important for reproducibility and testing
@@ -895,6 +899,7 @@ class SequenceSimulator:
         diversity_schedule: Optional[str] = None,
         include_quality: bool = False,
         inject_errors: bool = True,
+        progress_callback: Optional[Callable[[int], None]] = None
     ) -> List[SimulatedRead]:
         """
         Generate a batch of reads with optional diversity scheduling.
@@ -928,6 +933,10 @@ class SequenceSimulator:
                 inject_errors=inject_errors,
             )
             reads.append(read)
+
+            # Update Rich progress bar if callback is provided
+            if progress_callback and (i + 1) % 100 == 0:
+                progress_callback(i + 1)
 
             if (i + 1) % 1000 == 0:
                 logger.info(f"Generated {i + 1}/{n} reads")
