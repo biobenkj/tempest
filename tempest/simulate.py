@@ -68,6 +68,16 @@ def run_simulation(
         sim_config.train_split = kwargs['train_fraction']
     if 'invalid_fraction' in kwargs and kwargs['invalid_fraction'] is not None:
         sim_config.invalid_fraction = kwargs['invalid_fraction']
+    if 'transcript_fasta' in kwargs:
+        # Override the transcript fasta file path
+        if not hasattr(sim_config, 'transcript') or sim_config.transcript is None:
+            from types import SimpleNamespace
+            sim_config.transcript = SimpleNamespace()
+        if hasattr(sim_config.transcript, '__dict__'):
+            sim_config.transcript.fasta_file = kwargs['transcript_fasta']
+        else:
+            # If transcript is a dict
+            sim_config.transcript['fasta_file'] = kwargs['transcript_fasta']
     
     # Get format preference (default to pickle)
     output_format = kwargs.get('format', 'pickle')
@@ -391,6 +401,14 @@ def generate_command(
         "--seed", "-r",
         help="Random seed for reproducibility (overrides config)"
     ),
+    transcript_fasta: Optional[Path] = typer.Option(
+        None,
+        "--transcript-fasta", "-tf",
+        help="Path to transcript FASTA file for cDNA simulation (overrides config)",
+        exists=True,
+        file_okay=True,
+        readable=True
+    ),
     format: str = typer.Option(
         "pickle",
         "--format", "-f",
@@ -419,6 +437,9 @@ def generate_command(
         
         # Generate 1000 sequences in pickle format (default)
         tempest simulate generate -c config.yaml -n 1000
+        
+        # Generate with custom transcript file
+        tempest simulate generate -c config.yaml -n 1000 --transcript-fasta my_transcripts.fa.gz
         
         # Generate in text format for compatibility
         tempest simulate generate -c config.yaml -n 1000 --format text
@@ -455,6 +476,8 @@ def generate_command(
             kwargs['train_fraction'] = train_fraction
         if invalid_fraction is not None:
             kwargs['invalid_fraction'] = invalid_fraction
+        if transcript_fasta is not None:
+            kwargs['transcript_fasta'] = str(transcript_fasta)
         if output:
             kwargs['output_file'] = output.name
         kwargs['split'] = split
@@ -474,6 +497,13 @@ def generate_command(
             console.print(f"  Sequences: {kwargs.get('num_sequences', cfg.simulation.num_sequences)}")
             console.print(f"  Random seed: {kwargs.get('seed', cfg.simulation.random_seed)}")
             console.print(f"  Architecture: {len(cfg.simulation.sequence_order)} segments")
+            if transcript_fasta:
+                console.print(f"  Transcript FASTA: {transcript_fasta} [cyan](CLI override)[/cyan]")
+            elif hasattr(cfg.simulation, 'transcript') and cfg.simulation.transcript:
+                if hasattr(cfg.simulation.transcript, 'fasta_file'):
+                    console.print(f"  Transcript FASTA: {cfg.simulation.transcript.fasta_file}")
+                elif isinstance(cfg.simulation.transcript, dict) and 'fasta_file' in cfg.simulation.transcript:
+                    console.print(f"  Transcript FASTA: {cfg.simulation.transcript['fasta_file']}")
             console.print(f"  Output format: {format} {'(compressed)' if not no_compress else '(uncompressed)'}")
             if split:
                 console.print(f"  Train fraction: {train_fraction:.0%}")

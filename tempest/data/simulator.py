@@ -666,7 +666,8 @@ class SequenceSimulator:
 
     def _initialize_transcript_pool(self) -> Optional[TranscriptPool]:
         """Initialize transcript pool if configured."""
-        transcript_config = self.sim_config.get("transcript_pool", {})
+        # Try 'transcript_pool' first (new name), then 'transcript' (config.yaml name)
+        transcript_config = self.sim_config.get("transcript_pool") or self.sim_config.get("transcript")
         if transcript_config:
             return TranscriptPool(transcript_config)
         return None
