@@ -5,11 +5,13 @@ Tempest CLI
 Provides subcommands for simulation, training, evaluation, visualization,
 demultiplexing, and ensemble model combination using the Typer framework.
 """
-from tempest.utils import suppress_tensorflow_logging
-suppress_tensorflow_logging()
+import os
+import warnings
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+warnings.filterwarnings('ignore', category=UserWarning, module='tensorflow')
+
 import typer
 import sys
-import os
 import logging
 from pathlib import Path
 from typing import Optional

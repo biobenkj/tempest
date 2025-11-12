@@ -10,8 +10,11 @@ commands such as:
     tempest train hybrid
     tempest train ensemble
 """
-from tempest.utils import suppress_tensorflow_logging
-suppress_tensorflow_logging()
+import os
+import warnings
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+warnings.filterwarnings('ignore', category=UserWarning, module='tensorflow')
+
 from pathlib import Path
 from typing import Optional, Union, Dict, Any, List
 import logging
