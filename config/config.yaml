@@ -20,7 +20,7 @@ model:
 # Data Simulation Configuration
 simulation:
   # Number of sequences to generate
-  num_sequences: 50000  # Larger dataset for complex architecture
+  num_sequences: 50000
   train_split: 0.8
 
   # Introduce invalid reads
@@ -58,16 +58,18 @@ simulation:
   # Enable full read reverse complement to simulate bidirectional sequencing
   full_read_reverse_complement_prob: 0.5
   
+  # Probability that a read will have errors injected (when errors.enabled = true)
+  error_injection_prob: 0.1
+  
   # Fixed sequences for adapters and primers
   sequences:
     p7: "CAAGCAGAAGACGGCATACGAGAT"
     RP2: "GTGACTGGAGTTCAGACGTGTGCTCTTCCGATCT"
     RP1: "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT"
     p5: "GTGTAGATCTCGGTGGTCGCCGTATCATT"
-    UMI: "random"       # Will generate NNNNNNNN
-    cDNA: "transcript"  # Will use transcript pool
-    polyA: "polya"      # Will use polyA generator
-    # i7, i5, ACC, CBC will use whitelists/PWM
+    UMI: "random"
+    cDNA: "transcript"
+    polyA: "polya"
   
   # Whitelist files
   whitelist_files:
@@ -82,10 +84,11 @@ simulation:
   # Probabilistic PWM parameters for ACC generation
   pwm:
     pwm_file: "/varidata/research/projects/shen/tools/benkj/tempest/whitelist/acc_pwm.txt"
-    temperature: 1.2  # Moderate diversity for realistic ACC sequences
-    min_entropy: 0.1  # Ensures at least 10% entropy at each position
-    diversity_boost: 1.0  # Can be increased for more varied test sets
-    pattern: "ACCSSV"  # IUPAC pattern for ACC
+    temperature: 1.2
+    min_entropy: 0.1
+    diversity_boost: 1.0
+    pattern: "ACCSSV"
+    random_seed: 42  # Important for reproducibility - should match simulation.random_seed
   
   # Segment generation parameters
   segment_generation:
@@ -117,44 +120,52 @@ simulation:
   
   # Segment length ranges
   sequence_lengths:
-    p7: {min: 24, max: 24}
-    i7: {min: 8, max: 8}
-    RP2: {min: 34, max: 34}
-    UMI: {min: 8, max: 8}
-    ACC: {min: 6, max: 6}
-    cDNA: {min: 200, max: 1000}
-    polyA: {min: 10, max: 50}
-    CBC: {min: 6, max: 6}
-    RP1: {min: 33, max: 33}
-    i5: {min: 8, max: 8}
-    p5: {min: 29, max: 29}
+    p7: {min_length: 24, max_length: 24}
+    i7: {min_length: 8, max_length: 8}
+    RP2: {min_length: 34, max_length: 34}
+    UMI: {min_length: 8, max_length: 8}
+    ACC: {min_length: 6, max_length: 6}
+    cDNA: {min_length: 200, max_length: 1000}
+    polyA: {min_length: 10, max_length: 50}
+    CBC: {min_length: 6, max_length: 6}
+    RP1: {min_length: 33, max_length: 33}
+    i5: {min_length: 8, max_length: 8}
+    p5: {min_length: 29, max_length: 29}
   
   # Transcript configuration for cDNA segments
   transcript:
     fasta_file: "gencode.v49.transcripts.fa.gz"
-    min_length: 200
-    max_length: 5000
+    min_length: 500
+    max_length: 2200
     fragment_mode: true
     fragment_min: 200
     fragment_max: 1000
     trim_polya: true
+    reverse_complement_prob: 0.5  # Probability for individual fragments
+    decompress_to_tmp: true
+    tmpdir: "./tmp"
+    cache_size_mb: 512
+    fallback_gc_content: 0.5  # GC content for fallback random sequences
+    fallback_mode: "random"  # What to do if transcripts fail to load
   
-  # PolyA tail configuration
-  polya_tail:
+  # PolyA tail configuration (FIXED NAME FROM polya_tail)
+  polya:
     min_length: 10
     max_length: 50
     purity: 0.95
     distribution: "normal"
-    mean: 30
-    std: 10
+    mean_length: 30  # Changed from 'mean' to 'mean_length' for clarity
+    std_length: 10   # Changed from 'std' to 'std_length' for clarity
+    absolute_min: 20  # Hard minimum boundary
+    absolute_max: 500 # Hard maximum boundary
   
-  # Error simulation parameters
-  error_injection:
+  # Error simulation parameters (FIXED NAME FROM error_injection)
+  errors:
     enabled: true
     substitution_rate: 0.001
     insertion_rate: 0.0001
     deletion_rate: 0.0001
-    homopolymer_error_rate: 0.002
+    quality_dependent: false  # Whether errors depend on quality scores
 
 # Training Configuration
 training:

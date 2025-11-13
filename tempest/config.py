@@ -90,8 +90,9 @@ class SimulationConfig:
     sequence_lengths: Optional[Dict[str, Dict[str, int]]] = None
     
     transcript: Optional[Dict[str, Any]] = None
-    polya_tail: Optional[Dict[str, Any]] = None
-    error_injection: Optional[Dict[str, Any]] = None
+    polya: Optional[Dict[str, Any]] = None
+    errors: Optional[Dict[str, Any]] = None
+    error_injection_prob: Optional[float] = None
     complexity: Optional[Dict[str, Any]] = None
 
     # invalid read generation up front instead of during hybrid training
@@ -478,23 +479,42 @@ class TempestConfig:
     
     def _to_dict(self) -> Dict[str, Any]:
         """
-        Convert the TempestConfig (and all nested dataclasses) to pure dictionaries.
-        Ensures nested dataclasses are flattened recursively.
+        Fully recursive, loss-free, structure-preserving conversion of TempestConfig
+        into pure Python dicts, safe for YAML/JSON and multiprocessing.
         """
-        from dataclasses import asdict, is_dataclass
+        from dataclasses import is_dataclass
+        from types import SimpleNamespace
 
-        def convert_obj(obj):
-            """Recursively convert dataclasses, lists, tuples, and dicts to plain Python types."""
-            if is_dataclass(obj):
-                return {k: convert_obj(v) for k, v in asdict(obj).items()}
-            elif isinstance(obj, dict):
-                return {k: convert_obj(v) for k, v in obj.items()}
-            elif isinstance(obj, (list, tuple)):
-                return [convert_obj(i) for i in obj]
-            else:
+        def convert(obj):
+            # Base primitives
+            if obj is None or isinstance(obj, (bool, int, float, str)):
                 return obj
 
-        return convert_obj(self)
+            # List
+            if isinstance(obj, list):
+                return [convert(x) for x in obj]
+
+            # Tuple
+            if isinstance(obj, tuple):
+                return tuple(convert(x) for x in obj)
+
+            # Dict
+            if isinstance(obj, dict):
+                return {k: convert(v) for k, v in obj.items()}
+
+            # Dataclass → recurse into fields
+            if is_dataclass(obj):
+                return {field: convert(getattr(obj, field)) 
+                        for field in obj.__dataclass_fields__}
+
+            # SimpleNamespace
+            if isinstance(obj, SimpleNamespace):
+                return {k: convert(v) for k, v in vars(obj).items()}
+
+            # Fallback (Path, enum, other custom objects)
+            return str(obj)
+
+        return convert(self)
 
 
 def load_config(config_path: str) -> TempestConfig:

@@ -1,25 +1,25 @@
 """
-Data Simulator for Tempest.
+Data Simulator for Tempest
 """
 
+import os
 import numpy as np
 import random
 import time
 import pickle
 import gzip
 import json
+import mmap
+import logging
 from typing import List, Dict, Tuple, Optional, Union, Any, Callable
 from dataclasses import dataclass, field
-import logging
 from pathlib import Path
+from collections import OrderedDict
 import yaml
-import sys
-
-# import the TempestConfig
-from tempest.config import TempestConfig
+import hashlib
+from contextlib import contextmanager
 
 # Conditional import for PWM generator
-# TODO: remove this conditional import and assume it's always there
 try:
     from tempest.core.pwm_probabilistic import (
         ProbabilisticPWMGenerator,
@@ -38,6 +38,51 @@ from tempest.utils import io
 
 logger = logging.getLogger(__name__)
 
+# Vectorized, thread-safe implementation for reverse complementing sequences
+# Initialize LUT at module load time for thread safety
+def _init_rc_lut():
+    """Initialize reverse complement lookup table."""
+    lut = np.full(256, ord("N"), dtype=np.uint8)
+    
+    # Uppercase mapping
+    lut[ord("A")] = ord("T")
+    lut[ord("T")] = ord("A")
+    lut[ord("C")] = ord("G")
+    lut[ord("G")] = ord("C")
+    lut[ord("N")] = ord("N")
+    
+    # Lowercase to uppercase complement
+    lut[ord("a")] = ord("T")
+    lut[ord("t")] = ord("A")
+    lut[ord("c")] = ord("G")
+    lut[ord("g")] = ord("C")
+    lut[ord("n")] = ord("N")
+    
+    return lut
+
+_RC_LUT = _init_rc_lut()
+
+
+def reverse_complement(sequence: Union[str, List[str]]) -> str:
+    """
+    Thread-safe vectorized reverse complement implementation.
+    Accepts list[str] or str; always returns uppercase string.
+    """
+    # Convert list-of-chars to string
+    if isinstance(sequence, list):
+        sequence = "".join(sequence)
+
+    # Encode safely (replace invalid chars instead of dropping)
+    arr = np.frombuffer(sequence.encode("ascii", "replace"), dtype=np.uint8).copy()
+
+    # Sanitize
+    invalid_mask = (_RC_LUT[arr] == ord("N")) & (arr != ord("N"))
+    arr[invalid_mask] = ord("N")
+
+    # Reverse complement
+    rc_arr = _RC_LUT[arr[::-1]]
+
+    return rc_arr.tobytes().decode("ascii")
 
 @dataclass
 class SimulatedRead:
@@ -49,61 +94,840 @@ class SimulatedRead:
     quality_scores: Optional[np.ndarray] = None  # Optional quality scores
 
 
-class TranscriptPool:
-    """Manages a pool of transcript sequences for cDNA simulation."""
+@dataclass
+class FastaIndexEntry:
+    """Represents an entry from a FASTA index file."""
+    name: str
+    length: int
+    offset: int  # Byte offset in the file
+    line_bases: int  # Number of bases per line
+    line_width: int  # Number of bytes per line (including newline)
+    
+    @classmethod
+    def from_fai_line(cls, line: str) -> 'FastaIndexEntry':
+        """Parse a line from a .fai file."""
+        parts = line.strip().split('\t')
+        if len(parts) < 5:
+            raise ValueError(f"Invalid .fai line: {line}")
+        
+        return cls(
+            name=parts[0],
+            length=int(parts[1]),
+            offset=int(parts[2]),
+            line_bases=int(parts[3]),
+            line_width=int(parts[4])
+        )
 
-    def __init__(self, config: Dict):
+
+class SizeAwareLRUCache:
+    """
+    Size-aware LRU cache that evicts based on total sequence bases cached,
+    not just the count of sequences. This is more memory-efficient for
+    transcripts of varying lengths.
+    """
+    
+    def __init__(self, max_size_mb: float = 100):
+        """
+        Initialize cache with maximum size in megabytes.
+        
+        Args:
+            max_size_mb: Maximum cache size in MB (default 100MB)
+        """
+        self.max_size_bytes = int(max_size_mb * 1024 * 1024)
+        self.cache = OrderedDict()
+        self.sizes = {}  # Track size of each cached item
+        self.current_size = 0
+        self.hits = 0
+        self.misses = 0
+        self.evictions = 0
+    
+    def get(self, key: str) -> Optional[str]:
+        """Get item from cache, updating access order."""
+        if key in self.cache:
+            # Move to end (most recently used)
+            self.cache.move_to_end(key)
+            self.hits += 1
+            return self.cache[key]
+        self.misses += 1
+        return None
+    
+    def put(self, key: str, value: str) -> None:
+        """Add item to cache, evicting LRU items if size limit exceeded."""
+        # Approximate size is simply number of characters (ASCII FASTA)
+        item_size = len(value)
+        # skip caching “whales” that would thrash the cache (>10% of capacity)
+        if item_size > 0.10 * self.max_size_bytes:
+            return
+        
+        if key in self.cache:
+            # Update existing item
+            old_size = self.sizes[key]
+            self.current_size = self.current_size - old_size + item_size
+            self.cache.move_to_end(key)
+            self.cache[key] = value
+            self.sizes[key] = item_size
+        else:
+            # Evict items if necessary to make space
+            while self.current_size + item_size > self.max_size_bytes and self.cache:
+                # Remove least recently used item
+                lru_key = next(iter(self.cache))
+                lru_size = self.sizes[lru_key]
+                del self.cache[lru_key]
+                del self.sizes[lru_key]
+                self.current_size -= lru_size
+                self.evictions += 1
+            
+            # Add new item if it fits
+            if self.current_size + item_size <= self.max_size_bytes:
+                self.cache[key] = value
+                self.sizes[key] = item_size
+                self.current_size += item_size
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get comprehensive cache statistics."""
+        total_requests = self.hits + self.misses
+        hit_rate = self.hits / total_requests if total_requests > 0 else 0
+        avg_size = np.mean(list(self.sizes.values())) if self.sizes else 0
+        
+        return {
+            'hits': self.hits,
+            'misses': self.misses,
+            'evictions': self.evictions,
+            'hit_rate': hit_rate,
+            'num_items': len(self.cache),
+            'current_size_mb': self.current_size / (1024 * 1024),
+            'max_size_mb': self.max_size_bytes / (1024 * 1024),
+            'utilization': self.current_size / self.max_size_bytes,
+            'avg_item_size_kb': avg_size / 1024
+        }
+
+
+class GzippedFastaReader:
+    """
+    Efficient reader for gzipped FASTA files that keeps the file handle open
+    and uses an internal index for faster sequential access.
+    """
+    
+    def __init__(self, fasta_file: Path, index_entries: List[FastaIndexEntry]):
+        """
+        Initialize gzipped FASTA reader.
+        
+        Args:
+            fasta_file: Path to gzipped FASTA file
+            index_entries: List of index entries
+        """
+        self.fasta_file = fasta_file
+        self.index_entries = {e.name: e for e in index_entries}
+        self.handle = None
+        self.current_position = {}  # Track position for each sequence
+        self._open_file()
+        self._build_sequence_index()
+    
+    def _open_file(self):
+        """Open the gzipped file."""
+        self.handle = gzip.open(self.fasta_file, 'rt')
+    
+    def _build_sequence_index(self):
+        """
+        Build an index of sequence positions in the gzipped file.
+        
+        Note: For gzipped files, we cannot build a position-based index because
+        gzip streams don't support reliable .tell() after iteration. We rely on the .fai
+        index for metadata and do sequential reading when needed.
+        This is a no-op placeholder for future non-gzipped optimization.
+        """
+        logger.debug("Gzipped FASTA: using sequential reading with .fai metadata")
+        self.sequence_positions = {}
+    
+    def read_sequence(self, entry_name: str) -> Optional[str]:
+        """
+        Read a specific sequence efficiently.
+        
+        Args:
+            entry_name: Name of the sequence to read
+            
+        Returns:
+            Sequence string or None if not found
+        """
+        if entry_name not in self.index_entries:
+            logger.warning(f"Sequence {entry_name} not in index")
+            return None
+        
+        entry = self.index_entries[entry_name]
+        
+        try:
+            # Reset to beginning (gzip doesn't support random seeking well)
+            self.handle.seek(0)
+            
+            # Read through file to find sequence
+            found = False
+            sequence_parts = []
+            
+            for line in self.handle:
+                line = line.strip()
+                if line.startswith('>'):
+                    if found:
+                        break  # Found next sequence, stop
+                    current_name = line[1:].split()[0]
+                    if current_name == entry_name:
+                        found = True
+                elif found:
+                    sequence_parts.append(line)
+            
+            if not sequence_parts:
+                logger.error(f"Sequence {entry_name} not found or empty")
+                return None
+            
+            sequence = ''.join(sequence_parts).upper()
+            
+            # Validate sequence length matches index
+            if len(sequence) != entry.length:
+                logger.warning(
+                    f"Sequence length mismatch for {entry_name}: "
+                    f"expected {entry.length}, got {len(sequence)}"
+                )
+            
+            return sequence
+            
+        except Exception as e:
+            logger.error(f"Error reading sequence {entry_name}: {e}")
+            return None
+    
+    def close(self):
+        """Close the file handle."""
+        if self.handle:
+            self.handle.close()
+            self.handle = None
+    
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - ensure file is closed."""
+        self.close()
+        return False
+    
+    def __del__(self):
+        """Ensure file is closed on deletion."""
+        self.close()
+
+
+class TranscriptPool:
+    """
+    Optimized transcript pool using FASTA index for efficient sampling.
+    
+    Enhancements in this version:
+    - Size-aware caching (evicts by total bases, not count)
+    - Persistent gzipped file reader (doesn't reopen for each read)
+    - Robust error handling for corrupted entries
+    - Progress bars for long operations
+    - Validation of sequence lengths against index
+    """
+    
+    def __init__(self, config: Dict, cache_size_mb: float = 100):
         """
         Initialize transcript pool from configuration.
-
+        
         Args:
             config: Transcript configuration dictionary
+            cache_size_mb: Maximum cache size in megabytes
         """
-        self.transcripts = []
-        self.transcript_ids = []
         self.config = config
-
+        self.cache = SizeAwareLRUCache(
+            max_size_mb=float(self.config.get("cache_size_mb", cache_size_mb))
+            )
+        self.index_entries = []
+        self.filtered_entries = []
+        self.fasta_file = None
+        self.fasta_handle = None
+        self.is_gzipped = False
+        self.mmap_handle = None
+        self.gzip_reader = None  # Persistent gzipped reader
+        self._length_weights = None  # For length-weighted sampling
+        
+        # Statistics tracking
+        self.stats = {
+            'sequences_read': 0,
+            'validation_errors': 0,
+            'corrupted_entries': 0,
+            'total_bases_processed': 0
+        }
+        
+        # Initialize if FASTA file is provided
         fasta_file = config.get("fasta_file")
         if fasta_file and Path(fasta_file).exists():
-            self._load_transcripts(fasta_file)
+            self._initialize_index(fasta_file)
         else:
             logger.warning(f"Transcript file not found: {fasta_file}")
-
-    def _load_transcripts(self, fasta_file: str):
-        """Load transcripts from FASTA file."""
+    
+    def _initialize_index(self, fasta_file: str) -> None:
+        """Initialize the FASTA index for efficient access."""
+        self.fasta_file = Path(fasta_file)
+        self.is_gzipped = str(fasta_file).endswith('.gz')
+        
+        # Look for index file
+        fai_file = self._find_index_file(fasta_file)
+        
+        if not fai_file or not fai_file.exists():
+            logger.error(f"FASTA index file not found for: {fasta_file}")
+            logger.info("Please create index using: samtools faidx {fasta_file}")
+            logger.warning("Falling back to slow loading method...")
+            self._load_transcripts_fallback(fasta_file)
+            return
+        
+        # Load and validate index
         try:
-            # Try with Biopython if available
-            try:
-                from Bio import SeqIO
+            self._load_index(fai_file)
+            self.index_entries = [
+                e for e in self.index_entries
+                if isinstance(e.length, int) and e.length > 0
+            ]
+            self._validate_index()
+            self._filter_transcripts()
+            self._open_fasta_handle()
+            
+            logger.info(
+                f"Initialized TranscriptPool with {len(self.filtered_entries)} transcripts "
+                f"(filtered from {len(self.index_entries)} total)"
+            )
+            
+            if self.filtered_entries:
+                lengths = [e.length for e in self.filtered_entries]
+                logger.info(
+                    f"Length distribution: min={min(lengths)}, "
+                    f"max={max(lengths)}, median={np.median(lengths):.0f}"
+                )
+                
+        except Exception as e:
+            logger.error(f"Failed to initialize transcript pool: {e}")
+            raise
+    
+    def _find_index_file(self, fasta_file: str) -> Optional[Path]:
+        """Find the appropriate index file for a FASTA file."""
+        fasta_path = Path(fasta_file)
+        
+        # Try different index file naming conventions
+        possible_indices = [
+            Path(str(fasta_file) + '.fai'),  # file.fa.gz.fai
+            fasta_path.with_suffix('.fai'),  # file.fai
+            fasta_path.parent / (fasta_path.stem + '.fai')  # file.fa.fai (for .fa.gz)
+        ]
+        
+        for idx_path in possible_indices:
+            if idx_path.exists():
+                logger.info(f"Found index file: {idx_path}")
+                return idx_path
+        
+        return None
+    
+    def _load_index(self, fai_file: Path) -> None:
+        """Load and parse the FASTA index file with error handling."""
+        try:
+            with open(fai_file, 'r') as f:
+                for line_num, line in enumerate(f, 1):
+                    if not line.strip():
+                        continue
+                    
+                    try:
+                        entry = FastaIndexEntry.from_fai_line(line)
+                        self.index_entries.append(entry)
+                    except ValueError as e:
+                        logger.warning(f"Skipping invalid index line {line_num}: {e}")
+                        self.stats['corrupted_entries'] += 1
+            
+            if not self.index_entries:
+                raise ValueError("No valid entries found in index file")
+            
+            logger.info(f"Loaded {len(self.index_entries)} valid index entries")
+            
+        except Exception as e:
+            logger.error(f"Failed to load FASTA index: {e}")
+            raise
+    def _reload_index_from(self, fai_file: Path) -> None:
+        """
+        Reload .fai and re-apply filters after the FASTA path changes.
+        """
+        self.index_entries = []
+        self.filtered_entries = []
+        self._load_index(fai_file)
+        self._validate_index()
+        self._filter_transcripts()
 
-                for record in SeqIO.parse(fasta_file, "fasta"):
-                    seq_len = len(record.seq)
-                    min_len = self.config.get("min_length", 100)
-                    max_len = self.config.get("max_length", 5000)
+    def _validate_index(self):
+        """Validate index entries for consistency."""
+        logger.debug("Validating index entries...")
+        
+        # Check for duplicate names
+        names = [e.name for e in self.index_entries]
+        unique_names = set(names)
+        if len(names) != len(unique_names):
+            logger.warning(
+                f"Found {len(names) - len(unique_names)} duplicate sequence names in index"
+            )
+        
+        # Validate reasonable values
+        for entry in self.index_entries:
+            if entry.length <= 0:
+                logger.warning(f"Invalid length for {entry.name}: {entry.length}")
+                self.stats['validation_errors'] += 1
+            if entry.line_bases <= 0 or entry.line_width <= entry.line_bases:
+                logger.warning(f"Invalid line format for {entry.name}")
+                self.stats['validation_errors'] += 1
+    
+    def _filter_transcripts(self) -> None:
+        """Filter transcripts based on length criteria with progress bar."""
+        min_length = self.config.get("min_length", 200)
+        max_length = self.config.get("max_length", 5000)
+        
+        logger.info(f"Filtering transcripts to range [{min_length}, {max_length}]...")
+        
+        self.filtered_entries = [e for e in self.index_entries if min_length <= e.length <= max_length]
+        
+        # Compute length-based sampling weights
+        if self.filtered_entries:
+            lens = np.array([e.length for e in self.filtered_entries], dtype=np.float64)
+            self._length_weights = (lens / lens.sum())
+        
+        logger.info(
+            f"Retained {len(self.filtered_entries)}/{len(self.index_entries)} transcripts "
+            f"({len(self.filtered_entries)/len(self.index_entries)*100:.1f}%)"
+        )
+        if not self.filtered_entries:
+            logger.warning("Filter removed all transcripts; check min/max length settings.")
+    
+    def _open_fasta_handle(self) -> None:
+        """Open the FASTA file for reading with appropriate method."""
+        try:
+            if self.is_gzipped and self.config.get("decompress_to_tmp", False):
+                import shutil
+                import tempfile
 
-                    if min_len <= seq_len <= max_len:
-                        self.transcripts.append(str(record.seq).upper())
-                        self.transcript_ids.append(record.id)
-            except ImportError:
-                # Fallback to simple FASTA parsing
-                logger.info("Biopython not available, using simple FASTA parser")
-                self._simple_fasta_parse(fasta_file)
+                tmpdir = Path(self.config.get("tmpdir", tempfile.gettempdir()))
+                tmpdir.mkdir(parents=True, exist_ok=True)
 
-            if self.transcripts:
-                logger.info(f"Loaded {len(self.transcripts)} transcripts")
-                lengths = [len(t) for t in self.transcripts]
-                logger.info(f"Length range: {min(lengths)}-{max(lengths)} bp")
+                # Create stable temp filename based on source file hash
+                source_hash = hashlib.md5(str(self.fasta_file).encode()).hexdigest()[:8]
+                tmp_name = f"{Path(self.fasta_file).stem}_{source_hash}.fa"
+                tmp_path = tmpdir / tmp_name
+
+                # Check if we need to decompress (file missing or outdated)
+                source_mtime = Path(self.fasta_file).stat().st_mtime
+                needs_decompress = (
+                    not tmp_path.exists()
+                    or tmp_path.stat().st_mtime < source_mtime
+                )
+
+                lockfile = tmp_path.with_suffix(tmp_path.suffix + ".lock")
+
+                if needs_decompress:
+                    # Attempt to acquire the lock atomically
+                    try:
+                        fd = os.open(lockfile, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                        have_lock = True
+                        os.close(fd)
+                    except FileExistsError:
+                        have_lock = False
+
+                    if have_lock:
+                        logger.info(f"[LOCK ACQUIRED] Decompressing {self.fasta_file} → {tmp_path}")
+                        logger.info("This is a one-time operation that will speed up all subsequent access")
+
+                        # Write into a temporary file, then atomically rename
+                        tmp_partial = tmp_path.with_suffix(tmp_path.suffix + ".partial")
+
+                        try:
+                            with gzip.open(self.fasta_file, "rb") as src, open(tmp_partial, "wb") as dst:
+                                shutil.copyfileobj(src, dst, length=1024 * 1024)
+
+                            # Atomic rename overwrites safely
+                            os.replace(tmp_partial, tmp_path)
+
+                            logger.info(f"Decompression complete: {tmp_path.stat().st_size / 1e9:.1f} GB")
+
+                        finally:
+                            # Release lock
+                            try:
+                                os.unlink(lockfile)
+                            except FileNotFoundError:
+                                pass
+
+                    else:
+                        # Another process is decompressing - wait with timeout
+                        logger.info(f"Waiting for decompression lock for {tmp_path}...")
+                        timeout = 300  # 5 minutes
+                        start_time = time.time()
+                        while lockfile.exists():
+                            if time.time() - start_time > timeout:
+                                logger.warning(
+                                    f"Lock timeout for {tmp_path}, removing stale lock"
+                                )
+                                try:
+                                    os.unlink(lockfile)
+                                except FileNotFoundError:
+                                    pass
+                                break
+                            time.sleep(0.2)
+
+                else:
+                    logger.info(f"Using existing decompressed file: {tmp_path}")
+
+                # Only switch to the decompressed file if we have a matching index for it
+                tmp_fai = self._find_index_file(str(tmp_path))
+                if tmp_fai and tmp_fai.exists():
+                    self.fasta_file = tmp_path
+                    self.is_gzipped = False  # Treat as uncompressed from here
+
+                    # Reload the index for the decompressed file so offsets match
+                    self._reload_index_from(tmp_fai)
+
+                    # Open file handle and mmap for validation
+                    self.fasta_handle = open(self.fasta_file, 'rb')
+                    self.mmap_handle = mmap.mmap(self.fasta_handle.fileno(), 0, access=mmap.ACCESS_READ)
+
+                    # Safety check: Validate that decompressed FASTA offsets point to headers
+                    for e in self.filtered_entries[:5]:
+                        try:
+                            self.mmap_handle.seek(e.offset)
+                            first_char = self.mmap_handle.read(1)
+                            if first_char != b'>':
+                                logger.warning(
+                                    f"Index offset mismatch for {e.name} in decompressed FASTA: "
+                                    f"expected '>' at offset {e.offset}"
+                                )
+                        except Exception:
+                            pass
+
+                    logger.info("Memory-mapped decompressed FASTA (with matching index)")
+
+                else:
+                    logger.warning("No .fai found for decompressed FASTA; keeping gz streaming to avoid offset mismatches.")
+                    self.gzip_reader = GzippedFastaReader(self.fasta_file, self.filtered_entries)
+                    return
+
+            elif self.is_gzipped:
+                # Keep the streaming reader as fallback
+                self.gzip_reader = GzippedFastaReader(
+                    self.fasta_file,
+                    self.filtered_entries
+                )
+                logger.info("Opened gzipped FASTA with streaming reader")
+                logger.info("Tip: Set config['decompress_to_tmp'] = True for better performance")
+
+            else:
+                # Use memory mapping for uncompressed files
+                self.fasta_handle = open(self.fasta_file, 'rb')
+                self.mmap_handle = mmap.mmap(
+                    self.fasta_handle.fileno(), 0,
+                    access=mmap.ACCESS_READ
+                )
+                logger.info("Memory-mapped uncompressed FASTA file")
 
         except Exception as e:
-            logger.error(f"Failed to load transcripts: {e}")
+            logger.error(f"Failed to open FASTA file: {e}")
+            raise
+    
+    def _read_sequence(self, entry: FastaIndexEntry) -> str:
+        """Read a transcript safely (never returns None)."""
 
-    def _simple_fasta_parse(self, fasta_file: str):
-        """Simple FASTA parser without dependencies."""
-        with open(fasta_file, "r") as f:
+        cached = self.cache.get(entry.name)
+        if cached is not None:
+            return cached
+
+        try:
+            if self.is_gzipped:
+                sequence = self._read_sequence_gzipped(entry)
+            else:
+                sequence = self._read_sequence_uncompressed(entry)
+
+            if not sequence or not isinstance(sequence, str):
+                raise ValueError("Transcript read returned None or invalid type")
+
+            if not self._validate_sequence(sequence, entry):
+                logger.warning(f"Sequence validation FAILED for {entry.name}")
+                self.stats['validation_errors'] += 1
+
+            # cache & stats
+            self.cache.put(entry.name, sequence)
+            self.stats['sequences_read'] += 1
+            self.stats['total_bases_processed'] += len(sequence)
+            return sequence
+
+        except Exception as e:
+            logger.error(f"Error reading transcript {entry.name}: {e}")
+            self.stats['corrupted_entries'] += 1
+
+            safe_len = entry.length if isinstance(entry.length, int) and entry.length > 0 else 200
+            return self._generate_random_sequence(safe_len, np.random.RandomState())
+    
+    def _read_sequence_gzipped(self, entry: FastaIndexEntry) -> Optional[str]:
+        """Read sequence from gzipped file using persistent reader."""
+        if self.gzip_reader is None:
+            raise ValueError("Gzipped reader not initialized")
+        
+        sequence = self.gzip_reader.read_sequence(entry.name)
+        
+        if sequence and self.config.get("trim_polya", False):
+            sequence = self._trim_polya(sequence)
+        
+        return sequence
+    
+    def _read_sequence_uncompressed(self, entry: FastaIndexEntry) -> str:
+        """Read sequence from uncompressed FASTA using mmap."""
+        if self.mmap_handle is None:
+            raise ValueError("Memory-mapped handle not initialized")
+        
+        try:
+            # Calculate bytes to read (simplified formula that always works)
+            full_lines = entry.length // entry.line_bases
+            remaining_bases = entry.length % entry.line_bases
+            
+            if remaining_bases == 0:
+                total_bytes = full_lines * entry.line_width
+            else:
+                total_bytes = full_lines * entry.line_width + min(remaining_bases, entry.line_bases)
+            
+            # Read from memory-mapped file
+            self.mmap_handle.seek(entry.offset)
+            raw_sequence = self.mmap_handle.read(total_bytes).decode('ascii', errors="ignore")
+            
+            # Clean and validate sequence
+            sequence = raw_sequence.replace('\n', '').replace('\r', '').upper()
+            
+            # Validate only expected bases
+            valid_bases = set('ACGTN')
+            cleaned_sequence = ''.join(b if b in valid_bases else 'N' for b in sequence)
+            
+            if len(cleaned_sequence) != len(sequence):
+                logger.debug(f"Replaced {len(sequence) - len(cleaned_sequence)} invalid bases with N")
+            
+            # Trim polyA if configured
+            if self.config.get("trim_polya", False):
+                cleaned_sequence = self._trim_polya(cleaned_sequence)
+            
+            return cleaned_sequence
+            
+        except Exception as e:
+            logger.error(f"Error reading uncompressed sequence: {e}")
+            safe_len = entry.length if isinstance(entry.length, int) and entry.length > 0 else 200
+            return self._generate_random_sequence(safe_len, np.random.RandomState())
+    
+    def _validate_sequence(self, sequence: str, entry: FastaIndexEntry) -> bool:
+        """
+        Validate that a sequence matches its index entry.
+        
+        Args:
+            sequence: The sequence string
+            entry: The index entry
+            
+        Returns:
+            True if valid, False otherwise
+        """
+        # Check length
+        if len(sequence) != entry.length:
+            logger.warning(
+                f"Length mismatch for {entry.name}: "
+                f"index says {entry.length}, got {len(sequence)}"
+            )
+            return False
+        
+        # Check for excessive Ns or invalid characters
+        n_count = sequence.count('N')
+        if n_count / len(sequence) > 0.5:
+            logger.warning(f"Sequence {entry.name} is >50% Ns")
+            return False
+        
+        # Check for valid bases
+        valid_bases = set('ACGTN')
+        invalid_bases = set(sequence) - valid_bases
+        if invalid_bases:
+            logger.warning(
+                f"Sequence {entry.name} contains invalid bases: {invalid_bases}"
+            )
+            return False
+        
+        return True
+    
+    def _trim_polya(self, sequence: str, min_polya_length: int = 10, max_lookback: int = 2000) -> str:
+        """
+        Trim polyA tail from sequence.
+        
+        Args:
+            sequence: Input sequence
+            min_polya_length: Minimum length to consider as polyA tail
+            max_lookback: Maximum bases to scan from end (prevents pathological cases)
+        
+        Returns:
+            Sequence with polyA tail trimmed
+        """
+        # Count trailing As (with allowance for Ns), but limit lookback
+        a_count = 0
+        lookback_limit = min(len(sequence), max_lookback)
+        for i in range(len(sequence) - 1, len(sequence) - lookback_limit - 1, -1):
+            if sequence[i] == 'A':
+                a_count += 1
+            elif sequence[i] != 'N':  # Allow Ns in polyA
+                break
+        
+        # Trim if polyA is long enough
+        if a_count >= min_polya_length:
+            return sequence[:-a_count]
+        
+        return sequence
+    
+    def sample_fragment(self, random_state: np.random.RandomState) -> str:
+        """Sample a fragment from a random transcript."""
+        if not self.filtered_entries:
+            return self._generate_random_fallback(random_state)
+        
+        # Select random transcript
+        entry = random_state.choice(self.filtered_entries)
+        
+        # Get the full sequence
+        transcript = self._read_sequence(entry)
+        
+        # Generate fragment
+        if not transcript or not isinstance(transcript, str):
+            return self._generate_random_sequence(
+                self.config.get("fragment_min", 200),
+                random_state
+            )
+        fragment_min = self.config.get("fragment_min", 200)
+        fragment_max = self.config.get("fragment_max", 1000)
+        max_possible = min(len(transcript), fragment_max)
+        
+        if max_possible < fragment_min:
+            fragment = transcript[:fragment_min]
+        else:
+            fragment_len = random_state.randint(fragment_min, max_possible + 1)
+            max_start = len(transcript) - fragment_len
+            start_pos = random_state.randint(0, max_start + 1) if max_start > 0 else 0
+            fragment = transcript[start_pos : start_pos + fragment_len]
+        
+        # Reverse complement with probability
+        if random_state.random() < self.config.get("reverse_complement_prob", 0.5):
+            fragment = reverse_complement(fragment)
+        
+        return fragment
+    
+    def sample_batch(self, batch_size: int, random_state: np.random.RandomState,
+                    show_progress: bool = True) -> List[str]:
+        """
+        Sample multiple fragments efficiently with optional progress bar.
+        
+        Args:
+            batch_size: Number of fragments to sample
+            random_state: Random state for reproducibility
+            show_progress: Whether to show progress bar
+            
+        Returns:
+            List of fragment sequences
+        """
+        if not self.filtered_entries:
+            return [self._generate_random_fallback(random_state) for _ in range(batch_size)]
+        
+        # Pre-select transcripts for better cache utilization
+        # Use length-weighted sampling if weights are available
+        if getattr(self, "_length_weights", None) is not None:
+            selected_entries = random_state.choice(
+                self.filtered_entries, size=batch_size, replace=True, p=self._length_weights
+            )
+        else:
+            selected_entries = random_state.choice(
+                self.filtered_entries, size=batch_size, replace=True
+            )
+        
+        # No tqdm: rely on external Rich progress logging
+        
+        fragments = []
+        for entry in selected_entries:
+            transcript = self._read_sequence(entry)
+            
+            # Generate fragment
+            fragment_min = self.config.get("fragment_min", 200)
+            fragment_max = self.config.get("fragment_max", 1000)
+            max_possible = min(len(transcript), fragment_max)
+            
+            if max_possible < fragment_min:
+                fragment = transcript
+            else:
+                fragment_len = random_state.randint(fragment_min, max_possible + 1)
+                max_start = len(transcript) - fragment_len
+                start_pos = random_state.randint(0, max_start + 1) if max_start > 0 else 0
+                fragment = transcript[start_pos : start_pos + fragment_len]
+            
+            # Reverse complement with probability
+            if random_state.random() < self.config.get("reverse_complement_prob", 0.5):
+                fragment = reverse_complement(fragment)
+            
+            fragments.append(fragment)
+        
+        return fragments
+    
+    def _generate_random_sequence(
+        self,
+        length: Optional[int],
+        random_state: np.random.RandomState
+        ) -> str:
+        """
+        Generate a GC-aware random cDNA sequence.
+        SAFETY: length may be None or invalid.
+        """
+        if not isinstance(length, int) or length <= 0:
+            logger.warning(
+                f"[SAFETY] Invalid length={length}; falling back to 200bp random sequence"
+            )
+            length = 200
+
+        gc = float(self.config.get("fallback_gc_content", 0.5))
+        vals = random_state.random(length)
+        arr = np.empty(length, dtype='S1')
+
+        arr[vals < gc / 2] = b"G"
+        arr[(vals >= gc / 2) & (vals < gc)] = b"C"
+        arr[(vals >= gc) & (vals < (1 + gc) / 2)] = b"A"
+        arr[vals >= (1 + gc) / 2] = b"T"
+
+        return arr.tobytes().decode("ascii")
+    
+    def _generate_random_fallback(
+        self,
+        random_state: np.random.RandomState
+    ) -> str:
+        """
+        Decide fallback length (min/max) and generate sequence.
+        """
+        if self.config.get("fallback_mode", "random") != "random":
+            raise ValueError("No transcripts loaded and no fallback configured")
+
+        length = random_state.randint(
+            self.config.get("fragment_min", 200),
+            self.config.get("fragment_max", 800),
+        )
+
+        return self._generate_random_sequence(length, random_state)
+    
+    def _load_transcripts_fallback(self, fasta_file: str):
+        """Fallback method: Load transcripts without index (slower)."""
+        self.transcripts = []
+        self.transcript_ids = []
+        
+        logger.warning("Using fallback loading method (this may be slow)...")
+        
+        try:
+            # Handle both gzipped and uncompressed
+            if str(fasta_file).endswith('.gz'):
+                handle = gzip.open(fasta_file, 'rt')
+            else:
+                handle = open(fasta_file, 'r')
+            
             seq_id = None
             seq_parts = []
-
-            for line in f:
+            sequences_loaded = 0
+            
+            # No tqdm - rely on Rich logging
+            
+            for line in handle:
                 line = line.strip()
                 if line.startswith(">"):
                     # Save previous sequence if exists
@@ -112,93 +936,151 @@ class TranscriptPool:
                         seq_len = len(seq)
                         min_len = self.config.get("min_length", 100)
                         max_len = self.config.get("max_length", 5000)
-
+                        
                         if min_len <= seq_len <= max_len:
                             self.transcripts.append(seq)
                             self.transcript_ids.append(seq_id)
-
+                            sequences_loaded += 1
+                    
                     # Start new sequence
                     seq_id = line[1:].split()[0]
                     seq_parts = []
-                else:
+                elif seq_id:  # Only accumulate if we have a header
                     seq_parts.append(line)
-
+            
             # Don't forget last sequence
             if seq_id and seq_parts:
                 seq = "".join(seq_parts).upper()
                 seq_len = len(seq)
                 min_len = self.config.get("min_length", 100)
                 max_len = self.config.get("max_length", 5000)
-
+                
                 if min_len <= seq_len <= max_len:
                     self.transcripts.append(seq)
                     self.transcript_ids.append(seq_id)
-
-    def sample_fragment(self, random_state: np.random.RandomState) -> str:
-        """
-        Sample a fragment from a random transcript.
-
-        Args:
-            random_state: Random state for reproducibility
-
-        Returns:
-            Fragment sequence
-        """
-        if not self.transcripts:
-            # Fallback to random generation
-            fallback_mode = self.config.get("fallback_mode", "random")
-            if fallback_mode == "random":
-                length = random_state.randint(
-                    self.config.get("fragment_min", 200),
-                    self.config.get("fragment_max", 800),
-                )
-                return self._generate_random_sequence(length, random_state)
+                    sequences_loaded += 1
+            
+            handle.close()
+            
+            if self.transcripts:
+                logger.info(f"Loaded {len(self.transcripts)} transcripts (fallback method)")
+                lengths = [len(t) for t in self.transcripts]
+                logger.info(f"Length range: {min(lengths)}-{max(lengths)} bp")
             else:
-                raise ValueError("No transcripts loaded and no fallback configured")
+                logger.warning("No transcripts loaded from file")
+                
+        except Exception as e:
+            logger.error(f"Failed to load transcripts: {e}")
+    
+    def get_statistics(self) -> Dict[str, Any]:
+        """Get comprehensive statistics about the transcript pool."""
+        stats = {
+            'index_entries': len(self.index_entries) if hasattr(self, 'index_entries') else 0,
+            'filtered_entries': len(self.filtered_entries) if hasattr(self, 'filtered_entries') else 0,
+            'is_gzipped': self.is_gzipped,
+            'fasta_file': str(self.fasta_file) if self.fasta_file else None,
+            'runtime_stats': self.stats.copy()
+        }
+        
+        # Add cache statistics
+        # if hasattr(self, 'cache'):
+            # stats['cache'] = self.cache.get_stats()
+        
+        # Add length distribution for filtered entries
+        if self.filtered_entries:
+            lengths = [e.length for e in self.filtered_entries]
+            stats['length_distribution'] = {
+                'min': min(lengths),
+                'max': max(lengths),
+                'mean': np.mean(lengths),
+                'median': np.median(lengths),
+                'std': np.std(lengths)
+            }
+        
+        # Add fallback statistics if using in-memory transcripts
+        if hasattr(self, 'transcripts') and self.transcripts:
+            stats['fallback_mode'] = True
+            stats['loaded_transcripts'] = len(self.transcripts)
+            lengths = [len(t) for t in self.transcripts]
+            stats['fallback_length_distribution'] = {
+                'min': min(lengths),
+                'max': max(lengths),
+                'mean': np.mean(lengths),
+                'median': np.median(lengths)
+            }
+        
+        return stats
+    
+    def close(self):
+        """Close file handles and clean up resources."""
+        errors = []
+        
+        if self.gzip_reader:
+            try:
+                self.gzip_reader.close()
+            except Exception as e:
+                errors.append(f"gzip_reader: {e}")
+            finally:
+                self.gzip_reader = None
+        
+        if self.mmap_handle:
+            try:
+                self.mmap_handle.close()
+            except Exception as e:
+                errors.append(f"mmap_handle: {e}")
+            finally:
+                self.mmap_handle = None
+        
+        if self.fasta_handle:
+            try:
+                self.fasta_handle.close()
+            except Exception as e:
+                errors.append(f"fasta_handle: {e}")
+            finally:
+                self.fasta_handle = None
+        
+        if errors:
+            logger.warning(f"Errors during close: {'; '.join(errors)}")
+        
+        # Log final statistics
+        stats = self.get_statistics()
+        logger.info("TranscriptPool closing with statistics:")
+        logger.info(f"  Sequences read: {self.stats['sequences_read']}")
+        logger.info(f"  Total bases: {self.stats['total_bases_processed'] / 1e6:.1f} Mb")
+        # if 'cache' in stats:
+            # cache_stats = stats['cache']
+            # logger.info(f"  Cache hit rate: {cache_stats['hit_rate']:.1%}")
+            # logger.info(f"  Cache size: {cache_stats['current_size_mb']:.1f} MB")
+            # logger.info(f"  Evictions: {cache_stats['evictions']}")
+    
+    def __del__(self):
+        """Cleanup on deletion."""
+        self.close()
+    
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit."""
+        self.close()
 
-        # Select random transcript
-        transcript = random_state.choice(self.transcripts)
-
-        # Determine fragment length
-        fragment_min = self.config.get("fragment_min", 200)
-        fragment_max = self.config.get("fragment_max", 800)
-        max_possible = min(len(transcript), fragment_max)
-
-        if max_possible < fragment_min:
-            # Use full transcript if too short
-            fragment = transcript
-        else:
-            fragment_len = random_state.randint(fragment_min, max_possible + 1)
-            max_start = len(transcript) - fragment_len
-            start_pos = random_state.randint(0, max_start + 1) if max_start > 0 else 0
-            fragment = transcript[start_pos : start_pos + fragment_len]
-
-        # Reverse complement with probability
-        if random_state.random() < self.config.get("reverse_complement_prob", 0.5):
-            fragment = self._reverse_complement(fragment)
-
-        return fragment
-
-    def _generate_random_sequence(
-        self, length: int, random_state: np.random.RandomState
-    ) -> str:
-        """Generate random sequence with specified GC content."""
-        gc_content = self.config.get("fallback_gc_content", 0.5)
-
-        bases = []
-        for _ in range(length):
-            if random_state.random() < gc_content:
-                bases.append(random_state.choice(["G", "C"]))
-            else:
-                bases.append(random_state.choice(["A", "T"]))
-
-        return "".join(bases)
-
-    def _reverse_complement(self, seq: str) -> str:
-        """Generate reverse complement of sequence."""
-        complement = {"A": "T", "T": "A", "C": "G", "G": "C", "N": "N"}
-        return "".join(complement.get(b, "N") for b in seq[::-1])
-
+    @contextmanager
+    def batch_mode(self):
+        """
+        Context manager for efficient batch processing.
+        Temporarily increases cache size and optimizes settings.
+        """
+        original_max_size = self.cache.max_size_bytes
+        try:
+            # Temporarily increase cache for batch processing
+            self.cache.max_size_bytes *= 2
+            logger.debug("Entered batch mode - doubled cache size")
+            yield self
+        finally:
+            # Restore original settings
+            self.cache.max_size_bytes = original_max_size
+            logger.debug("Exited batch mode - restored cache size")
 
 class PolyATailGenerator:
     """Generates polyA tails with realistic length distributions."""
@@ -444,14 +1326,8 @@ class ErrorSimulator:
                     dtype=float,
                 )
                 total = rates.sum()
-                if total == 0:
-                    # Should not happen because of guard above, but be safe
-                    new_seq.append(sequence[i])
-                    new_labels.append(labels[i])
-                    if new_qual is not None:
-                        new_qual.append(quality_scores[i])
-                    i += 1
-                    continue
+                # Invariant: at least one rate must be > 0 due to guard at start of method
+                assert total > 0, "Error rates sum should be > 0 due to earlier guard"
 
                 probs = rates / total
                 error_type = random_state.choice(
@@ -470,12 +1346,18 @@ class ErrorSimulator:
                     i += 1
 
                 elif error_type == "ins":
-                    # Insertion
+                    # Insertion: add extra base without consuming input
+                    # Keep current base
+                    new_seq.append(sequence[i])
+                    new_labels.append(labels[i])
+                    if new_qual is not None:
+                        new_qual.append(quality_scores[i])
+                    # Add the inserted base after it
                     new_seq.append(random_state.choice(["A", "C", "G", "T"]))
                     new_labels.append("ERROR")
                     if new_qual is not None:
                         new_qual.append(20)  # Low quality for insertion
-                    # Don't increment i (process same position again)
+                    i += 1
 
                 else:  # deletion
                     # Skip this position
@@ -506,6 +1388,10 @@ class SequenceSimulator:
     - PolyA tail generation
     - Error simulation
     - Quality score tracking
+    
+    Note: Currently uses np.random.RandomState for backward compatibility.
+    Consider migrating to np.random.Generator for improved performance and 
+    reproducibility in future versions.
     """
 
     def __init__(
@@ -571,8 +1457,6 @@ class SequenceSimulator:
             pwm_files = self.sim_config.get("pwm_files", {})
             pwm_file = pwm_files.get("ACC")
 
-        random_seed = pwm_config.get("random_seed", None)
-
         if pwm_file and Path(pwm_file).exists():
             try:
                 # Use the unified loader from tempest.utils.io
@@ -628,6 +1512,11 @@ class SequenceSimulator:
 
     def _load_whitelists(self) -> Dict[str, List[str]]:
         """Load whitelists from configuration (backward compatibility)."""
+        # Warning for maintenance
+        logger.warning(
+            "Legacy whitelist loader active - consider consolidating with WhitelistManager."
+        )
+        
         # Valid IUPAC codes that can be resolved to actual bases
         valid_iupac = set('ACGTNRYSWKMBDHV')
         
@@ -668,8 +1557,14 @@ class SequenceSimulator:
         """Initialize transcript pool if configured."""
         # Try 'transcript_pool' first (new name), then 'transcript' (config.yaml name)
         transcript_config = self.sim_config.get("transcript_pool") or self.sim_config.get("transcript")
+        
+        # Only initialize if we have a valid config with fasta_file
         if transcript_config:
-            return TranscriptPool(transcript_config)
+            fasta_file = transcript_config.get("fasta_file")
+            if fasta_file and fasta_file != "":
+                return TranscriptPool(transcript_config)
+            else:
+                logger.info("Transcript config found but no fasta_file specified, skipping transcript loading")
         return None
 
     def _initialize_polya_generator(self) -> Optional[PolyATailGenerator]:
@@ -720,9 +1615,10 @@ class SequenceSimulator:
             end = start + len(segment_seq)
 
             # Add to full sequence
-            full_sequence.extend(list(segment_seq))
+            full_sequence.extend(segment_seq)
             labels.extend([segment_name] * len(segment_seq))
-            segment_sources[segment_name] = source
+            # allow multiple segments
+            segment_sources.setdefault(segment_name, []).append(source)
 
             # Track regions
             if segment_name not in label_regions:
@@ -750,44 +1646,34 @@ class SequenceSimulator:
                     quality_scores, dtype=np.float32
                 )  # type: ignore[assignment]
 
-        # Introduce errors if configured
+        # Introduce errors (first modify the raw sequence & labels)
         has_errors = False
         if inject_errors and self.error_simulator:
-            if (
-                self.random_state.random()
-                < self.sim_config.get("error_injection_prob", 0.1)
-            ):
-                (
-                    full_sequence,
-                    labels,
-                    quality_scores,
-                ) = self.error_simulator.introduce_errors(
-                    full_sequence,
-                    labels,
-                    quality_scores,
-                    self.random_state,
+            if self.random_state.random() < self.sim_config.get("error_injection_prob", 0.1):
+                full_sequence, labels, quality_scores = self.error_simulator.introduce_errors(
+                    full_sequence, labels, quality_scores, self.random_state
                 )
                 has_errors = True
+        
+        # Enforce invariant: len(sequence) == len(labels)
+        if len(labels) != len(full_sequence):
+            if len(labels) < len(full_sequence):
+                labels.extend(["UNKNOWN"] * (len(full_sequence) - len(labels)))
+            else:
+                labels = labels[:len(full_sequence)]
+        
+        # Recompute regions after error simulation (skip ERROR)
+        label_regions = self._regions_from_labels(labels, exclude={"ERROR"})
 
-        # Apply reverse complement to entire read with probability
-        if (
-            self.random_state.random()
-            < self.sim_config.get("full_read_reverse_complement_prob", 0.0)
-        ):
-            full_sequence = self._reverse_complement(full_sequence)  # type: ignore[arg-type]
+        # Optional reverse complement - then recompute regions again
+        if self.random_state.random() < self.sim_config.get("full_read_reverse_complement_prob", 0.0):
+            full_sequence = list(reverse_complement(full_sequence))
             labels = labels[::-1]
             if quality_scores is not None:
                 quality_scores = quality_scores[::-1]
-
-            # Update label regions for reverse complement
-            seq_len = len(full_sequence)
-            new_regions: Dict[str, List[Tuple[int, int]]] = {}
-            for label, regions in label_regions.items():
-                new_regions[label] = [
-                    (seq_len - end, seq_len - start)
-                    for start, end in reversed(regions)
-                ]
-            label_regions = new_regions
+            
+            # Recompute regions after RC
+            label_regions = self._regions_from_labels(labels, exclude={"ERROR"})
 
         # Build metadata
         metadata = {
@@ -803,7 +1689,12 @@ class SequenceSimulator:
             metadata=metadata,
             quality_scores=quality_scores,
         )
-
+    def _get_seq_cfg(self, key: str) -> Optional[str]:
+        # Case-insensitive lookup for exact segment configs
+        return (self.sequence_configs.get(key) or
+                self.sequence_configs.get(key.upper()) or
+                self.sequence_configs.get(key.lower()))
+    
     def _generate_segment_with_source(
         self,
         segment_name: str,
@@ -859,8 +1750,9 @@ class SequenceSimulator:
             return seq, qual, "whitelist"
 
         # Check fixed sequences
-        if segment_name in self.sequence_configs:
-            seq = self.sequence_configs[segment_name]
+        cfg_val = self._get_seq_cfg(segment_name)
+        if cfg_val is not None:
+            seq = cfg_val
             if seq not in ["random", "transcript", "polya"]:
                 # Resolve any IUPAC codes (N, R, Y, etc.) to actual bases
                 seq = self._resolve_iupac_codes(seq)
@@ -879,7 +1771,7 @@ class SequenceSimulator:
     ) -> Tuple[str, Optional[Union[List[float], float]]]:
         """Generate ACC segment using PWM generator or fallback."""
         # Check for fixed ACC in config
-        acc_config = self.sequence_configs.get("ACC", "")
+        acc_config = self._get_seq_cfg("ACC") or ""
         if acc_config and acc_config not in ["random", "pwm"]:
             # Use fixed ACC sequence
             qual = 40.0 if include_quality else None
@@ -914,19 +1806,23 @@ class SequenceSimulator:
         lengths = self.sim_config.get("segment_generation", {}).get(
             "lengths", {}
         )
+
+        def _len_for(name, default):
+            return (lengths.get(name) or lengths.get(name.upper()) or
+                    lengths.get(name.lower()) or default)
         segment_upper = segment_name.upper()
 
         # Determine length based on segment type
         if "UMI" in segment_upper:
-            length = lengths.get(segment_name, 12)
+            length = _len_for(segment_name, 12)
         elif "BARCODE" in segment_upper or "CBC" in segment_upper:
-            length = lengths.get(segment_name, 8)
+            length = _len_for(segment_name, 8)
         elif "ADAPTER" in segment_upper:
-            length = lengths.get(segment_name, 22)
+            length = _len_for(segment_name, 22)
         elif "INSERT" in segment_upper or "CDNA" in segment_upper:
-            length = lengths.get(segment_name, 200)
+            length = _len_for(segment_name, 200)
         else:
-            length = lengths.get(segment_name, 20)
+            length = _len_for(segment_name, 20)
 
         return self._generate_random_dna(length)
 
@@ -986,17 +1882,37 @@ class SequenceSimulator:
                 resolved.append(self.random_state.choice(['A', 'C', 'G', 'T']))
         
         return "".join(resolved)
-
-    def _reverse_complement(
-        self, sequence: Union[List[str], str]
-    ) -> Union[List[str], str]:
-        """Reverse complement a sequence."""
-        complement = {"A": "T", "T": "A", "C": "G", "G": "C", "N": "N"}
-
-        if isinstance(sequence, str):
-            return "".join(complement.get(base, "N") for base in sequence[::-1])
-        else:
-            return [complement.get(base, "N") for base in sequence[::-1]]
+    
+    def _regions_from_labels(
+        self, 
+        labels: List[str], 
+        exclude: Optional[set] = None
+    ) -> Dict[str, List[Tuple[int, int]]]:
+        """
+        Recompute compressed segments from labels after error editing.
+        Excludes ephemeral labels such as "ERROR".
+        
+        Args:
+            labels: List of per-base labels
+            exclude: Set of labels to exclude (e.g., {"ERROR"})
+            
+        Returns:
+            Dictionary mapping label names to list of (start, end) tuples
+        """
+        exclude = exclude or set()
+        out = {}
+        i, n = 0, len(labels)
+        while i < n:
+            lab = labels[i]
+            if lab in exclude:
+                i += 1
+                continue
+            j = i + 1
+            while j < n and labels[j] == lab:
+                j += 1
+            out.setdefault(lab, []).append((i, j))
+            i = j
+        return out
 
     def generate_batch(
         self,
@@ -1154,12 +2070,15 @@ class SequenceSimulator:
             )
 
             # Source stats
-            for seg, source in read.metadata.get("segment_sources", {}).items():
+            for seg, sources in read.metadata.get("segment_sources", {}).items():
                 if seg not in stats["segment_sources"]:
                     stats["segment_sources"][seg] = {}
-                stats["segment_sources"][seg][source] = (
-                    stats["segment_sources"][seg].get(source, 0) + 1
-                )
+                # Handle both single source (string) and multiple sources (list)
+                source_list = sources if isinstance(sources, list) else [sources]
+                for src in source_list:
+                    stats["segment_sources"][seg][src] = (
+                        stats["segment_sources"][seg].get(src, 0) + 1
+                    )
 
             # Error stats
             if read.metadata.get("has_errors", False):
@@ -1187,6 +2106,13 @@ class SequenceSimulator:
                 logger.info(
                     f"    {seg}: loaded={usage['loaded']}, used={usage['used']}"
                 )
+    
+    def _base_for_preview(self, p: Path) -> str:
+        name = p.name
+        for suf in ('.pkl.gz', '.json.gz', '.pkl', '.json', '.txt'):
+            if name.endswith(suf):
+                return name[: -len(suf)]
+        return p.stem
     
     def save_reads(
         self, 
@@ -1231,14 +2157,15 @@ class SequenceSimulator:
             
             # Create preview file if requested
             if create_preview:
-                preview_path = output_path.parent / f"{output_path.stem}_preview.txt"
+                base = self._base_for_preview(output_path)
+                preview_path = output_path.parent / f"{base}_preview.txt"
                 self._create_preview_file(reads, preview_path)
                 stats['preview_file'] = str(preview_path)
             
             stats['format'] = 'pickle'
             stats['compressed'] = compress
             
-        elif format == 'text':
+        elif format in ('text', 'tsv'):
             # Legacy text format
             with open(output_path, 'w') as f:
                 for read in reads:
@@ -1258,6 +2185,8 @@ class SequenceSimulator:
                 })
             
             if compress:
+                if not str(output_path).endswith('.gz'):
+                    output_path = output_path.with_suffix(output_path.suffix + '.gz')
                 with gzip.open(output_path, 'wt') as f:
                     json.dump(data, f)
             else:
@@ -1351,14 +2280,14 @@ class SequenceSimulator:
                 format = 'text'
         
         if format == 'pickle':
-            if input_path.suffix == '.gz' or '.gz' in input_path.suffixes:
+            if '.gz' in input_path.suffixes or str(input_path).endswith('.gz'):
                 with gzip.open(input_path, 'rb') as f:
                     reads = pickle.load(f)
             else:
                 with open(input_path, 'rb') as f:
                     reads = pickle.load(f)
                     
-        elif format == 'text':
+        elif format in ('text', 'tsv'):
             reads = []
             with open(input_path, 'r') as f:
                 for line in f:
@@ -1368,7 +2297,12 @@ class SequenceSimulator:
                     parts = line.split('\t')
                     if len(parts) == 2:
                         sequence, labels_str = parts
-                        labels = labels_str.split()
+                        # Accept comma- or space-separated labels
+                        labels = (
+                            labels_str.split(',')
+                            if ',' in labels_str
+                            else labels_str.split()
+                        )
                         # Note: We lose label_regions and metadata in text format
                         reads.append(SimulatedRead(
                             sequence=sequence,
@@ -1378,14 +2312,23 @@ class SequenceSimulator:
                         ))
                         
         elif format == 'json':
-            if input_path.suffix == '.gz':
+            if '.gz' in input_path.suffixes or str(input_path).endswith('.gz'):
                 with gzip.open(input_path, 'rt') as f:
                     data = json.load(f)
             else:
                 with open(input_path, 'r') as f:
                     data = json.load(f)
             
-            reads = [SimulatedRead(**item) for item in data]
+            # Normalize tuple regions (JSON converts tuples to lists)
+            fixed = []
+            for item in data:
+                if item.get("label_regions"):
+                    item["label_regions"] = {
+                        k: [tuple(r) for r in v]
+                        for k, v in item["label_regions"].items()
+                    }
+                fixed.append(SimulatedRead(**item))
+            reads = fixed
         
         logger.info(f"Loaded {len(reads)} sequences from {input_path}")
         return reads
@@ -1399,7 +2342,17 @@ def create_simulator_from_config(config_source) -> SequenceSimulator:
 
     if isinstance(config_source, TempestConfig):
         # Use TempestConfig's own recursive dict converter
-        cfg_dict = config_source._to_dict()
+        if hasattr(config_source, "_to_dict"):
+            cfg_dict = config_source._to_dict()
+        elif hasattr(config_source, "to_dict"):
+            cfg_dict = config_source.to_dict()
+        else:
+            # Very conservative fallback via dataclasses.asdict if applicable
+            try:
+                from dataclasses import asdict
+                cfg_dict = asdict(config_source)
+            except Exception:
+                raise TypeError("TempestConfig cannot be converted to dict")
         return SequenceSimulator(config=cfg_dict)
 
     elif isinstance(config_source, (str, bytes, Path)):
@@ -1415,6 +2368,123 @@ def create_simulator_from_config(config_source) -> SequenceSimulator:
         )
 
 
+def reads_to_arrays_with_mask(
+    reads: List[SimulatedRead],
+    label_to_idx: Optional[Dict[str, int]] = None,
+    max_len: Optional[int] = None,
+    padding_value: int = 4,
+    return_mask: bool = True,
+    return_lengths: bool = False
+) -> Union[
+    Tuple[np.ndarray, np.ndarray, Dict[str, int]],
+    Tuple[np.ndarray, np.ndarray, Dict[str, int], np.ndarray],
+    Tuple[np.ndarray, np.ndarray, Dict[str, int], np.ndarray, np.ndarray]
+]:
+    """
+    Convert reads to numpy arrays with masking support for training.
+    
+    This version provides:
+    1. Boolean mask for non-padded positions
+    2. Optional sequence lengths for dynamic RNN unrolling
+    3. Memory-efficient int8 dtypes
+    
+    Args:
+        reads: List of SimulatedRead objects
+        label_to_idx: Optional pre-existing label mapping
+        max_len: Maximum sequence length (pad/truncate to this)
+        padding_value: Value to use for padding sequences (4 = N)
+        return_mask: Whether to return boolean mask
+        return_lengths: Whether to return actual sequence lengths
+    
+    Returns:
+        X: Encoded sequences (num_reads, max_len), dtype int8
+        y: Labels (num_reads, max_len), dtype int8  
+        label_to_idx: Mapping of labels to indices
+        mask: Boolean mask (num_reads, max_len) where True = valid position
+        lengths: (Optional) Actual sequence lengths (num_reads,), dtype int32
+    """
+    # Determine max length
+    if max_len is None:
+        max_len = max(len(read.sequence) for read in reads)
+    
+    # Create label mapping if not provided
+    if label_to_idx is None:
+        all_labels = set()
+        for read in reads:
+            all_labels.update(read.labels)
+        
+        # Add special labels - PAD should always be 0 for masking
+        all_labels.add("PAD")
+        all_labels.add("UNKNOWN")
+        all_labels.add("ERROR")
+        
+        # Ensure PAD is index 0
+        sorted_labels = sorted(all_labels - {"PAD"})
+        label_to_idx = {"PAD": 0}
+        for i, label in enumerate(sorted_labels, 1):
+            label_to_idx[label] = i
+    
+    # Base encoding
+    base_to_idx = {"A": 0, "C": 1, "G": 2, "T": 3, "N": 4}
+    
+    # Initialize arrays with appropriate dtypes
+    num_reads = len(reads)
+    X = np.full((num_reads, max_len), padding_value, dtype=np.uint8)
+    y = np.full((num_reads, max_len), label_to_idx.get("PAD", 0), dtype=np.uint16)
+    
+    # Build LUT once outside loop for speed
+    lut = np.full(128, 4, dtype=np.uint8)  # default N=4
+    lut[ord('A')] = 0; lut[ord('C')] = 1; lut[ord('G')] = 2; lut[ord('T')] = 3
+    lut[ord('a')] = 0; lut[ord('c')] = 1; lut[ord('g')] = 2; lut[ord('t')] = 3
+    lut[ord('N')] = 4; lut[ord('n')] = 4
+    lut[ord('U')] = 0; lut[ord('u')] = 0  # Treat U as A (for RNA sequences)
+    
+    # Initialize mask and lengths if requested
+    if return_mask:
+        mask = np.zeros((num_reads, max_len), dtype=bool)
+    
+    if return_lengths:
+        lengths = np.zeros(num_reads, dtype=np.int32)
+    
+    # Fill arrays (no tqdm - rely on Rich logging)
+    reads_iter = reads
+    
+    for i, read in enumerate(reads_iter):
+        seq_len = min(len(read.sequence), max_len)
+        
+        # Store actual length
+        if return_lengths:
+            lengths[i] = seq_len
+        
+        # Vectorized base encoding for A/C/G/T/N
+        seq_slice = read.sequence[:seq_len]
+        X[i, :seq_len] = lut[np.frombuffer(seq_slice.encode('ascii', 'ignore'), dtype=np.uint8)]
+        
+        # Labels (fallback to UNKNOWN if seq longer than labels)
+        if read.labels:
+            lab = read.labels[:seq_len]
+            y[i, :len(lab)] = np.fromiter(
+                (label_to_idx.get(L, label_to_idx.get("UNKNOWN", 0)) for L in lab),
+                dtype=np.uint16, count=len(lab)
+            )
+            if len(lab) < seq_len:
+                y[i, len(lab):seq_len] = label_to_idx.get("UNKNOWN", 0)
+        else:
+            y[i, :seq_len] = label_to_idx.get("UNKNOWN", 0)
+        
+        if return_mask:
+            mask[i, :seq_len] = True
+    
+    # Return based on requested outputs
+    if return_mask and return_lengths:
+        return X, y, label_to_idx, mask, lengths
+    elif return_mask:
+        return X, y, label_to_idx, mask
+    else:
+        return X, y, label_to_idx
+
+
+# Keep backward compatibility
 def reads_to_arrays(
     reads: List[SimulatedRead],
     label_to_idx: Optional[Dict[str, int]] = None,
@@ -1422,55 +2492,13 @@ def reads_to_arrays(
     padding_value: int = 4,
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, int]]:
     """
-    Convert reads to numpy arrays for model training.
-
-    Args:
-        reads: List of SimulatedRead objects
-        label_to_idx: Optional pre-existing label mapping. If None, creates one.
-        max_len: Maximum sequence length (pad/truncate to this)
-        padding_value: Value to use for padding (4 = N)
-
-    Returns:
-        X: Encoded sequences (num_reads, max_len)
-        y: Labels (num_reads, max_len)
-        label_to_idx: Mapping of labels to indices
+    Original reads_to_arrays function for backward compatibility.
+    Consider using reads_to_arrays_with_mask for better training performance.
     """
-    # Determine max length
-    if max_len is None:
-        max_len = max(len(read.sequence) for read in reads)
-
-    # Create label mapping if not provided
-    if label_to_idx is None:
-        all_labels = set()
-        for read in reads:
-            all_labels.update(read.labels)
-
-        # Add special labels
-        all_labels.add("PAD")
-        all_labels.add("UNKNOWN")
-        all_labels.add("ERROR")  # Added for error simulation
-
-        label_to_idx = {label: i for i, label in enumerate(sorted(all_labels))}
-
-    # Base encoding
-    base_to_idx = {"A": 0, "C": 1, "G": 2, "T": 3, "N": 4}
-
-    # Initialize arrays
-    num_reads = len(reads)
-    X = np.full((num_reads, max_len), padding_value, dtype=np.int8)
-    y = np.full((num_reads, max_len), label_to_idx["PAD"], dtype=np.int8)
-
-    # Fill arrays
-    for i, read in enumerate(reads):
-        seq_len = min(len(read.sequence), max_len)
-
-        # Encode sequence
-        for j in range(seq_len):
-            base = read.sequence[j]
-            X[i, j] = base_to_idx.get(base, 4)
-            y[i, j] = label_to_idx.get(read.labels[j], label_to_idx["UNKNOWN"])
-
-    return X, y, label_to_idx
+    return reads_to_arrays_with_mask(
+        reads, label_to_idx, max_len, padding_value, 
+        return_mask=False, return_lengths=False
+    )
 
 
 def demonstrate_probabilistic_generation():
@@ -1629,8 +2657,12 @@ if __name__ == "__main__":
             }
 
             if args.format == "json":
-                with open(args.output, "w") as f:
-                    json.dump(output_data, f, indent=2)
+                if str(args.output).endswith(".gz"):
+                    with gzip.open(args.output, "wt") as f:
+                        json.dump(output_data, f)
+                else:
+                    with open(args.output, "w") as f:
+                        json.dump(output_data, f, indent=2)
             elif args.format == "pickle":
                 with open(args.output, "wb") as f:
                     pickle.dump(
