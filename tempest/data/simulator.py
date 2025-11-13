@@ -1588,7 +1588,7 @@ class SequenceSimulator:
         inject_errors: bool = True,
     ) -> SimulatedRead:
         """
-        Generate a single simulated read with all features.
+        Generate a single simulated read with full metadata.
 
         Args:
             diversity_boost: Optional multiplier for ACC diversity
@@ -1598,90 +1598,127 @@ class SequenceSimulator:
         Returns:
             SimulatedRead object
         """
+
+        # --- initialized accumulators ---
         full_sequence = []
         labels = []
         label_regions: Dict[str, List[Tuple[int, int]]] = {}
-        quality_scores = [] if include_quality else None
-        segment_sources = {}
 
+        # unified metadata collectors
+        segment_sources = {}
+        segment_lengths = {}
+        segment_sequences = {}
+        segment_meta_list = {}
+        segment_order = list(self.sequence_order)
+        transcript_info = None
+
+        quality_scores = [] if include_quality else None
+
+        # build segments
         for segment_name in self.sequence_order:
-            # Generate segment based on type and configuration
-            segment_seq, segment_qual, source = self._generate_segment_with_source(
+
+            (
+                segment_seq,
+                segment_qual,
+                source,
+                seg_meta,
+            ) = self._generate_segment_with_source(
                 segment_name, diversity_boost, include_quality
             )
 
-            # Track positions
-            start = len(full_sequence)
-            end = start + len(segment_seq)
+            seg_len = len(segment_seq)
 
-            # Add to full sequence
-            full_sequence.extend(segment_seq)
-            labels.extend([segment_name] * len(segment_seq))
-            # allow multiple segments
+            # Pull in metadata
             segment_sources.setdefault(segment_name, []).append(source)
+            segment_lengths.setdefault(segment_name, []).append(seg_len)
+            segment_sequences.setdefault(segment_name, []).append(seg_meta["sequence"])
+            segment_meta_list.setdefault(segment_name, []).append(seg_meta)
 
-            # Track regions
-            if segment_name not in label_regions:
-                label_regions[segment_name] = []
-            label_regions[segment_name].append((start, end))
+            # Extract transcript fragment metadata if present
+            if (
+                transcript_info is None
+                and "transcript_id" in seg_meta
+                and seg_meta["transcript_id"] is not None
+            ):
+                transcript_info = {
+                    "id": seg_meta["transcript_id"],
+                    "length": seg_meta["transcript_length"],
+                    "fragment_start": seg_meta["fragment_start"],
+                    "fragment_end": seg_meta["fragment_end"],
+                    "reverse_complemented": seg_meta["reverse_complemented"],
+                }
 
-            # Add quality scores if available
-            if include_quality and segment_qual is not None:
-                if isinstance(segment_qual, (list, tuple)):
-                    quality_scores.extend(segment_qual)  # type: ignore[arg-type]
-                else:
-                    quality_scores.extend(  # type: ignore[arg-type]
-                        [segment_qual] * len(segment_seq)
-                    )
+            start = len(full_sequence)
+            end = start + seg_len
 
-        # Convert quality scores to array
+            full_sequence.extend(segment_seq)
+            labels.extend([segment_name] * seg_len)
+
+            label_regions.setdefault(segment_name, []).append((start, end))
+
+            # Quality scores
+            if include_quality:
+                if segment_qual is not None:
+                    if isinstance(segment_qual, (list, tuple)):
+                        quality_scores.extend(segment_qual)
+                    else:
+                        quality_scores.extend([segment_qual] * seg_len)
+
+        # convert qual scores
         if include_quality:
-            if not quality_scores:  # type: ignore[truthy-function]
-                # Generate default quality scores
+            if not quality_scores:
                 quality_scores = np.full(
                     len(full_sequence), 30.0, dtype=np.float32
-                )  # Phred 30
+                )
             else:
-                quality_scores = np.array(
-                    quality_scores, dtype=np.float32
-                )  # type: ignore[assignment]
+                quality_scores = np.array(quality_scores, dtype=np.float32)
 
-        # Introduce errors (first modify the raw sequence & labels)
+        # error injection
         has_errors = False
         if inject_errors and self.error_simulator:
-            if self.random_state.random() < self.sim_config.get("error_injection_prob", 0.1):
+            if self.random_state.random() < self.sim_config.get(
+                "error_injection_prob", 0.1
+            ):
                 full_sequence, labels, quality_scores = self.error_simulator.introduce_errors(
                     full_sequence, labels, quality_scores, self.random_state
                 )
                 has_errors = True
-        
-        # Enforce invariant: len(sequence) == len(labels)
+
+        # invariant labels
         if len(labels) != len(full_sequence):
             if len(labels) < len(full_sequence):
                 labels.extend(["UNKNOWN"] * (len(full_sequence) - len(labels)))
             else:
                 labels = labels[:len(full_sequence)]
-        
-        # Recompute regions after error simulation (skip ERROR)
+
+        # pull back out the labels after segment generation
         label_regions = self._regions_from_labels(labels, exclude={"ERROR"})
 
-        # Optional reverse complement - then recompute regions again
-        if self.random_state.random() < self.sim_config.get("full_read_reverse_complement_prob", 0.0):
+        # if full read rc
+        if self.random_state.random() < self.sim_config.get(
+            "full_read_reverse_complement_prob", 0.0
+        ):
             full_sequence = list(reverse_complement(full_sequence))
             labels = labels[::-1]
             if quality_scores is not None:
                 quality_scores = quality_scores[::-1]
-            
-            # Recompute regions after RC
+
             label_regions = self._regions_from_labels(labels, exclude={"ERROR"})
 
-        # Build metadata
+        # metadata block
         metadata = {
+            "segment_order": segment_order,
             "segment_sources": segment_sources,
+            "segment_lengths": segment_lengths,
+            "segment_sequences": segment_sequences,
+            "segment_meta": segment_meta_list,
+            "transcript_info": transcript_info,
             "has_errors": has_errors,
             "diversity_boost": diversity_boost,
+            "is_invalid": False,
         }
 
+        # Return SimulatedRead
         return SimulatedRead(
             sequence="".join(full_sequence),
             labels=labels,
@@ -1696,73 +1733,123 @@ class SequenceSimulator:
                 self.sequence_configs.get(key.lower()))
     
     def _generate_segment_with_source(
-        self,
-        segment_name: str,
-        diversity_boost: Optional[float],
-        include_quality: bool,
-    ) -> Tuple[str, Optional[Union[List[float], float]], str]:
+    self,
+    segment_name: str,
+    diversity_boost: Optional[float],
+    include_quality: bool,
+    ) -> Tuple[str, Optional[Union[List[float], float]], str, Dict]:
         """
-        Generate a segment and return its source.
+        Generate a segment and return:
+            (sequence, quality_scores, source, segment_meta)
 
-        Returns:
-            Tuple of (sequence, quality_scores, source)
+        segment_meta is a dict:
+            {
+                "sequence": str,
+                "length": int,
+                "source": str,
+                ... optional transcript metadata ...
+            }
         """
         segment_upper = segment_name.upper()
 
-        # Special handling for known segment types
+        # acc
         if segment_name == "ACC" and self.acc_generator:
-            seq, qual = self._generate_acc_segment(
-                diversity_boost, include_quality
-            )
-            return seq, qual, "pwm"
+            seq, qual = self._generate_acc_segment(diversity_boost, include_quality)
+            meta = {
+                "sequence": seq,
+                "length": len(seq),
+                "source": "pwm"
+            }
+            return seq, qual, "pwm", meta
 
-        elif "POLYA" in segment_upper and self.polya_generator:
+        # polyA
+        if "POLYA" in segment_upper and self.polya_generator:
             seq = self.polya_generator.generate(self.random_state)
-            qual = 25.0 if include_quality else None  # Moderate quality for polyA
-            return seq, qual, "polya_generator"
+            qual = 25.0 if include_quality else None
+            meta = {
+                "sequence": seq,
+                "length": len(seq),
+                "source": "polya_generator"
+            }
+            return seq, qual, "polya_generator", meta
 
-        elif (
+        # txp derived insert
+        if (
             "INSERT" in segment_upper
             or "CDNA" in segment_upper
             or "TRANSCRIPT" in segment_upper
         ):
             if self.transcript_pool:
+
+                # Sample cDNA fragment
                 seq = self.transcript_pool.sample_fragment(self.random_state)
-                qual = 30.0 if include_quality else None  # High quality for transcript
-                return seq, qual, "transcript_pool"
+                qual = 30.0 if include_quality else None
 
-        # Check whitelist manager first
+                # Grab transcript info if available
+                tx_entry = getattr(self.transcript_pool, "last_sampled_entry", None)
+                fragment_start = getattr(self.transcript_pool, "last_fragment_start", None)
+                fragment_end = getattr(self.transcript_pool, "last_fragment_end", None)
+
+                meta = {
+                    "sequence": seq,
+                    "length": len(seq),
+                    "source": "transcript_pool",
+                    "transcript_id": tx_entry.name if tx_entry else None,
+                    "transcript_length": tx_entry.length if tx_entry else None,
+                    "fragment_start": fragment_start,
+                    "fragment_end": fragment_end,
+                    "reverse_complemented": getattr(self.transcript_pool, "last_fragment_rc", False)
+                }
+
+                return seq, qual, "transcript_pool", meta
+
+        # whitelist manager
         if self.whitelist_manager.has_whitelist(segment_name):
-            seq = self.whitelist_manager.sample(
-                segment_name, self.random_state
-            )
-            # Resolve any IUPAC codes (N, R, Y, etc.) to actual bases
-            seq = self._resolve_iupac_codes(seq)
-            qual = 35.0 if include_quality else None  # Very high quality for whitelist
-            return seq, qual, "whitelist"
-
-        # Check legacy whitelists
-        if segment_name in self.whitelists:
-            seq = self.random_state.choice(self.whitelists[segment_name])
-            # Resolve any IUPAC codes (N, R, Y, etc.) to actual bases
+            seq = self.whitelist_manager.sample(segment_name, self.random_state)
             seq = self._resolve_iupac_codes(seq)
             qual = 35.0 if include_quality else None
-            return seq, qual, "whitelist"
+            meta = {
+                "sequence": seq,
+                "length": len(seq),
+                "source": "whitelist"
+            }
+            return seq, qual, "whitelist", meta
 
-        # Check fixed sequences
+        # whitelists legacy
+        if segment_name in self.whitelists:
+            seq = self.random_state.choice(self.whitelists[segment_name])
+            seq = self._resolve_iupac_codes(seq)
+            qual = 35.0 if include_quality else None
+            meta = {
+                "sequence": seq,
+                "length": len(seq),
+                "source": "whitelist"
+            }
+            return seq, qual, "whitelist", meta
+
+        # fixed seqs
         cfg_val = self._get_seq_cfg(segment_name)
         if cfg_val is not None:
             seq = cfg_val
             if seq not in ["random", "transcript", "polya"]:
-                # Resolve any IUPAC codes (N, R, Y, etc.) to actual bases
                 seq = self._resolve_iupac_codes(seq)
-                qual = 40.0 if include_quality else None  # Perfect quality for fixed
-                return seq, qual, "fixed"
+                qual = 40.0 if include_quality else None
+                meta = {
+                    "sequence": seq,
+                    "length": len(seq),
+                    "source": "fixed"
+                }
+                return seq, qual, "fixed", meta
 
-        # Default: generate random sequence
+        # random seqs
         seq = self._generate_segment(segment_name)
-        qual = 25.0 if include_quality else None  # Moderate quality for random
-        return seq, qual, "random"
+        qual = 25.0 if include_quality else None
+        meta = {
+            "sequence": seq,
+            "length": len(seq),
+            "source": "random"
+        }
+        return seq, qual, "random", meta
 
     def _generate_acc_segment(
         self,
