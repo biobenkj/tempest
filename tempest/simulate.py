@@ -75,12 +75,15 @@ def run_simulation(
         use_parallel = False
     
     # Apply configuration overrides
-    if 'num_sequences' in kwargs:
+    if 'num_sequences' in kwargs and kwargs['num_sequences'] is not None:
         sim_config.num_sequences = kwargs['num_sequences']
-    if 'seed' in kwargs:
+
+    if 'seed' in kwargs and kwargs['seed'] is not None:
         sim_config.random_seed = kwargs['seed']
-    if 'train_fraction' in kwargs:
+
+    if 'train_fraction' in kwargs and kwargs['train_fraction'] is not None:
         sim_config.train_split = kwargs['train_fraction']
+
     if 'invalid_fraction' in kwargs and kwargs['invalid_fraction'] is not None:
         sim_config.invalid_fraction = kwargs['invalid_fraction']
     

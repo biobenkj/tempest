@@ -251,9 +251,18 @@ def _generate_chunk_worker(chunk_info: Dict[str, Any], progress_queue: Optional[
     
     # Create a simulator instance for this worker
     # Each worker gets its own random seed to ensure different sequences
+    import copy
     worker_config = copy.deepcopy(config)
-    base_seed = worker_config.get('simulation', {}).get('random_seed', 42)
-    worker_config.setdefault('simulation', {})['random_seed'] = base_seed + seed_offset
+
+    sim_section = worker_config.setdefault('simulation', {})
+    base_seed = sim_section.get('random_seed')
+
+    # Fall back if missing or None
+    if base_seed is None:
+        base_seed = 42
+
+    # Ensure ints
+    sim_section['random_seed'] = int(base_seed) + int(seed_offset)
     
     # Suppress simulator initialization logging
     simulator = SequenceSimulator(config=worker_config)
