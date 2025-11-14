@@ -2171,31 +2171,13 @@ class SequenceSimulator:
         stats = {}
         start_time = time.time()
 
-        # Capture comprehensive metadata for propagation
+        # capture metadata
         simulator_metadata = {
             "config": self.config,
             "sim_config": self.sim_config,
             "timestamp": time.time(),
             "sequence_order": self.sequence_order,
-            "generator_class": self.__class__.__name__,
-            "generator_version": getattr(self, 'version', '0.3.0'),
-            
-            # Add simulation parameters summary
-            "simulation_summary": {
-                "total_sequences": len(reads),
-                "valid_sequences": sum(1 for r in reads if not (hasattr(r, 'metadata') and r.metadata and r.metadata.get('is_invalid', False))),
-                "invalid_sequences": sum(1 for r in reads if hasattr(r, 'metadata') and r.metadata and r.metadata.get('is_invalid', False)),
-            }
         }
-        
-        # Add generator configurations if present
-        if hasattr(self, 'acc_generator') and self.acc_generator:
-            simulator_metadata["acc_generator_config"] = {
-                "type": self.acc_generator.__class__.__name__,
-                "temperature": getattr(self.acc_generator, 'temperature', None),
-                "min_entropy": getattr(self.acc_generator, 'min_entropy', None),
-                "diversity_boost": getattr(self.acc_generator, 'diversity_boost', None),
-            }
         
         if format == 'pickle':
             # Ensure metadata is fully detached from internal objects
@@ -2275,218 +2257,67 @@ class SequenceSimulator:
     
     def _create_preview_file(self, reads: List[SimulatedRead], preview_path: Path):
         """
-        Create an enhanced text preview file with comprehensive metadata.
-        
-        This enhanced version preserves:
-        - Complete dataset statistics (valid/invalid counts)
-        - Simulator configuration metadata
-        - Read-level metadata for all sequences
-        - Error type distribution for invalid reads
-        - Label distribution statistics
+        Create a text preview file with the first 10 reads.
         """
+        n_preview = min(10, len(reads))
+
         with open(preview_path, 'w') as f:
-            # ============= HEADER SECTION =============
-            f.write("# TEMPEST Sequence Preview File\n")
-            f.write(f"# Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"# Generator: {self.__class__.__name__}\n")
+            f.write(f"# Preview of first {n_preview} sequences\n")
+            f.write(f"# Total sequences in dataset: {len(reads)}\n")
+            f.write(f"# Format: sequence<TAB>labels\n")
             f.write("#" + "=" * 70 + "\n\n")
-            
-            # ============= DATASET STATISTICS =============
-            f.write("# DATASET STATISTICS\n")
-            f.write("#" + "-" * 70 + "\n")
-            f.write(f"# Total sequences: {len(reads):,}\n")
-            
-            # Count valid/invalid reads
-            valid_count = 0
-            invalid_count = 0
-            error_types = {}
-            
-            for read in reads:
-                if hasattr(read, 'metadata') and read.metadata:
-                    if read.metadata.get('is_invalid', False):
-                        invalid_count += 1
-                        error_type = read.metadata.get('error_type', 'unknown')
-                        error_types[error_type] = error_types.get(error_type, 0) + 1
-                    else:
-                        valid_count += 1
-                else:
-                    valid_count += 1
-            
-            f.write(f"# Valid reads: {valid_count:,} ({valid_count/len(reads)*100:.1f}%)\n")
-            f.write(f"# Invalid reads: {invalid_count:,} ({invalid_count/len(reads)*100:.1f}%)\n")
-            
-            if error_types:
-                f.write("\n# Error Type Distribution:\n")
-                for error_type, count in sorted(error_types.items()):
-                    f.write(f"#   {error_type}: {count:,} ({count/invalid_count*100:.1f}%)\n")
-            
-            # Sequence length statistics
-            if reads:
-                lengths = [len(r.sequence) for r in reads[:1000]]  # Sample first 1000
-                f.write(f"\n# Sequence Length Statistics (from sample):\n")
-                f.write(f"#   Mean: {sum(lengths)/len(lengths):.1f} bp\n")
-                f.write(f"#   Min: {min(lengths)} bp\n")
-                f.write(f"#   Max: {max(lengths)} bp\n")
-            
-            # ============= SIMULATOR CONFIGURATION =============
-            f.write("\n# SIMULATOR CONFIGURATION\n")
-            f.write("#" + "-" * 70 + "\n")
-            
-            # Sequence order
-            if hasattr(self, 'sequence_order'):
-                f.write(f"# Sequence order: {' -> '.join(self.sequence_order)}\n")
-            
-            # Key configuration parameters
-            if hasattr(self, 'sim_config'):
-                sim_config = self.sim_config
-                
-                # Handle both dict and object attribute access
-                def get_value(obj, key, default=None):
-                    if isinstance(obj, dict):
-                        return obj.get(key, default)
-                    return getattr(obj, key, default)
-                
-                f.write(f"# Random seed: {get_value(sim_config, 'random_seed', 'N/A')}\n")
-                f.write(f"# Train split: {get_value(sim_config, 'train_split', 'N/A')}\n")
-                
-                # Invalid fraction
-                invalid_frac = get_value(sim_config, 'invalid_fraction', 0)
-                if invalid_frac > 0:
-                    f.write(f"# Invalid fraction: {invalid_frac:.3f}\n")
-                
-                # Error injection
-                error_prob = get_value(sim_config, 'error_injection_prob', 0)
-                if error_prob > 0:
-                    f.write(f"# Error injection probability: {error_prob:.3f}\n")
-                
-                # Reverse complement probability
-                rc_prob = get_value(sim_config, 'full_read_reverse_complement_prob', 0)
-                if rc_prob > 0:
-                    f.write(f"# Reverse complement probability: {rc_prob:.3f}\n")
-            
-            # PWM configuration if present
-            if hasattr(self, 'acc_generator') and self.acc_generator:
-                acc_gen = self.acc_generator
-                f.write(f"\n# ACC Generator Configuration:\n")
-                if hasattr(acc_gen, 'temperature'):
-                    f.write(f"#   Temperature: {acc_gen.temperature}\n")
-                if hasattr(acc_gen, 'min_entropy'):
-                    f.write(f"#   Min entropy: {acc_gen.min_entropy}\n")
-                if hasattr(acc_gen, 'diversity_boost'):
-                    f.write(f"#   Diversity boost: {getattr(acc_gen, 'diversity_boost', 'N/A')}\n")
-            
-            # ============= LABEL DISTRIBUTION =============
-            if reads:
-                f.write("\n# LABEL DISTRIBUTION (from first 1000 sequences)\n")
-                f.write("#" + "-" * 70 + "\n")
-                
-                label_counts = {}
-                total_positions = 0
-                
-                for read in reads[:1000]:
-                    for label in read.labels:
-                        label_counts[label] = label_counts.get(label, 0) + 1
-                        total_positions += 1
-                
-                # Sort by frequency
-                sorted_labels = sorted(label_counts.items(), key=lambda x: x[1], reverse=True)
-                
-                for label, count in sorted_labels:
-                    percentage = (count / total_positions * 100) if total_positions > 0 else 0
-                    f.write(f"# {label:10s}: {count:8,} positions ({percentage:5.2f}%)\n")
-            
-            # ============= SEQUENCE PREVIEW =============
-            f.write("\n# SEQUENCE PREVIEW\n")
-            f.write("#" + "=" * 70 + "\n")
-            f.write("# Format: sequence<TAB>labels<TAB>is_invalid<TAB>metadata_json\n")
-            f.write("#" + "-" * 70 + "\n\n")
-            
-            # Helper function to safely encode objects for JSON
-            def safe_json_encode(obj):
-                """Convert non-JSON-serializable objects."""
-                if isinstance(obj, (list, tuple)):
-                    return [safe_json_encode(item) for item in obj]
-                elif isinstance(obj, dict):
-                    return {k: safe_json_encode(v) for k, v in obj.items()}
-                elif hasattr(obj, '__dict__'):
-                    return safe_json_encode(obj.__dict__)
-                elif isinstance(obj, bytes):
-                    return obj.decode('utf-8', errors='replace')
-                elif isinstance(obj, (set, frozenset)):
+            f.write("# Simulator metadata:\n")
+            f.write(json.dumps({
+                "sequence_order": self.sequence_order,
+                "config_keys": list(self.config.keys()),
+            }, indent=2))
+            f.write("\n\n")
+
+        # helper
+            def _encode(obj):
+                if isinstance(obj, tuple):
                     return list(obj)
-                elif isinstance(obj, np.ndarray):
+                if isinstance(obj, np.ndarray):
                     return obj.tolist()
-                else:
-                    try:
-                        json.dumps(obj)
-                        return obj
-                    except:
-                        return str(obj)
-            
-            # Show up to 100 sequences (was 10)
-            n_preview = min(100, len(reads))
-            
-            # Write sequences with metadata
+                if isinstance(obj, bytes):
+                    return obj.decode("utf-8", errors="replace")
+                return obj
+
             for i, read in enumerate(reads[:n_preview], 1):
-                # Basic sequence and labels
+                f.write(f"# Read {i}\n")
                 labels_str = ' '.join(read.labels)
-                
-                # Metadata handling
-                is_invalid = 'N'
-                metadata_dict = {}
-                
-                if hasattr(read, 'metadata') and read.metadata:
-                    is_invalid = 'Y' if read.metadata.get('is_invalid', False) else 'N'
-                    
-                    # Include all metadata except redundant fields
-                    metadata_dict = {
-                        k: safe_json_encode(v) 
-                        for k, v in read.metadata.items() 
-                        if k not in ['sequence', 'labels']
-                    }
-                
-                # Add label regions if present
-                if hasattr(read, 'label_regions') and read.label_regions:
-                    region_summary = {}
+                f.write(f"{read.sequence}\t{labels_str}\n")
+
+                # full metadata - safe for json
+                if read.metadata:
+                    try:
+                        safe_meta = json.loads(json.dumps(read.metadata, default=_encode))
+                    except Exception:
+                        # fallback: convert dict manually
+                        safe_meta = {k: _encode(v) for k, v in read.metadata.items()}
+
+                    f.write("# Metadata:\n")
+                    f.write(json.dumps(safe_meta, indent=2))
+                    f.write("\n")
+
+                # region summaries
+                if read.label_regions:
+                    ranges = []
                     for label, regions in read.label_regions.items():
-                        region_summary[label] = [[start, end] for start, end in regions]
-                    metadata_dict['regions'] = region_summary
-                
-                # Compact JSON representation
-                try:
-                    metadata_json = json.dumps(metadata_dict, separators=(',', ':'))
-                except:
-                    metadata_json = '{}'
-                
-                # Write the sequence line
-                f.write(f"{read.sequence}\t{labels_str}\t{is_invalid}\t{metadata_json}\n")
-                
-                # Add human-readable annotation for first few sequences and any invalid reads
-                if i <= 5 or (is_invalid == 'Y' and i <= 20):
-                    if is_invalid == 'Y' and 'error_type' in metadata_dict:
-                        error_type = metadata_dict['error_type']
-                        error_desc = f"# -> Error: {error_type}"
-                        
-                        if error_type == 'segment_loss' and 'removed_segment' in metadata_dict:
-                            error_desc += f" (removed: {metadata_dict['removed_segment']})"
-                        elif error_type == 'segment_duplication' and 'duplicated_segment' in metadata_dict:
-                            error_desc += f" (duplicated: {metadata_dict['duplicated_segment']})"
-                        elif error_type == 'truncation' and 'truncation_point' in metadata_dict:
-                            error_desc += f" (at position: {metadata_dict['truncation_point']})"
-                        
-                        f.write(error_desc + "\n")
-            
-            # Footer
-            if len(reads) > n_preview:
-                f.write(f"\n# ... {len(reads) - n_preview:,} more sequences not shown ...\n")
-            
-            f.write("\n# END OF PREVIEW\n")
-        
-        logger.info(f"Created enhanced preview file: {preview_path}")
-        if invalid_count > 0:
-            logger.info(f"  - {valid_count:,} valid reads, {invalid_count:,} invalid reads")
-            if error_types:
-                logger.info(f"  - Error types: {', '.join(f'{k}:{v}' for k, v in error_types.items())}")
+                        region_strs = [f"{s}-{e}" for s, e in regions]
+                        ranges.append(f"{label}:[{','.join(region_strs)}]")
+                    f.write(f"# Regions: {'; '.join(ranges)}\n")
+
+                # segment visualization
+                if i <= 3:
+                    f.write("# Segments: ")
+                    segment_viz = []
+                    for label, regions in read.label_regions.items():
+                        for start, end in regions:
+                            segment_viz.append(f"{label}({end-start}bp)")
+                    f.write(" | ".join(segment_viz) + "\n")
+
+                f.write("\n")
 
         logger.info(f"Created preview file with {n_preview} sequences: {preview_path}")
     
@@ -2957,3 +2788,134 @@ if __name__ == "__main__":
 
     print("\nSimulation complete!")
 
+
+# Standalone helper functions for pickle format support
+def save_reads(
+    reads: List[SimulatedRead], 
+    output_path: Path,
+    format: str = 'pickle',
+    compress: bool = True,
+    create_preview: bool = True
+) -> Dict[str, Any]:
+    """
+    Standalone function to save simulated reads to file.
+    
+    Args:
+        reads: List of SimulatedRead objects
+        output_path: Output file path
+        format: Output format ('pickle', 'text', 'json')
+        compress: Whether to compress pickle files
+        create_preview: Whether to create a preview text file
+        
+    Returns:
+        Dictionary with save statistics
+    """
+    # Create a dummy simulator to use its save_reads method
+    simulator = SequenceSimulator()
+    return simulator.save_reads(reads, output_path, format, compress, create_preview)
+
+
+def load_reads(
+    input_path: Path,
+    format: Optional[str] = None
+) -> List[SimulatedRead]:
+    """
+    Standalone function to load simulated reads from file.
+    
+    Args:
+        input_path: Input file path
+        format: Input format (auto-detected if None)
+        
+    Returns:
+        List of SimulatedRead objects
+    """
+    # Create a dummy simulator to use its load_reads method
+    simulator = SequenceSimulator()
+    return simulator.load_reads(input_path, format)
+
+
+def generate_and_save(
+    config_file: str,
+    n_sequences: int,
+    output_path: Path,
+    format: str = 'pickle',
+    compress: bool = True,
+    create_preview: bool = True,
+    split: bool = False,
+    train_fraction: float = 0.8
+) -> Dict[str, Any]:
+    """
+    Generate sequences and save them directly to file.
+    
+    Args:
+        config_file: Configuration file path
+        n_sequences: Number of sequences to generate
+        output_path: Output file/directory path
+        format: Output format
+        compress: Whether to compress
+        create_preview: Whether to create preview file
+        split: Whether to create train/val split
+        train_fraction: Fraction for training if split
+        
+    Returns:
+        Dictionary with generation and save statistics
+    """
+    simulator = create_simulator_from_config(config_file)
+    result = {}
+    output_path = Path(output_path)
+    
+    if split:
+        # Generate train/val split
+        n_train = int(n_sequences * train_fraction)
+        n_val = n_sequences - n_train
+        
+        logger.info(f"Generating {n_train} training sequences...")
+        train_reads = simulator.generate_batch(n_train)
+        
+        logger.info(f"Generating {n_val} validation sequences...")
+        val_reads = simulator.generate_batch(n_val)
+        
+        # Determine output paths
+        if output_path.is_dir() or not output_path.suffix:
+            output_path.mkdir(parents=True, exist_ok=True)
+            if format == 'pickle':
+                ext = '.pkl.gz' if compress else '.pkl'
+            else:
+                ext = '.txt'
+            train_path = output_path / f"train{ext}"
+            val_path = output_path / f"val{ext}"
+        else:
+            # Use stem of provided path
+            stem = output_path.stem
+            parent = output_path.parent
+            parent.mkdir(parents=True, exist_ok=True)
+            if format == 'pickle':
+                ext = '.pkl.gz' if compress else '.pkl'
+            else:
+                ext = '.txt'
+            train_path = parent / f"{stem}_train{ext}"
+            val_path = parent / f"{stem}_val{ext}"
+        
+        # Save both sets
+        train_stats = simulator.save_reads(train_reads, train_path, format, compress, create_preview)
+        val_stats = simulator.save_reads(val_reads, val_path, format, compress, create_preview)
+        
+        result['train'] = train_stats
+        result['val'] = val_stats
+        result['n_train'] = n_train
+        result['n_val'] = n_val
+        
+    else:
+        # Generate single dataset
+        logger.info(f"Generating {n_sequences} sequences...")
+        reads = simulator.generate_batch(n_sequences)
+        
+        # Ensure parent directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Save dataset
+        stats = simulator.save_reads(reads, output_path, format, compress, create_preview)
+        result.update(stats)
+    
+    result['total_sequences'] = n_sequences
+    return result

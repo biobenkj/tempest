@@ -4,17 +4,6 @@ Parallel Sequence Simulator for Tempest
 High-performance parallel version with proper invalid read generation
 and controlled logging to prevent console spam.
 
-ENHANCEMENT NOTE: This class inherits from SequenceSimulator, which has been
-enhanced with comprehensive metadata preservation in preview files. The enhanced
-_create_preview_file method automatically provides:
-- Complete dataset statistics (valid/invalid counts)
-- Full metadata preservation for all sequences
-- Error type distributions
-- Label frequency analysis
-- Simulator configuration capture
-
-No changes are needed to this file - all preview enhancements are inherited.
-
 """
 
 import os

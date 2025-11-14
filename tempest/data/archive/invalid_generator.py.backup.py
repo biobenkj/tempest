@@ -279,167 +279,53 @@ class InvalidReadGenerator:
     
     def _create_preview_file(self, reads: List[SimulatedRead], preview_path: Path):
         """
-        Create an enhanced preview file for invalid reads with comprehensive metadata.
+        Create a text preview file highlighting invalid reads.
         
-        This enhanced version includes:
-        - Complete error type distribution
-        - Detailed invalid read statistics
-        - Full metadata preservation
-        - Error-specific annotations
+        Args:
+            reads: List of SimulatedRead objects
+            preview_path: Path for preview file
         """
-        # Count error types first
+        n_preview = min(10, len(reads))
+        
+        # Count error types
         error_counts = self._count_error_types(reads)
         invalid_count = sum(error_counts.values())
-        valid_count = len(reads) - invalid_count
         
         with open(preview_path, 'w') as f:
-            # ============= HEADER SECTION =============
-            f.write("# TEMPEST Invalid Read Preview File\n")
-            f.write(f"# Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"# Generator: {self.__class__.__name__}\n")
-            f.write("#" + "=" * 70 + "\n\n")
+            f.write(f"# Invalid Read Preview - First {n_preview} sequences\n")
+            f.write(f"# Total sequences: {len(reads)}\n")
+            f.write(f"# Invalid sequences: {invalid_count} ({invalid_count/len(reads)*100:.1f}%)\n")
+            f.write(f"# Error type distribution: {json.dumps(error_counts)}\n")
+            f.write("#" + "="*70 + "\n\n")
             
-            # ============= DATASET STATISTICS =============
-            f.write("# DATASET STATISTICS\n")
-            f.write("#" + "-" * 70 + "\n")
-            f.write(f"# Total sequences: {len(reads):,}\n")
-            f.write(f"# Valid sequences: {valid_count:,} ({valid_count/len(reads)*100:.1f}%)\n")
-            f.write(f"# Invalid sequences: {invalid_count:,} ({invalid_count/len(reads)*100:.1f}%)\n")
-            
-            # ============= ERROR TYPE DISTRIBUTION =============
-            if error_counts:
-                f.write("\n# ERROR TYPE DISTRIBUTION\n")
-                f.write("#" + "-" * 70 + "\n")
+            for i, read in enumerate(reads[:n_preview], 1):
+                error_type = read.metadata.get('error_type', 'valid') if read.metadata else 'valid'
                 
-                # Sort by frequency
-                sorted_errors = sorted(error_counts.items(), key=lambda x: x[1], reverse=True)
-                for error_type, count in sorted_errors:
-                    percentage = (count / invalid_count * 100) if invalid_count > 0 else 0
-                    f.write(f"# {error_type:25s}: {count:6,} ({percentage:5.1f}%)\n")
-                
-                # Add error probabilities if configured
-                if hasattr(self, 'error_probabilities') and self.error_probabilities:
-                    f.write("\n# Configured Error Probabilities:\n")
-                    for error_type, prob in self.error_probabilities.items():
-                        f.write(f"#   {error_type}: {prob:.3f}\n")
-            
-            # ============= SEQUENCE LENGTH STATISTICS =============
-            if reads:
-                lengths = [len(r.sequence) for r in reads[:1000]]
-                f.write("\n# SEQUENCE LENGTH STATISTICS (from sample)\n")
-                f.write("#" + "-" * 70 + "\n")
-                f.write(f"# Mean: {sum(lengths)/len(lengths):.1f} bp\n")
-                f.write(f"# Min: {min(lengths)} bp\n")
-                f.write(f"# Max: {max(lengths)} bp\n")
-            
-            # ============= LABEL DISTRIBUTION =============
-            if reads:
-                f.write("\n# LABEL DISTRIBUTION (first 1000 sequences)\n")
-                f.write("#" + "-" * 70 + "\n")
-                
-                label_counts = {}
-                for read in reads[:1000]:
-                    for label in read.labels:
-                        label_counts[label] = label_counts.get(label, 0) + 1
-                
-                # Sort by frequency
-                sorted_labels = sorted(label_counts.items(), key=lambda x: x[1], reverse=True)[:15]  # Top 15
-                
-                total_positions = sum(label_counts.values())
-                for label, count in sorted_labels:
-                    percentage = (count / total_positions * 100) if total_positions > 0 else 0
-                    f.write(f"# {label:10s}: {count:8,} positions ({percentage:5.2f}%)\n")
-                
-                if len(label_counts) > 15:
-                    f.write(f"# ... and {len(label_counts) - 15} more labels\n")
-            
-            # ============= SEQUENCE PREVIEW =============
-            f.write("\n# SEQUENCE PREVIEW\n")
-            f.write("#" + "=" * 70 + "\n")
-            f.write("# Format: sequence<TAB>labels<TAB>is_invalid<TAB>metadata_json\n")
-            f.write("#" + "-" * 70 + "\n\n")
-            
-            # Show up to 100 sequences, with emphasis on invalid reads
-            n_preview = min(100, len(reads))
-            
-            # Separate valid and invalid reads for balanced preview
-            valid_reads = [r for r in reads if not (hasattr(r, 'metadata') and r.metadata and r.metadata.get('is_invalid', False))]
-            invalid_reads = [r for r in reads if hasattr(r, 'metadata') and r.metadata and r.metadata.get('is_invalid', False)]
-            
-            # Show a mix of both, prioritizing invalid reads
-            preview_reads = []
-            if invalid_reads:
-                # Show up to 70% invalid reads in preview
-                n_invalid_preview = min(len(invalid_reads), int(n_preview * 0.7))
-                n_valid_preview = min(len(valid_reads), n_preview - n_invalid_preview)
-                
-                preview_reads.extend(invalid_reads[:n_invalid_preview])
-                preview_reads.extend(valid_reads[:n_valid_preview])
-            else:
-                preview_reads = reads[:n_preview]
-            
-            # Write sequences with metadata
-            for i, read in enumerate(preview_reads, 1):
+                f.write(f"# Read {i} - Type: {error_type.upper()}\n")
                 labels_str = ' '.join(read.labels)
+                f.write(f"{read.sequence}\t{labels_str}\n")
                 
-                # Metadata handling
-                is_invalid = 'N'
-                metadata_dict = {}
+                # Add metadata if present
+                if read.metadata:
+                    relevant_metadata = {k: v for k, v in read.metadata.items() 
+                                       if k != 'error_type'}
+                    if relevant_metadata:
+                        f.write(f"# Metadata: {json.dumps(relevant_metadata)}\n")
                 
-                if hasattr(read, 'metadata') and read.metadata:
-                    is_invalid = 'Y' if read.metadata.get('is_invalid', False) else 'N'
-                    
-                    # Include all metadata
-                    metadata_dict = {k: v for k, v in read.metadata.items() if k not in ['sequence', 'labels']}
+                # Highlight the error for invalid reads
+                if error_type != 'valid' and error_type != 'none':
+                    if error_type == 'segment_loss' and 'removed_segment' in read.metadata:
+                        f.write(f"# --> Missing: {read.metadata['removed_segment']}\n")
+                    elif error_type == 'segment_duplication' and 'duplicated_segment' in read.metadata:
+                        f.write(f"# --> Duplicated: {read.metadata['duplicated_segment']}\n")
+                    elif error_type == 'truncation' and 'truncation_point' in read.metadata:
+                        f.write(f"# --> Truncated at position: {read.metadata['truncation_point']}\n")
+                    elif error_type in ['chimeric', 'scrambled']:
+                        f.write(f"# --> Segments reordered\n")
                 
-                # Add label regions if present
-                if hasattr(read, 'label_regions') and read.label_regions:
-                    region_summary = {}
-                    for label, regions in read.label_regions.items():
-                        region_summary[label] = [[start, end] for start, end in regions]
-                    metadata_dict['regions'] = region_summary
-                
-                # Safe JSON encoding
-                try:
-                    metadata_json = json.dumps(metadata_dict, separators=(',', ':'))
-                except:
-                    metadata_json = '{}'
-                
-                # Write the sequence line
-                f.write(f"{read.sequence}\t{labels_str}\t{is_invalid}\t{metadata_json}\n")
-                
-                # Add error annotations for invalid reads (first 20)
-                if is_invalid == 'Y' and i <= 20:
-                    error_type = metadata_dict.get('error_type', 'unknown')
-                    error_desc = f"# -> Error: {error_type}"
-                    
-                    if error_type == 'segment_loss' and 'removed_segment' in metadata_dict:
-                        error_desc += f" (removed: {metadata_dict['removed_segment']})"
-                    elif error_type == 'segment_duplication' and 'duplicated_segment' in metadata_dict:
-                        error_desc += f" (duplicated: {metadata_dict['duplicated_segment']})"
-                    elif error_type == 'truncation':
-                        if 'truncation_point' in metadata_dict:
-                            error_desc += f" (at position: {metadata_dict['truncation_point']})"
-                        if 'original_length' in metadata_dict:
-                            error_desc += f" (original: {metadata_dict['original_length']}bp)"
-                    elif error_type == 'chimeric':
-                        if 'source_reads' in metadata_dict:
-                            error_desc += f" (from {len(metadata_dict['source_reads'])} reads)"
-                    elif error_type == 'scrambled':
-                        error_desc += " (segment order randomized)"
-                    
-                    f.write(error_desc + "\n")
-            
-            # Footer
-            if len(reads) > n_preview:
-                f.write(f"\n# ... {len(reads) - n_preview:,} more sequences not shown ...\n")
-            
-            f.write("\n# END OF PREVIEW\n")
+                f.write("\n")
         
-        logger.info(f"Created enhanced invalid read preview: {preview_path}")
-        logger.info(f"  - {valid_count:,} valid, {invalid_count:,} invalid reads")
-        if error_counts:
-            logger.info(f"  - Error distribution: {', '.join(f'{k}:{v}' for k, v in sorted(error_counts.items()))}")
+        logger.info(f"Created invalid read preview: {preview_path}")
     
     def _categorize_reads(self, reads: List[SimulatedRead]) -> Dict[int, str]:
         """

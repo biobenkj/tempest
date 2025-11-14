@@ -2,6 +2,8 @@
 Data module for Tempest.
 
 Contains data simulation, preprocessing, and generators.
+
+Enhanced version with comprehensive metadata preservation in preview files.
 """
 
 from .simulator import (
@@ -14,7 +16,7 @@ from .simulator import (
     create_simulator_from_config,
     reads_to_arrays,
     demonstrate_probabilistic_generation
-    )
+)
 
 from .invalid_generator import InvalidReadGenerator
 
@@ -23,7 +25,7 @@ from .parallel_simulator import (
     ParallelInvalidReadGenerator,
     create_parallel_simulator_from_config,
     configure_worker_logging
-    )
+)
 
 __all__ = [
     'SimulatedRead',
