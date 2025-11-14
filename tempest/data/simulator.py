@@ -2333,11 +2333,11 @@ class SequenceSimulator:
             f.write("#" + "-" * 70 + "\n")
             
             # Sequence order
-            if hasattr(self, 'sequence_order'):
+            if hasattr(self, 'sequence_order') and self.sequence_order:
                 f.write(f"# Sequence order: {' -> '.join(self.sequence_order)}\n")
             
             # Key configuration parameters
-            if hasattr(self, 'sim_config'):
+            if hasattr(self, 'sim_config') and self.sim_config:
                 sim_config = self.sim_config
                 
                 # Handle both dict and object attribute access
@@ -2956,4 +2956,146 @@ if __name__ == "__main__":
         print("\nRun with --demo for a demonstration of the simulator")
 
     print("\nSimulation complete!")
+
+
+# Standalone helper functions for backward compatibility
+# These are kept to maintain compatibility with existing code that may use them
+def save_reads(
+    reads: List[SimulatedRead], 
+    output_path: Path,
+    format: str = 'pickle',
+    compress: bool = True,
+    create_preview: bool = True
+) -> Dict[str, Any]:
+    """
+    Standalone function to save simulated reads to file.
+    
+    NOTE: This function creates a dummy simulator instance. 
+    It's recommended to use SequenceSimulator.save_reads directly instead.
+    
+    Args:
+        reads: List of SimulatedRead objects
+        output_path: Output file path
+        format: Output format ('pickle', 'text', 'json')
+        compress: Whether to compress pickle files
+        create_preview: Whether to create a preview text file
+        
+    Returns:
+        Dictionary with save statistics
+    """
+    # Create a dummy simulator to use its save_reads method
+    simulator = SequenceSimulator()
+    return simulator.save_reads(reads, output_path, format, compress, create_preview)
+
+
+def load_reads(
+    input_path: Path,
+    format: Optional[str] = None
+) -> List[SimulatedRead]:
+    """
+    Standalone function to load simulated reads from file.
+    
+    NOTE: This function creates a dummy simulator instance.
+    It's recommended to use SequenceSimulator.load_reads directly instead.
+    
+    Args:
+        input_path: Input file path
+        format: Input format (auto-detected if None)
+        
+    Returns:
+        List of SimulatedRead objects
+    """
+    # Create a dummy simulator to use its load_reads method
+    simulator = SequenceSimulator()
+    return simulator.load_reads(input_path, format)
+
+
+def generate_and_save(
+    config_file: str,
+    n_sequences: int,
+    output_path: Path,
+    format: str = 'pickle',
+    compress: bool = True,
+    create_preview: bool = True,
+    split: bool = False,
+    train_fraction: float = 0.8
+) -> Dict[str, Any]:
+    """
+    Generate sequences and save them directly to file.
+    
+    NOTE: This function is kept for backward compatibility.
+    Consider using the simulate command directly instead.
+    
+    Args:
+        config_file: Configuration file path
+        n_sequences: Number of sequences to generate
+        output_path: Output file/directory path
+        format: Output format
+        compress: Whether to compress
+        create_preview: Whether to create preview file
+        split: Whether to create train/val split
+        train_fraction: Fraction for training if split
+        
+    Returns:
+        Dictionary with generation and save statistics
+    """
+    simulator = create_simulator_from_config(config_file)
+    result = {}
+    output_path = Path(output_path)
+    
+    if split:
+        # Generate train/val split
+        n_train = int(n_sequences * train_fraction)
+        n_val = n_sequences - n_train
+        
+        logger.info(f"Generating {n_train} training sequences...")
+        train_reads = simulator.generate_batch(n_train)
+        
+        logger.info(f"Generating {n_val} validation sequences...")
+        val_reads = simulator.generate_batch(n_val)
+        
+        # Determine output paths
+        if output_path.is_dir() or not output_path.suffix:
+            output_path.mkdir(parents=True, exist_ok=True)
+            if format == 'pickle':
+                ext = '.pkl.gz' if compress else '.pkl'
+            else:
+                ext = '.txt'
+            train_path = output_path / f"train{ext}"
+            val_path = output_path / f"val{ext}"
+        else:
+            # Use stem of provided path
+            stem = output_path.stem
+            parent = output_path.parent
+            parent.mkdir(parents=True, exist_ok=True)
+            if format == 'pickle':
+                ext = '.pkl.gz' if compress else '.pkl'
+            else:
+                ext = '.txt'
+            train_path = parent / f"{stem}_train{ext}"
+            val_path = parent / f"{stem}_val{ext}"
+        
+        # Save both sets
+        train_stats = simulator.save_reads(train_reads, train_path, format, compress, create_preview)
+        val_stats = simulator.save_reads(val_reads, val_path, format, compress, create_preview)
+        
+        result['train'] = train_stats
+        result['val'] = val_stats
+        result['n_train'] = n_train
+        result['n_val'] = n_val
+        
+    else:
+        # Generate single dataset
+        logger.info(f"Generating {n_sequences} sequences...")
+        reads = simulator.generate_batch(n_sequences)
+        
+        # Ensure parent directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Save dataset
+        stats = simulator.save_reads(reads, output_path, format, compress, create_preview)
+        result.update(stats)
+    
+    result['total_sequences'] = n_sequences
+    return result
 
