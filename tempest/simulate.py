@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any, List
 import time
 import pickle
 import gzip
+import json
 import numpy as np
 from rich import box
 from rich.panel import Panel
@@ -53,6 +54,181 @@ simulate_app = typer.Typer(
     help="Generate synthetic sequence reads for training and testing",
     rich_markup_mode="rich",
 )
+
+
+def safe_json_encode(obj):
+    """Convert non-JSON-serializable objects for metadata display."""
+    if isinstance(obj, (list, tuple)):
+        return [safe_json_encode(item) for item in obj]
+    elif isinstance(obj, dict):
+        return {k: safe_json_encode(v) for k, v in obj.items()}
+    elif hasattr(obj, '__dict__'):
+        return safe_json_encode(obj.__dict__)
+    elif isinstance(obj, bytes):
+        return obj.decode('utf-8', errors='replace')
+    elif isinstance(obj, (set, frozenset)):
+        return list(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    else:
+        try:
+            json.dumps(obj)
+            return obj
+        except:
+            return str(obj)
+
+
+def _save_reads_pickle(reads: List[SimulatedRead], output_file: Path, compress: bool = True) -> Dict[str, Any]:
+    """Save reads to pickle format with optional compression and comprehensive metadata preview."""
+    start_time = time.time()
+    
+    if compress:
+        with gzip.open(output_file, 'wb') as f:
+            pickle.dump(reads, f, protocol=pickle.HIGHEST_PROTOCOL)
+    else:
+        with open(output_file, 'wb') as f:
+            pickle.dump(reads, f, protocol=pickle.HIGHEST_PROTOCOL)
+    
+    save_time = time.time() - start_time
+    file_size = output_file.stat().st_size
+    
+    # Create comprehensive preview file with metadata
+    preview_file = output_file.parent / f"{output_file.stem}_preview.txt"
+    n_preview = min(100, len(reads))
+    
+    with open(preview_file, 'w') as f:
+        # Header
+        f.write(f"# Preview of {output_file.name} ({len(reads)} total sequences)\n")
+        f.write(f"# Showing first {n_preview} sequences\n")
+        f.write("#" + "=" * 70 + "\n")
+        
+        # Calculate label distribution from all reads
+        label_counts = {}
+        total_positions = 0
+        n_invalid = 0
+        n_with_errors = 0
+        
+        for read in reads:
+            for label in read.labels:
+                label_counts[label] = label_counts.get(label, 0) + 1
+                total_positions += 1
+            
+            # Check metadata flags
+            if hasattr(read, 'metadata') and read.metadata:
+                if read.metadata.get('is_invalid', False):
+                    n_invalid += 1
+                if read.metadata.get('has_errors', False):
+                    n_with_errors += 1
+        
+        # Dataset statistics
+        f.write("\n# DATASET STATISTICS\n")
+        f.write("#" + "-" * 70 + "\n")
+        f.write(f"# Total sequences: {len(reads):,}\n")
+        f.write(f"# Total positions: {total_positions:,}\n")
+        if n_invalid > 0:
+            f.write(f"# Invalid sequences: {n_invalid:,} ({n_invalid/len(reads)*100:.1f}%)\n")
+        if n_with_errors > 0:
+            f.write(f"# Sequences with errors: {n_with_errors:,} ({n_with_errors/len(reads)*100:.1f}%)\n")
+        
+        # Label distribution
+        f.write("\n# LABEL DISTRIBUTION\n")
+        f.write("#" + "-" * 70 + "\n")
+        sorted_labels = sorted(label_counts.items(), key=lambda x: x[1], reverse=True)
+        for label, count in sorted_labels:
+            percentage = (count / total_positions * 100) if total_positions > 0 else 0
+            f.write(f"# {label:10s}: {count:8,} positions ({percentage:5.2f}%)\n")
+        
+        # Sequence preview with metadata
+        f.write("\n# SEQUENCE PREVIEW\n")
+        f.write("#" + "=" * 70 + "\n")
+        f.write("# Format: sequence<TAB>labels<TAB>is_invalid\n")
+        f.write("# Followed by JSON metadata for each read\n")
+        f.write("#" + "-" * 70 + "\n\n")
+        
+        for i, read in enumerate(reads[:n_preview], 1):
+            f.write(f"# Read {i}\n")
+            
+            # Basic info: sequence, labels, invalid flag
+            labels_str = ' '.join(read.labels)
+            is_invalid = 'N'
+            
+            if hasattr(read, 'metadata') and read.metadata:
+                is_invalid = 'Y' if read.metadata.get('is_invalid', False) else 'N'
+            
+            f.write(f"{read.sequence}\t{labels_str}\t{is_invalid}\n")
+            
+            # Write comprehensive metadata
+            if hasattr(read, 'metadata') and read.metadata:
+                f.write("# Metadata:\n")
+                
+                # Prepare metadata for display
+                metadata_display = {}
+                
+                # Core metadata fields in desired order
+                core_fields = [
+                    'segment_order', 'segment_sources', 'segment_lengths',
+                    'segment_sequences', 'segment_meta', 'transcript_info',
+                    'has_errors', 'error_types', 'error_positions',
+                    'diversity_boost', 'is_invalid', 'invalid_reason',
+                    'reverse_complement', 'acc_score', 'acc_temperature'
+                ]
+                
+                for key in core_fields:
+                    if key in read.metadata:
+                        metadata_display[key] = safe_json_encode(read.metadata[key])
+                
+                # Add any additional metadata fields
+                for key, value in read.metadata.items():
+                    if key not in metadata_display:
+                        metadata_display[key] = safe_json_encode(value)
+                
+                # Add label regions if available
+                if hasattr(read, 'label_regions') and read.label_regions:
+                    region_summary = {}
+                    for label, regions in read.label_regions.items():
+                        region_summary[label] = [[start, end] for start, end in regions]
+                    metadata_display['label_regions'] = region_summary
+                
+                # Write formatted JSON with proper indentation
+                try:
+                    formatted_json = json.dumps(metadata_display, indent=2)
+                    for line in formatted_json.split('\n'):
+                        f.write(f"# {line}\n")
+                except Exception as e:
+                    f.write(f"# Error formatting metadata: {str(e)}\n")
+                    f.write(f"# Raw metadata: {str(read.metadata)[:200]}...\n")
+            else:
+                f.write("# No metadata\n")
+            
+            f.write("\n")  # Blank line between reads
+    
+    logger.info(f"Created comprehensive preview file: {preview_file}")
+    
+    return {
+        'save_time': save_time,
+        'file_size_mb': file_size / (1024 * 1024),
+        'sequences_per_second': len(reads) / save_time if save_time > 0 else 0,
+        'compression_ratio': 1.0 if not compress else 0.5,  # Approximate
+        'n_invalid': n_invalid,
+        'n_with_errors': n_with_errors
+    }
+
+
+def _save_reads_text(reads: List[SimulatedRead], output_file: Path):
+    """Save reads to text format with metadata."""
+    with open(output_file, 'w') as f:
+        f.write("# TEMPEST simulated sequences with metadata\n")
+        f.write("# Format: sequence<TAB>labels<TAB>metadata_json\n\n")
+        for read in reads:
+            labels_str = ' '.join(read.labels)
+            # Include metadata as JSON string
+            metadata_str = "{}"
+            if hasattr(read, 'metadata') and read.metadata:
+                try:
+                    metadata_str = json.dumps(safe_json_encode(read.metadata))
+                except:
+                    metadata_str = "{}"
+            f.write(f"{read.sequence}\t{labels_str}\t{metadata_str}\n")
 
 
 def run_simulation(
@@ -197,7 +373,7 @@ def run_simulation(
                 else:
                     val_reads = corrupted
         
-        # Save sequences (same as before)
+        # Save sequences with comprehensive metadata
         if output_format == 'pickle':
             train_file = output_path / ("train.pkl.gz" if compress else "train.pkl")
             val_file = output_path / ("val.pkl.gz" if compress else "val.pkl")
@@ -224,7 +400,7 @@ def run_simulation(
         logger.info(f"Saved {n_val} validation sequences to {val_file}")
         
     else:
-        # SINGLE DATASET MODE - this is where the issue is
+        # SINGLE DATASET MODE
         total_sequences = sim_config.num_sequences
         if total_sequences is None:
             raise ValueError("num_sequences not specified")
@@ -240,15 +416,10 @@ def run_simulation(
         
         if will_generate_invalid and main_progress_callback:
             # For single dataset with invalid generation, we need special progress handling
-            # The progress bar total should remain at total_sequences
-            # But we show two phases: "Generating valid reads" and "Applying corruption"
-            
-            # Phase 1: Generate valid reads
             logger.info(f"Phase 1: Generating {total_sequences} valid sequences")
             
             # Create a progress callback that caps at ~90% for valid generation
             def valid_progress_callback(n):
-                # Scale to 90% of total for valid generation phase
                 scaled = int(n * 0.9)
                 main_progress_callback(scaled)
             
@@ -271,21 +442,17 @@ def run_simulation(
             
             # For the invalid generation, update progress for the last 10%
             def invalid_progress_callback(n_corrupted):
-                # Scale the corruption progress to the last 10%
                 progress = 0.9 + (0.1 * (n_corrupted / n_to_corrupt))
                 main_progress_callback(int(total_sequences * progress))
             
             # Check if parallel invalid generator supports progress callback
             if use_parallel and hasattr(invalid_gen, 'generate_batch'):
-                # Use parallel invalid generator
-                # Note: Need to ensure it doesn't hang
                 import signal
                 import threading
                 
                 # Set up timeout handling
                 def timeout_handler():
                     logger.error("Invalid generation timed out after 5 minutes")
-                    # Force progress to 100%
                     main_progress_callback(total_sequences)
                 
                 timer = threading.Timer(300.0, timeout_handler)  # 5 minute timeout
@@ -299,7 +466,7 @@ def run_simulation(
                 finally:
                     timer.cancel()
             else:
-                # Use sequential invalid generator (safer but slower)
+                # Use sequential invalid generator
                 reads = invalid_gen.generate_batch(
                     reads,
                     invalid_ratio=sim_config.invalid_fraction
@@ -331,7 +498,7 @@ def run_simulation(
                 )
                 logger.info(f"Applied invalid read corruption: {len(reads)} total reads")
         
-        # Save sequences
+        # Save sequences with comprehensive metadata
         if output_format == 'pickle':
             output_file = output_path / ("sequences.pkl.gz" if compress else "sequences.pkl")
             save_stats = _save_reads_pickle(reads, output_file, compress)
@@ -348,49 +515,17 @@ def run_simulation(
     return result
 
 
-def _save_reads_pickle(reads: List[SimulatedRead], output_file: Path, compress: bool = True) -> Dict[str, Any]:
-    """Save reads to pickle format with optional compression."""
-    start_time = time.time()
-    
-    if compress:
-        with gzip.open(output_file, 'wb') as f:
-            pickle.dump(reads, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def _load_reads_pickle(input_file: Path) -> List[SimulatedRead]:
+    """Load reads from pickle format."""
+    if '.gz' in str(input_file):
+        with gzip.open(input_file, 'rb') as f:
+            reads = pickle.load(f)
     else:
-        with open(output_file, 'wb') as f:
-            pickle.dump(reads, f, protocol=pickle.HIGHEST_PROTOCOL)
-    
-    save_time = time.time() - start_time
-    file_size = output_file.stat().st_size
-    
-    # Create preview file
-    preview_file = output_file.parent / f"{output_file.stem}_preview.txt"
-    n_preview = min(100, len(reads))
-    
-    with open(preview_file, 'w') as f:
-        f.write(f"# Preview of {output_file.name} ({len(reads)} total sequences)\n")
-        f.write(f"# Showing first {n_preview} sequences\n\n")
-        for i, read in enumerate(reads[:n_preview]):
-            labels_str = ' '.join(read.labels)
-            f.write(f"{read.sequence}\t{labels_str}\n")
-    
-    logger.info(f"Created preview file: {preview_file}")
-    
-    return {
-        'save_time': save_time,
-        'file_size_mb': file_size / (1024 * 1024),
-        'sequences_per_second': len(reads) / save_time if save_time > 0 else 0,
-        'compression_ratio': 1.0 if not compress else 0.5  # Approximate
-    }
-
-
-def _save_reads_text(reads: List[SimulatedRead], output_file: Path):
-    """Save reads to text format."""
-    with open(output_file, 'w') as f:
-        f.write("# TEMPEST simulated sequences\n")
-        f.write("# Format: sequence<TAB>labels\n\n")
-        for read in reads:
-            labels_str = ' '.join(read.labels)
-            f.write(f"{read.sequence}\t{labels_str}\n")
+        with open(input_file, 'rb') as f:
+            reads = pickle.load(f)
+    return reads
 
 
 @simulate_app.command("generate")
@@ -548,34 +683,30 @@ def generate_command(
             # Check if we have a valid number of sequences
             if n_total is None:
                 try:
-                    # may have been overridden?
+                    # Try to get from config
                     n_total = config_obj.simulation.num_sequences
                 except:
-                    console.print("[bold red]Error:[/bold red] Number of sequences not specified")
-                    console.print("[yellow]Please use --num-sequences/-n or set num_sequences in your config[/yellow]")
-                    console.print("[dim]Example: --num-sequences 50000[/dim]")
+                    console.print("[bold red]Error:[/bold red] Number of sequences not specified.")
+                    console.print("Please use --num-sequences or specify in config file.")
                     raise typer.Exit(1)
             
-            if split:
-                task_id = progress.add_task(
-                    f"[cyan]Generating {n_total:,} sequences...",
-                    total=n_total
-                )
-            else:
-                task_id = progress.add_task(
-                    f"[cyan]Generating {n_total:,} sequences...",
-                    total=n_total
-                )
+            task = progress.add_task("[cyan]Generating sequences...", total=n_total)
             
             def progress_callback(n_generated):
-                progress.update(task_id, completed=n_generated)
+                progress.update(task, completed=n_generated)
             
-            # Run simulation with all parameters
-            start_time = time.time()
+            # Determine output path
+            if output_dir:
+                output_path = output_dir
+            elif output:
+                output_path = output.parent
+            else:
+                output_path = Path('.')
             
+            # Run simulation with progress tracking
             result = run_simulation(
                 config_obj,
-                output_dir=output_dir or (output.parent if output else None),
+                output_dir=output_path,
                 num_sequences=num_sequences,
                 split=split,
                 train_fraction=train_fraction,
@@ -583,54 +714,40 @@ def generate_command(
                 seed=seed,
                 format=format,
                 compress=not no_compress,
+                parallel=parallel,
+                n_workers=n_workers,
                 progress_callback=progress_callback,
                 skip_transcripts=skip_transcripts,
-                transcript_fasta=transcript_fasta,
-                parallel=parallel,
-                n_workers=n_workers
+                transcript_fasta=transcript_fasta
             )
-            
-            elapsed = time.time() - start_time
-            
-        # Display results
-        table = Table(title="Generation Complete", show_header=True, header_style="bold magenta")
-        table.add_column("Metric", style="cyan")
-        table.add_column("Value", style="green")
         
-        table.add_row("Total sequences", f"{n_total:,}")
-        table.add_row("Generation time", f"{elapsed:.2f}s")
-        table.add_row("Sequences/second", f"{n_total/elapsed:,.0f}")
+        # Show results
+        results_table = Table(title="Generation Results", show_header=True)
+        results_table.add_column("Metric", style="cyan")
+        results_table.add_column("Value", style="green")
         
-        if parallel:
-            speedup_estimate = elapsed * 10  # Rough estimate of sequential time
-            table.add_row("Estimated speedup", f"~{speedup_estimate/elapsed:.1f}x")
+        if 'train_file' in result:
+            results_table.add_row("Training file", str(result['train_file']))
+            results_table.add_row("Training sequences", f"{result['n_train']:,}")
+            results_table.add_row("Validation file", str(result['val_file']))
+            results_table.add_row("Validation sequences", f"{result['n_val']:,}")
+        else:
+            results_table.add_row("Output file", str(result['output_file']))
+            results_table.add_row("Total sequences", f"{result['n_sequences']:,}")
         
         if 'save_stats' in result:
-            if 'train' in result['save_stats']:
-                train_stats = result['save_stats']['train']
-                table.add_row("Train file size", f"{train_stats['file_size_mb']:.2f} MB")
-            if 'val' in result['save_stats']:
-                val_stats = result['save_stats']['val']
-                table.add_row("Val file size", f"{val_stats['file_size_mb']:.2f} MB")
+            if isinstance(result['save_stats'], dict):
+                for name, stats in result['save_stats'].items():
+                    results_table.add_row(f"{name.title()} save time", f"{stats['save_time']:.2f}s")
+                    results_table.add_row(f"{name.title()} file size", f"{stats['file_size_mb']:.1f} MB")
+                    if 'n_invalid' in stats and stats['n_invalid'] > 0:
+                        results_table.add_row(f"{name.title()} invalid", f"{stats['n_invalid']:,}")
+            else:
+                results_table.add_row("Save time", f"{result['save_stats']['save_time']:.2f}s")
+                results_table.add_row("File size", f"{result['save_stats']['file_size_mb']:.1f} MB")
         
-        if split:
-            table.add_row("Training sequences", f"{result.get('n_train', 0):,}")
-            table.add_row("Validation sequences", f"{result.get('n_val', 0):,}")
-            table.add_row("Training file", str(result.get('train_file', 'N/A')))
-            table.add_row("Validation file", str(result.get('val_file', 'N/A')))
-        else:
-            table.add_row("Output file", str(result.get('output_file', 'N/A')))
-        
-        console.print()
-        console.print(table)
-        
-        # Performance tips
-        if not parallel and PARALLEL_AVAILABLE and n_total > 10000:
-            console.print("\n[yellow]Tip:[/yellow] Use --parallel for 10-50x faster generation")
-        
-        if parallel and n_workers and n_workers < 4 and n_total > 50000:
-            console.print(f"\n[yellow]Tip:[/yellow] Consider increasing --workers for large datasets")
-        
+        console.print("\n")
+        console.print(results_table)
         console.print("\n[bold green]✓ Generation completed successfully![/bold green]")
         
     except Exception as e:
@@ -641,259 +758,122 @@ def generate_command(
         raise typer.Exit(1)
 
 
-@simulate_app.command("convert")
-def convert_command(
-    input_file: Path = typer.Argument(
-        ...,
-        help="Input file to convert",
-        exists=True,
-        file_okay=True,
-        readable=True
-    ),
-    output_file: Path = typer.Argument(
-        ...,
-        help="Output file path"
-    ),
-    input_format: Optional[str] = typer.Option(
-        None,
-        "--input-format", "-i",
-        help="Input format (auto-detected if not specified)"
-    ),
-    output_format: Optional[str] = typer.Option(
-        None,
-        "--output-format", "-o",
-        help="Output format (auto-detected from extension if not specified)"
-    ),
-    compress: bool = typer.Option(
-        True,
-        "--compress/--no-compress",
-        help="Compress output if using pickle format"
-    )
-):
-    """
-    Convert between sequence file formats.
+# Additional stats and analysis functions
+def analyze_acc_segment_detailed(
+    reads: List[SimulatedRead],
+    acc_generator=None,
+    show_sequences: int = 10
+) -> Dict[str, Any]:
+    """Analyze ACC segment statistics from reads."""
+    acc_sequences = []
+    acc_lengths = []
     
-    Examples:
-        # Convert text to pickle
-        tempest simulate convert sequences.txt sequences.pkl.gz
+    for read in reads:
+        if hasattr(read, 'label_regions') and 'ACC' in read.label_regions:
+            for start, end in read.label_regions['ACC']:
+                acc_seq = read.sequence[start:end]
+                acc_sequences.append(acc_seq)
+                acc_lengths.append(len(acc_seq))
+    
+    if not acc_sequences:
+        return {'found': False}
+    
+    # Calculate statistics
+    unique_accs = set(acc_sequences)
+    stats = {
+        'found': True,
+        'total': len(acc_sequences),
+        'unique': len(unique_accs),
+        'diversity': len(unique_accs) / len(acc_sequences) if acc_sequences else 0,
+        'lengths': {
+            'mean': np.mean(acc_lengths),
+            'std': np.std(acc_lengths),
+            'min': min(acc_lengths),
+            'max': max(acc_lengths)
+        },
+        'examples': acc_sequences[:show_sequences]
+    }
+    
+    # PWM scoring if available
+    if acc_generator and hasattr(acc_generator, 'score_sequence'):
+        scores = []
+        for seq in acc_sequences[:100]:  # Score first 100
+            try:
+                score = acc_generator.score_sequence(seq)
+                scores.append(score)
+            except:
+                pass
         
-        # Convert pickle to text  
-        tempest simulate convert sequences.pkl.gz sequences.txt
-    """
-    try:
-        console.print(f"[cyan]Converting {input_file} to {output_file}...[/cyan]")
-        
-        # Auto-detect formats if not specified
-        if input_format is None:
-            if '.pkl' in str(input_file) or '.pickle' in str(input_file):
-                input_format = 'pickle'
-            else:
-                input_format = 'text'
-        
-        if output_format is None:
-            if '.pkl' in str(output_file) or '.pickle' in str(output_file):
-                output_format = 'pickle'
-            else:
-                output_format = 'text'
-        
-        # Load sequences
-        if input_format == 'pickle':
-            reads = _load_reads_pickle(input_file)
-        else:
-            reads = _load_reads_text(input_file)
-        
-        console.print(f"  Loaded {len(reads)} sequences")
-        
-        # Save in new format
-        if output_format == 'pickle':
-            preview_file = output_file.parent / f"{output_file.stem}_preview.txt"
-            stats = _save_reads_pickle(reads, output_file, preview_file, compress)
-            console.print(f"  Saved to: [green]{output_file}[/green]")
-            console.print(f"  Preview: [green]{preview_file}[/green]")
-            console.print(f"  Size: {stats['file_size_mb']:.2f} MB")
-        else:
-            _save_reads_text(reads, output_file)
-            console.print(f"  Saved to: [green]{output_file}[/green]")
-        
-        console.print("[bold green] Conversion complete![/bold green]")
-        
-    except Exception as e:
-        console.print(f"[bold red]Error:[/bold red] {e}")
-        raise typer.Exit(1)
+        if scores:
+            stats['pwm_scores'] = {
+                'mean': np.mean(scores),
+                'std': np.std(scores),
+                'min': min(scores),
+                'max': max(scores)
+            }
+    
+    return stats
 
 
-@simulate_app.command("validate")
-def validate_command(
-    config: Path = typer.Option(
-        ...,
-        "--config", "-c",
-        help="Path to configuration YAML file",
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        readable=True,
-        resolve_path=True
-    ),
-    verbose: bool = typer.Option(
-        False,
-        "--verbose", "-v",
-        help="Show detailed configuration"
-    )
-):
-    """
-    Validate simulation configuration without generating sequences.
+def display_acc_statistics(stats: Dict[str, Any], verbose: bool = False):
+    """Display ACC segment statistics."""
+    if not stats.get('found', False):
+        console.print("[yellow]No ACC segments found in dataset[/yellow]")
+        return
     
-    This command loads and validates the configuration file, checking
-    for errors and showing the parameters that would be used for simulation.
+    # Basic statistics
+    console.print(f"[cyan]Total ACC sequences:[/cyan] {stats['total']:,}")
+    console.print(f"[cyan]Unique ACC sequences:[/cyan] {stats['unique']:,}")
+    console.print(f"[cyan]Diversity ratio:[/cyan] {stats['diversity']:.3f}")
     
-    Examples:
-        
-        # Quick validation
-        tempest simulate validate -c config.yaml
-        
-        # Detailed validation with all parameters
-        tempest simulate validate -c config.yaml --verbose
-    """
-    try:
-        console.print("[cyan]Validating simulation configuration...[/cyan]")
-        
-        # Load configuration
-        cfg = TempestConfig.from_yaml(str(config))
-        
-        # Basic validation checks
-        errors = []
-        warnings = []
-        
-        # Check simulation parameters
-        sim = cfg.simulation
-        if sim.num_sequences < 1:
-            errors.append("num_sequences must be at least 1")
-        
-        if sim.train_split <= 0 or sim.train_split >= 1:
-            errors.append("train_split must be between 0 and 1")
-        
-        # Check if invalid raction is non-existent or the majority
-        if sim.invalid_fraction < 0 or sim.invalid_fraction > 0.5:
-            warnings.append(
-                f"invalid_fraction={sim.invalid_fraction} is outside the recommended [0, 0.5] range"
-                )
-        
-        # Check sequence order
-        if not sim.sequence_order:
-            errors.append("sequence_order must be defined")
-        
-        # Check for required files
-        if sim.whitelist_files:
-            for name, path in sim.whitelist_files.items():
-                if not Path(path).exists():
-                    warnings.append(f"Whitelist file not found: {name} -> {path}")
-        
-        if sim.pwm_files:
-            for name, path in sim.pwm_files.items():
-                if not Path(path).exists():
-                    warnings.append(f"PWM file not found: {name} -> {path}")
-        
-        # Report results
-        if errors:
-            console.print("\n[bold red]Configuration errors:[/bold red]")
-            for error in errors:
-                console.print(f"  ✗ {error}")
-            raise typer.Exit(1)
-        
-        console.print("[bold green] Configuration is valid![/bold green]")
-        
-        if warnings:
-            console.print("\n[yellow]Warnings:[/yellow]")
-            for warning in warnings:
-                console.print(f"  ⚠ {warning}")
-        
-        if verbose:
-            console.print("\n[cyan]Simulation parameters:[/cyan]")
-            console.print(f"  Number of sequences: {sim.num_sequences}")
-            console.print(f"  Train/test split: {sim.train_split:.0%}")
-            console.print(f"  Random seed: {sim.random_seed}")
-            console.print(f"\n[cyan]Segment architecture:[/cyan]")
-            
-            if sim.sequence_order:
-                table = Table(title="Sequence Architecture")
-                table.add_column("#", style="cyan")
-                table.add_column("Segment", style="green")
-                table.add_column("Length", style="yellow")
-                table.add_column("Mode", style="magenta")
-                
-                for i, segment in enumerate(sim.sequence_order, 1):
-                    # Get length info if available
-                    if sim.segment_generation and 'lengths' in sim.segment_generation:
-                        length = sim.segment_generation['lengths'].get(segment, 'variable')
-                    else:
-                        length = 'variable'
-                        
-                    # Get generation mode if available  
-                    if sim.segment_generation and 'generation_mode' in sim.segment_generation:
-                        mode = sim.segment_generation['generation_mode'].get(segment, 'unknown')
-                    else:
-                        mode = 'unknown'
-                    
-                    table.add_row(str(i), segment, str(length), mode)
-                
-                console.print(table)
-            
-            # Show PWM configuration if present
-            if sim.pwm:
-                console.print(f"\n[cyan]PWM configuration:[/cyan]")
-                console.print(f"  Temperature: {sim.pwm.temperature}")
-                console.print(f"  Min entropy: {sim.pwm.min_entropy}")
-                console.print(f"  Diversity boost: {sim.pwm.diversity_boost}")
-                if sim.pwm.pattern:
-                    console.print(f"  Pattern: {sim.pwm.pattern}")
-        
-        console.print()
-        
-    except FileNotFoundError as e:
-        console.print(f"[bold red]Error:[/bold red] Configuration file not found: {e}")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[bold red]Error:[/bold red] Invalid configuration: {e}")
-        raise typer.Exit(1)
+    # Length distribution
+    console.print(f"\n[cyan]ACC Length Distribution:[/cyan]")
+    console.print(f"  Mean: {stats['lengths']['mean']:.1f} bp")
+    console.print(f"  Std:  {stats['lengths']['std']:.1f} bp")
+    console.print(f"  Min:  {stats['lengths']['min']} bp")
+    console.print(f"  Max:  {stats['lengths']['max']} bp")
+    
+    # PWM scores if available
+    if 'pwm_scores' in stats:
+        console.print(f"\n[cyan]PWM Score Distribution:[/cyan]")
+        console.print(f"  Mean: {stats['pwm_scores']['mean']:.2f}")
+        console.print(f"  Std:  {stats['pwm_scores']['std']:.2f}")
+        console.print(f"  Min:  {stats['pwm_scores']['min']:.2f}")
+        console.print(f"  Max:  {stats['pwm_scores']['max']:.2f}")
+    
+    # Example sequences
+    if verbose and 'examples' in stats:
+        console.print(f"\n[cyan]Example ACC Sequences:[/cyan]")
+        for i, seq in enumerate(stats['examples'], 1):
+            console.print(f"  {i:2d}. {seq}")
 
 
 @simulate_app.command("stats")
 def stats_command(
     input_file: Path = typer.Argument(
         ...,
-        help="Input file containing generated sequences",
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        readable=True
-    ),
+        help="Input file (pickle or text format)"),
     format: Optional[str] = typer.Option(
         None,
         "--format", "-f",
-        help="File format (auto-detected if not specified)"
-    ),
+        help="Input format: pickle|text (auto-detect if not specified)"),
     verbose: bool = typer.Option(
         False,
         "--verbose", "-v",
-        help="Show detailed statistics per segment"
-    ),
+        help="Show detailed statistics"),
     acc_only: bool = typer.Option(
         False,
         "--acc-only",
-        help="Show only ACC segment analysis"
-    ),
+        help="Only analyze ACC segments"),
     config: Optional[Path] = typer.Option(
         None,
         "--config", "-c",
-        help="Config file to load ACC generator for PWM analysis"
-    )
+        help="Config file for PWM scoring")
 ):
     """
-    Analyze statistics of generated sequences with detailed ACC analysis.
+    Analyze statistics of generated sequences.
     
-    This command analyzes a file of generated sequences and provides
-    statistics about sequence lengths, segment distributions, label
-    frequencies, and detailed ACC segment analysis including position-wise
+    Provides comprehensive analysis including sequence length distribution,
     base frequencies, entropy, diversity metrics, and PWM divergence.
     
     Examples:
