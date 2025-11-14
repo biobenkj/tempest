@@ -24,15 +24,15 @@ simulation:
   train_split: 0.8
 
   # Introduce invalid reads
-  invalid_fraction: 0.1
+  invalid_fraction: 0.2
   invalid_types: ["segment_loss", "segment_duplication", "truncation", "chimeric", "scrambled"]
   invalid_params:
     segment_loss_prob: 0.2
     segment_dup_prob: 0.2
-    truncated_prob: 0.2
-    chimeric_prob: 0.2
-    scrambled_prob: 0.2
-  
+    truncation_prob: 0.35
+    chimeric_prob: 0.25
+    scrambled_prob: 0.1
+
   # Additional test/validation splits
   n_train: 40000
   n_val: 5000
@@ -59,7 +59,7 @@ simulation:
   full_read_reverse_complement_prob: 0.5
   
   # Probability that a read will have errors injected (when errors.enabled = true)
-  error_injection_prob: 0.1
+  error_injection_prob: 0.65 # send 65% all reads through for error injection
   
   # Fixed sequences for adapters and primers
   sequences:
@@ -76,15 +76,12 @@ simulation:
     i7: "/varidata/research/projects/shen/tools/benkj/tempest/whitelist/udi_i7.txt"
     i5: "/varidata/research/projects/shen/tools/benkj/tempest/whitelist/udi_i5.txt"
     CBC: "/varidata/research/projects/shen/tools/benkj/tempest/whitelist/cbc.txt"
-  
-  # Whitelist reverse complement configuration
-  # Set to true for segments that should be reverse complemented
-  # Common setup: i7 is typically RC'd in Illumina sequencing, i5 and CBC are forward
+
   # Adjust based on your specific sequencing chemistry
   whitelist_rc:
-    i7: true      # Reverse complement i7 indices
-    i5: false     # Keep i5 indices forward (change to true if your chemistry requires RC)
-    CBC: false    # Keep cell barcodes forward
+    i7: true
+    i5: false
+    CBC: false
   
   # PWM configuration for ACC - USING PROBABILISTIC APPROACH
   pwm_files:
@@ -145,12 +142,11 @@ simulation:
   transcript:
     fasta_file: "gencode.v49.transcripts.fa.gz"
     min_length: 500
-    max_length: 2200
+    max_length: 3500
     fragment_mode: true
     fragment_min: 200
     fragment_max: 1000
     trim_polya: true  # Remove polyA tails from transcripts before fragment sampling
-                      # When enabled, metadata will include original_length, trimmed_length, and polya_trimmed
     reverse_complement_prob: 0.5  # Probability for individual fragments
     decompress_to_tmp: true
     tmpdir: "./tmp"
@@ -162,19 +158,19 @@ simulation:
   polya:
     min_length: 10
     max_length: 50
-    purity: 0.95
+    purity: 0.85
     distribution: "normal"
     mean_length: 30  # Changed from 'mean' to 'mean_length' for clarity
     std_length: 10   # Changed from 'std' to 'std_length' for clarity
     absolute_min: 20  # Hard minimum boundary
     absolute_max: 500 # Hard maximum boundary
   
-  # Error simulation parameters (FIXED NAME FROM error_injection)
+  # Error simulation parameters
   errors:
     enabled: true
-    substitution_rate: 0.001
-    insertion_rate: 0.0001
-    deletion_rate: 0.0001
+    substitution_rate: 0.030
+    insertion_rate: 0.015
+    deletion_rate: 0.025
     quality_dependent: false  # Whether errors depend on quality scores
 
 # Training Configuration
@@ -218,7 +214,12 @@ training:
 # Hybrid Training Configuration
 hybrid:
   enabled: true
-  
+  # Invalid read params
+  segment_loss_prob: 0.2
+  segment_dup_prob: 0.2
+  truncation_prob: 0.35
+  chimeric_prob: 0.25
+  scrambled_prob: 0.1
   # Training phases for hybrid models
   warmup_epochs: 10        # Phase 1: Standard training
   discriminator_epochs: 10 # Phase 2: Adversarial with invalid reads

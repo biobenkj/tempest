@@ -2,18 +2,6 @@
 Parallel Sequence Simulator for Tempest
 
 High-performance parallel version with proper invalid read generation
-and controlled logging to prevent console spam.
-
-ENHANCEMENT NOTE: This class inherits from SequenceSimulator, which has been
-enhanced with comprehensive metadata preservation in preview files. The enhanced
-_create_preview_file method automatically provides:
-- Complete dataset statistics (valid/invalid counts)
-- Full metadata preservation for all sequences
-- Error type distributions
-- Label frequency analysis
-- Simulator configuration capture
-
-No changes are needed to this file - all preview enhancements are inherited.
 
 """
 
@@ -86,7 +74,19 @@ class ParallelSequenceSimulator(SequenceSimulator):
         logger.info(f"Initialized ParallelSequenceSimulator with {self.n_workers} workers")
         
         # Store config for worker processes
-        self._serialized_config = self.config
+        # CRITICAL FIX: Convert config to dict for proper serialization in multiprocessing
+        if hasattr(self.config, '_to_dict'):
+            # Use the _to_dict method if available (TempestConfig object)
+            self._serialized_config = self.config._to_dict()
+            logger.debug("Serialized TempestConfig to dict for multiprocessing")
+        elif isinstance(self.config, dict):
+            # Already a dict
+            self._serialized_config = self.config
+        else:
+            # Try to convert to dict (fallback)
+            import copy
+            self._serialized_config = copy.deepcopy(self.config)
+            logger.warning("Config serialization may not preserve all values")
     
     def generate_batch(
         self,
@@ -465,21 +465,22 @@ def _corrupt_chunk_worker(chunk_info: Dict[str, Any]) -> List[Tuple[int, Simulat
         
         # Apply corruption using actual InvalidReadGenerator methods
         try:
-            if error_type == "segment_loss":
-                corrupted = generator._apply_segment_loss(read)
-            elif error_type == "segment_duplication":
-                corrupted = generator._apply_segment_duplication(read)
-            elif error_type == "truncation":
-                corrupted = generator._apply_truncation(read)
-            elif error_type == "chimeric":
-                # For chimeric, we'd need another read - use truncation as fallback
-                corrupted = generator._apply_truncation(read)
-                if corrupted.metadata:
-                    corrupted.metadata['error_type'] = 'chimeric'
-            elif error_type == "scrambled":
-                corrupted = generator._apply_scrambled(read)
-            else:
-                corrupted = read
+            corrupted = generator.generate_invalid_read(read, error_type)
+            # if error_type == "segment_loss":
+                # corrupted = generator._apply_segment_loss(read)
+            # elif error_type == "segment_duplication":
+                # corrupted = generator._apply_segment_duplication(read)
+            # elif error_type == "truncation":
+                # corrupted = generator._apply_truncation(read)
+            # elif error_type == "chimeric":
+                # # For chimeric, we'd need another read - use truncation as fallback
+                # corrupted = generator._apply_truncation(read)
+                # if corrupted.metadata:
+                    # corrupted.metadata['error_type'] = 'chimeric'
+            # elif error_type == "scrambled":
+                # corrupted = generator._apply_scrambled(read)
+            # else:
+                # corrupted = read
         except Exception as e:
             # If corruption fails, return original with invalid flag
             corrupted = SimulatedRead(

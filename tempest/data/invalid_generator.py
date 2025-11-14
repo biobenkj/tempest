@@ -55,679 +55,538 @@ class InvalidReadGenerator:
         }
 
     def _init_error_probabilities(self, config) -> Dict[str, float]:
-        """Initialize error probabilities from config or defaults."""
-        if not config:
-            probs = self._default_probabilities()
-        elif hasattr(config, "hybrid") and config.hybrid:
-            hybrid = config.hybrid
-            probs = {
-                "segment_loss": getattr(hybrid, "segment_loss_prob", 0.3),
-                "segment_duplication": getattr(hybrid, "segment_dup_prob", 0.3),
-                "truncation": getattr(hybrid, "truncation_prob", 0.2),
-                "chimeric": getattr(hybrid, "chimeric_prob", 0.1),
-                "scrambled": getattr(hybrid, "scrambled_prob", 0.1),
-            }
-        elif isinstance(config, dict) and "hybrid" in config:
-            hybrid = config["hybrid"]
-            probs = {
-                "segment_loss": hybrid.get("segment_loss_prob", 0.3),
-                "segment_duplication": hybrid.get("segment_dup_prob", 0.3),
-                "truncation": hybrid.get("truncation_prob", 0.2),
-                "chimeric": hybrid.get("chimeric_prob", 0.1),
-                "scrambled": hybrid.get("scrambled_prob", 0.1),
-            }
-        else:
-            probs = self._default_probabilities()
-
-        total = sum(probs.values())
-        return {k: v / total for k, v in probs.items()} if total > 0 else probs
-
-    # File I/O
-    def save_batch(
-        self,
-        reads: List[SimulatedRead],
-        output_path: Path,
-        format: str = 'pickle',
-        compress: bool = True,
-        create_preview: bool = True
-    ) -> Dict[str, Any]:
         """
-        Save a batch of invalid reads to file.
+        Extract error probabilities from configuration.
+        
+        FIXED: Now properly handles SimulationConfig objects passed directly.
+        """
+        def extract(obj):
+            """Extract dict from various object types."""
+            if obj is None:
+                return {}
+            if isinstance(obj, dict):
+                return obj
+            if hasattr(obj, "__dict__"):
+                return {
+                    k: getattr(obj, k)
+                    for k in dir(obj)
+                    if not k.startswith("_")
+                    and isinstance(getattr(obj, k), (int, float))
+                }
+            return {}
+        
+        # Initialize parameter containers
+        params_sim = {}
+        params_hybrid = {}
+        
+        # Try to extract from SimulationConfig or TempestConfig
+        if hasattr(config, "invalid_params"):
+            # Direct SimulationConfig object with invalid_params attribute
+            params_sim = extract(config.invalid_params)
+            logger.debug(f"Extracted invalid_params from SimulationConfig: {params_sim}")
+            
+        elif hasattr(config, "simulation"):
+            # Full TempestConfig with simulation attribute
+            sim = config.simulation
+            if hasattr(sim, "invalid_params"):
+                params_sim = extract(sim.invalid_params)
+                logger.debug(f"Extracted invalid_params from TempestConfig.simulation: {params_sim}")
+                
+        elif isinstance(config, dict):
+            # Dictionary config
+            if "invalid_params" in config:
+                # Direct invalid_params in dict (SimulationConfig dict)
+                params_sim = extract(config.get("invalid_params", {}))
+                logger.debug(f"Extracted invalid_params from dict: {params_sim}")
+            elif "simulation" in config:
+                # Nested under simulation (full config dict)
+                sim = config.get("simulation", {})
+                if isinstance(sim, dict):
+                    params_sim = extract(sim.get("invalid_params", {}))
+                    logger.debug(f"Extracted invalid_params from dict['simulation']: {params_sim}")
+
+        # Also check for hybrid training config
+        if hasattr(config, "hybrid") and config.hybrid:
+            params_hybrid = extract(config.hybrid)
+            logger.debug(f"Extracted params from hybrid config: {params_hybrid}")
+        elif isinstance(config, dict):
+            params_hybrid = extract(config.get("hybrid", {}))
+            if params_hybrid:
+                logger.debug(f"Extracted params from hybrid dict: {params_hybrid}")
+
+        # Merge parameters with proper priority: simulation > hybrid > defaults
+        merged = {
+            "segment_loss": params_sim.get("segment_loss_prob",
+                            params_hybrid.get("segment_loss_prob", 0.3)),
+            "segment_duplication": params_sim.get("segment_dup_prob",
+                            params_hybrid.get("segment_dup_prob", 0.3)),
+            "truncation": params_sim.get("truncation_prob",
+                            params_hybrid.get("truncation_prob", 0.2)),
+            "chimeric": params_sim.get("chimeric_prob",
+                            params_hybrid.get("chimeric_prob", 0.1)),
+            "scrambled": params_sim.get("scrambled_prob",
+                            params_hybrid.get("scrambled_prob", 0.1)),
+        }
+        
+        logger.debug(f"Merged error probabilities before normalization: {merged}")
+
+        # Normalize probabilities to sum to 1
+        total = sum(merged.values())
+        normalized = {k: v / total for k, v in merged.items()}
+        
+        logger.debug(f"Final normalized error probabilities: {normalized}")
+        return normalized
+
+    def _invalid_regions_from_labels(
+        self, 
+        labels: List[str], 
+        exclude: Optional[set] = None
+    ) -> Dict[str, List[Tuple[int, int]]]:
+        """
+        Recompute compressed segments from labels after error editing.
+        Excludes ephemeral labels such as "ERROR".
         
         Args:
-            reads: List of SimulatedRead objects (may contain invalid reads)
-            output_path: Output file path
-            format: Output format ('pickle', 'text', 'json')
-            compress: Whether to compress pickle files
-            create_preview: Whether to create a preview text file
+            labels: List of per-base labels
+            exclude: Set of labels to exclude (e.g., {"ERROR"})
             
         Returns:
-            Dictionary with save statistics
+            Dictionary mapping label names to list of (start, end) tuples
         """
+        exclude = exclude or set()
+        out = {}
+        i, n = 0, len(labels)
+        while i < n:
+            lab = labels[i]
+            if lab in exclude:
+                i += 1
+                continue
+            j = i + 1
+            while j < n and labels[j] == lab:
+                j += 1
+            out.setdefault(lab, []).append((i, j))
+            i = j
+        return out
+
+    # File I/O
+    # don't actually think I need this anymore
+    def save_invalid_reads(self, 
+                          invalid_reads: List[SimulatedRead], 
+                          output_path: Path, 
+                          format: str = 'pickle',
+                          compress: bool = True) -> Dict[str, Any]:
+        """
+        Save invalid reads to file with metadata.
+        
+        Args:
+            invalid_reads: List of invalid reads to save
+            output_path: Output file path
+            format: 'pickle', 'json', or 'text'
+            compress: Whether to compress pickle files
+            
+        Returns:
+            Metadata dictionary with save statistics
+        """
+        start_time = time.time()
         output_path = Path(output_path)
-        stats = {'start_time': time.time()}
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         
         if format == 'pickle':
-            # Adjust filename for compression
-            if compress and not output_path.suffix == '.gz':
-                if output_path.suffix == '.pkl':
-                    output_path = output_path.with_suffix('.pkl.gz')
-                else:
-                    output_path = output_path.with_suffix(output_path.suffix + '.gz')
-            
-            # Save pickle file with error type tracking
-            save_data = {
-                'reads': reads,
-                'error_types': self._categorize_reads(reads),
-                'error_probabilities': self.error_probabilities,
-                'version': '1.0'
-            }
-            
             if compress:
                 with gzip.open(output_path, 'wb') as f:
-                    pickle.dump(save_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+                    pickle.dump(invalid_reads, f, protocol=pickle.HIGHEST_PROTOCOL)
             else:
                 with open(output_path, 'wb') as f:
-                    pickle.dump(save_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-            
-            # Create preview file if requested
-            if create_preview:
-                preview_path = output_path.parent / f"{output_path.stem}_invalid_preview.txt"
-                self._create_preview_file(reads, preview_path)
-                stats['preview_file'] = str(preview_path)
-            
-            stats['format'] = 'pickle'
-            stats['compressed'] = compress
-            
-        elif format == 'text':
-            # Legacy text format
-            with open(output_path, 'w') as f:
-                f.write("# Invalid reads generated with segment-level errors\n")
-                f.write(f"# Error probabilities: {json.dumps(self.error_probabilities)}\n")
-                for read in reads:
-                    labels_str = ' '.join(read.labels)
-                    error_type = read.metadata.get('error_type', 'none') if read.metadata else 'none'
-                    f.write(f"{read.sequence}\t{labels_str}\t{error_type}\n")
-            stats['format'] = 'text'
-            
+                    pickle.dump(invalid_reads, f, protocol=pickle.HIGHEST_PROTOCOL)
+        
         elif format == 'json':
-            # JSON format for interoperability
-            data = {
-                'reads': [],
-                'error_probabilities': self.error_probabilities,
-                'version': '1.0'
-            }
-            
-            for read in reads:
-                data['reads'].append({
+            # Convert to JSON-serializable format
+            data = []
+            for read in invalid_reads:
+                data.append({
                     'sequence': read.sequence,
                     'labels': read.labels,
                     'label_regions': read.label_regions,
                     'metadata': read.metadata
                 })
             
-            if compress:
-                with gzip.open(output_path, 'wt') as f:
-                    json.dump(data, f)
-            else:
-                with open(output_path, 'w') as f:
-                    json.dump(data, f, indent=2)
-            stats['format'] = 'json'
-            stats['compressed'] = compress
+            with open(output_path, 'w') as f:
+                json.dump(data, f, indent=2)
         
-        # Calculate statistics
-        stats['save_time'] = time.time() - stats['start_time']
-        stats['file_size'] = output_path.stat().st_size
-        stats['file_size_mb'] = stats['file_size'] / (1024 * 1024)
-        stats['n_sequences'] = len(reads)
-        stats['output_path'] = str(output_path)
+        elif format == 'text':
+            with open(output_path, 'w') as f:
+                for read in invalid_reads:
+                    labels = ' '.join(read.labels) if read.labels else ''
+                    metadata = json.dumps(read.metadata) if read.metadata else ''
+                    f.write(f"{read.sequence}\t{labels}\t{metadata}\n")
         
-        # Count error types
-        error_counts = self._count_error_types(reads)
-        stats['error_counts'] = error_counts
-        stats['invalid_ratio'] = sum(error_counts.values()) / len(reads) if reads else 0
+        else:
+            raise ValueError(f"Unsupported format: {format}")
         
-        logger.info(f"Saved {len(reads)} sequences ({stats['invalid_ratio']:.1%} invalid) "
-                   f"to {output_path} ({stats['file_size_mb']:.2f} MB in {stats['save_time']:.2f}s)")
+        save_time = time.time() - start_time
+        file_size = output_path.stat().st_size
         
-        return stats
+        # Collect error type statistics
+        error_types = {}
+        for read in invalid_reads:
+            if read.metadata and 'error_type' in read.metadata:
+                error_type = read.metadata['error_type']
+                error_types[error_type] = error_types.get(error_type, 0) + 1
+        
+        return {
+            'num_reads': len(invalid_reads),
+            'file_path': str(output_path),
+            'file_size_mb': file_size / (1024 * 1024),
+            'save_time_sec': save_time,
+            'format': format,
+            'compressed': compress if format == 'pickle' else False,
+            'error_types': error_types
+        }
     
-    def load_batch(
-        self,
-        input_path: Path,
-        format: Optional[str] = None
-    ) -> Tuple[List[SimulatedRead], Dict[str, Any]]:
+    def load_invalid_reads(self, 
+                          input_path: Path, 
+                          format: str = 'auto') -> List[SimulatedRead]:
         """
-        Load a batch of reads from file.
+        Load invalid reads from file.
         
         Args:
             input_path: Input file path
-            format: Input format (auto-detected if None)
+            format: 'pickle', 'json', 'text', or 'auto' (detect from extension)
             
         Returns:
-            Tuple of (reads, metadata)
+            List of SimulatedRead objects
         """
         input_path = Path(input_path)
         
-        # Auto-detect format
-        if format is None:
-            if '.pkl' in str(input_path) or '.pickle' in str(input_path):
+        if format == 'auto':
+            if input_path.suffix in ['.pkl', '.pickle']:
                 format = 'pickle'
-            elif '.json' in str(input_path):
+            elif input_path.suffix in ['.pkl.gz', '.pickle.gz']:
+                format = 'pickle'
+            elif input_path.suffix == '.json':
                 format = 'json'
             else:
                 format = 'text'
         
-        metadata = {}
-        
         if format == 'pickle':
-            if input_path.suffix == '.gz' or '.gz' in input_path.suffixes:
-                with gzip.open(input_path, 'rb') as f:
-                    data = pickle.load(f)
-            else:
-                with open(input_path, 'rb') as f:
-                    data = pickle.load(f)
+            opener = gzip.open if input_path.suffix.endswith('.gz') else open
+            with opener(input_path, 'rb') as f:
+                return pickle.load(f)
+        
+        elif format == 'json':
+            with open(input_path, 'r') as f:
+                data = json.load(f)
             
-            # Handle both old and new pickle formats
-            if isinstance(data, dict) and 'reads' in data:
-                reads = data['reads']
-                metadata = {k: v for k, v in data.items() if k != 'reads'}
-            else:
-                reads = data
-                    
+            reads = []
+            for item in data:
+                labels = item.get('labels', [])
+                # Compute label_regions if not provided
+                label_regions = item.get('label_regions', 
+                                        self._invalid_regions_from_labels(labels, exclude={"ERROR"}))
+                
+                read = SimulatedRead(
+                    sequence=item['sequence'],
+                    labels=labels,
+                    label_regions=label_regions,
+                    metadata=item.get('metadata', {})
+                )
+                reads.append(read)
+            return reads
+        
         elif format == 'text':
             reads = []
-            metadata['error_probabilities'] = {}
-            
             with open(input_path, 'r') as f:
                 for line in f:
-                    line = line.strip()
-                    if line.startswith('# Error probabilities:'):
-                        try:
-                            metadata['error_probabilities'] = json.loads(line.split(':', 1)[1])
-                        except:
-                            pass
-                    elif not line or line.startswith('#'):
-                        continue
-                    else:
-                        parts = line.split('\t')
-                        if len(parts) >= 2:
-                            sequence = parts[0]
-                            labels = parts[1].split()
-                            error_type = parts[2] if len(parts) > 2 else 'none'
-                            
-                            reads.append(SimulatedRead(
-                                sequence=sequence,
-                                labels=labels,
-                                label_regions={},
-                                metadata={'error_type': error_type}
-                            ))
+                    parts = line.strip().split('\t')
+                    if len(parts) >= 1:
+                        sequence = parts[0]
+                        labels = parts[1].split() if len(parts) > 1 and parts[1] else []
+                        metadata = json.loads(parts[2]) if len(parts) > 2 and parts[2] else {}
                         
-        elif format == 'json':
-            if input_path.suffix == '.gz':
-                with gzip.open(input_path, 'rt') as f:
-                    data = json.load(f)
-            else:
-                with open(input_path, 'r') as f:
-                    data = json.load(f)
-            
-            reads = [SimulatedRead(**item) for item in data['reads']]
-            metadata = {k: v for k, v in data.items() if k != 'reads'}
+                        # Compute label_regions from labels
+                        label_regions = self._invalid_regions_from_labels(labels, exclude={"ERROR"})
+                        
+                        reads.append(SimulatedRead(
+                            sequence=sequence,
+                            labels=labels,
+                            label_regions=label_regions,
+                            metadata=metadata
+                        ))
+            return reads
         
-        logger.info(f"Loaded {len(reads)} sequences from {input_path}")
-        return reads, metadata
+        else:
+            raise ValueError(f"Unsupported format: {format}")
     
-    def _create_preview_file(self, reads: List[SimulatedRead], preview_path: Path):
-        """
-        Create an enhanced preview file for invalid reads with comprehensive metadata.
+    # Error generation methods
+    def generate_segment_loss(self, read: SimulatedRead) -> SimulatedRead:
+        """Remove random segments from read."""
+        # Select segments to remove (prefer variable segments)
+        removable = ["UMI", "ACC", "CBC", "i7", "i5", "cDNA", "polyA"]
+        available = [seg for seg in removable if seg in read.labels]
         
-        This enhanced version includes:
-        - Complete error type distribution
-        - Detailed invalid read statistics
-        - Full metadata preservation
-        - Error-specific annotations
-        """
-        # Count error types first
-        error_counts = self._count_error_types(reads)
-        invalid_count = sum(error_counts.values())
-        valid_count = len(reads) - invalid_count
+        if not available:
+            return read
         
-        with open(preview_path, 'w') as f:
-            # ============= HEADER SECTION =============
-            f.write("# TEMPEST Invalid Read Preview File\n")
-            f.write(f"# Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"# Generator: {self.__class__.__name__}\n")
-            f.write("#" + "=" * 70 + "\n\n")
-            
-            # ============= DATASET STATISTICS =============
-            f.write("# DATASET STATISTICS\n")
-            f.write("#" + "-" * 70 + "\n")
-            f.write(f"# Total sequences: {len(reads):,}\n")
-            f.write(f"# Valid sequences: {valid_count:,} ({valid_count/len(reads)*100:.1f}%)\n")
-            f.write(f"# Invalid sequences: {invalid_count:,} ({invalid_count/len(reads)*100:.1f}%)\n")
-            
-            # ============= ERROR TYPE DISTRIBUTION =============
-            if error_counts:
-                f.write("\n# ERROR TYPE DISTRIBUTION\n")
-                f.write("#" + "-" * 70 + "\n")
-                
-                # Sort by frequency
-                sorted_errors = sorted(error_counts.items(), key=lambda x: x[1], reverse=True)
-                for error_type, count in sorted_errors:
-                    percentage = (count / invalid_count * 100) if invalid_count > 0 else 0
-                    f.write(f"# {error_type:25s}: {count:6,} ({percentage:5.1f}%)\n")
-                
-                # Add error probabilities if configured
-                if hasattr(self, 'error_probabilities') and self.error_probabilities:
-                    f.write("\n# Configured Error Probabilities:\n")
-                    for error_type, prob in self.error_probabilities.items():
-                        f.write(f"#   {error_type}: {prob:.3f}\n")
-            
-            # ============= SEQUENCE LENGTH STATISTICS =============
-            if reads:
-                lengths = [len(r.sequence) for r in reads[:1000]]
-                f.write("\n# SEQUENCE LENGTH STATISTICS (from sample)\n")
-                f.write("#" + "-" * 70 + "\n")
-                f.write(f"# Mean: {sum(lengths)/len(lengths):.1f} bp\n")
-                f.write(f"# Min: {min(lengths)} bp\n")
-                f.write(f"# Max: {max(lengths)} bp\n")
-            
-            # ============= LABEL DISTRIBUTION =============
-            if reads:
-                f.write("\n# LABEL DISTRIBUTION (first 1000 sequences)\n")
-                f.write("#" + "-" * 70 + "\n")
-                
-                label_counts = {}
-                for read in reads[:1000]:
-                    for label in read.labels:
-                        label_counts[label] = label_counts.get(label, 0) + 1
-                
-                # Sort by frequency
-                sorted_labels = sorted(label_counts.items(), key=lambda x: x[1], reverse=True)[:15]  # Top 15
-                
-                total_positions = sum(label_counts.values())
-                for label, count in sorted_labels:
-                    percentage = (count / total_positions * 100) if total_positions > 0 else 0
-                    f.write(f"# {label:10s}: {count:8,} positions ({percentage:5.2f}%)\n")
-                
-                if len(label_counts) > 15:
-                    f.write(f"# ... and {len(label_counts) - 15} more labels\n")
-            
-            # ============= SEQUENCE PREVIEW =============
-            f.write("\n# SEQUENCE PREVIEW\n")
-            f.write("#" + "=" * 70 + "\n")
-            f.write("# Format: sequence<TAB>labels<TAB>is_invalid<TAB>metadata_json\n")
-            f.write("#" + "-" * 70 + "\n\n")
-            
-            # Show up to 100 sequences, with emphasis on invalid reads
-            n_preview = min(100, len(reads))
-            
-            # Separate valid and invalid reads for balanced preview
-            valid_reads = [r for r in reads if not (hasattr(r, 'metadata') and r.metadata and r.metadata.get('is_invalid', False))]
-            invalid_reads = [r for r in reads if hasattr(r, 'metadata') and r.metadata and r.metadata.get('is_invalid', False)]
-            
-            # Show a mix of both, prioritizing invalid reads
-            preview_reads = []
-            if invalid_reads:
-                # Show up to 70% invalid reads in preview
-                n_invalid_preview = min(len(invalid_reads), int(n_preview * 0.7))
-                n_valid_preview = min(len(valid_reads), n_preview - n_invalid_preview)
-                
-                preview_reads.extend(invalid_reads[:n_invalid_preview])
-                preview_reads.extend(valid_reads[:n_valid_preview])
-            else:
-                preview_reads = reads[:n_preview]
-            
-            # Write sequences with metadata
-            for i, read in enumerate(preview_reads, 1):
-                labels_str = ' '.join(read.labels)
-                
-                # Metadata handling
-                is_invalid = 'N'
-                metadata_dict = {}
-                
-                if hasattr(read, 'metadata') and read.metadata:
-                    is_invalid = 'Y' if read.metadata.get('is_invalid', False) else 'N'
-                    
-                    # Include all metadata
-                    metadata_dict = {k: v for k, v in read.metadata.items() if k not in ['sequence', 'labels']}
-                
-                # Add label regions if present
-                if hasattr(read, 'label_regions') and read.label_regions:
-                    region_summary = {}
-                    for label, regions in read.label_regions.items():
-                        region_summary[label] = [[start, end] for start, end in regions]
-                    metadata_dict['regions'] = region_summary
-                
-                # Safe JSON encoding
-                try:
-                    metadata_json = json.dumps(metadata_dict, separators=(',', ':'))
-                except:
-                    metadata_json = '{}'
-                
-                # Write the sequence line
-                f.write(f"{read.sequence}\t{labels_str}\t{is_invalid}\t{metadata_json}\n")
-                
-                # Add error annotations for invalid reads (first 20)
-                if is_invalid == 'Y' and i <= 20:
-                    error_type = metadata_dict.get('error_type', 'unknown')
-                    error_desc = f"# -> Error: {error_type}"
-                    
-                    if error_type == 'segment_loss' and 'removed_segment' in metadata_dict:
-                        error_desc += f" (removed: {metadata_dict['removed_segment']})"
-                    elif error_type == 'segment_duplication' and 'duplicated_segment' in metadata_dict:
-                        error_desc += f" (duplicated: {metadata_dict['duplicated_segment']})"
-                    elif error_type == 'truncation':
-                        if 'truncation_point' in metadata_dict:
-                            error_desc += f" (at position: {metadata_dict['truncation_point']})"
-                        if 'original_length' in metadata_dict:
-                            error_desc += f" (original: {metadata_dict['original_length']}bp)"
-                    elif error_type == 'chimeric':
-                        if 'source_reads' in metadata_dict:
-                            error_desc += f" (from {len(metadata_dict['source_reads'])} reads)"
-                    elif error_type == 'scrambled':
-                        error_desc += " (segment order randomized)"
-                    
-                    f.write(error_desc + "\n")
-            
-            # Footer
-            if len(reads) > n_preview:
-                f.write(f"\n# ... {len(reads) - n_preview:,} more sequences not shown ...\n")
-            
-            f.write("\n# END OF PREVIEW\n")
+        # Remove 1-3 segments
+        n_remove = min(random.randint(1, 3), len(available))
+        to_remove = set(random.sample(available, n_remove))
         
-        logger.info(f"Created enhanced invalid read preview: {preview_path}")
-        logger.info(f"  - {valid_count:,} valid, {invalid_count:,} invalid reads")
-        if error_counts:
-            logger.info(f"  - Error distribution: {', '.join(f'{k}:{v}' for k, v in sorted(error_counts.items()))}")
+        new_sequence = ""
+        new_labels = []
+        
+        # Iterate over segments properly
+        i = 0
+        n = len(read.labels)
+        while i < n:
+            label = read.labels[i]
+            # Find end of current segment
+            j = i
+            while j < n and read.labels[j] == label:
+                j += 1
+            
+            # Keep segment if not in removal list
+            if label not in to_remove:
+                segment_seq = read.sequence[i:j]
+                new_sequence += segment_seq
+                new_labels.extend([label] * len(segment_seq))
+            
+            i = j
+        
+        # Compute label_regions from modified labels
+        label_regions = self._invalid_regions_from_labels(new_labels, exclude={"ERROR"})
+        
+        return SimulatedRead(
+            sequence=new_sequence,
+            labels=new_labels,
+            label_regions=label_regions,
+            metadata={
+                **read.metadata,
+                'error_type': 'segment_loss',
+                'removed_segments': list(to_remove)
+            }
+        )
     
-    def _categorize_reads(self, reads: List[SimulatedRead]) -> Dict[int, str]:
-        """
-        Categorize reads by their error type.
+    def generate_segment_duplication(self, read: SimulatedRead) -> SimulatedRead:
+        """Duplicate random segments (PCR artifacts)."""
+        duplicatable = ["UMI", "ACC", "CBC", "i7", "i5"]
+        available = [seg for seg in duplicatable if seg in read.labels]
         
+        if not available:
+            return read
+        
+        # Duplicate 1-2 segments
+        n_dup = min(random.randint(1, 2), len(available))
+        to_duplicate = set(random.sample(available, n_dup))
+        
+        new_sequence = ""
+        new_labels = []
+        
+        # Iterate over segments properly
+        i = 0
+        n = len(read.labels)
+        while i < n:
+            label = read.labels[i]
+            # Find end of current segment
+            j = i
+            while j < n and read.labels[j] == label:
+                j += 1
+            
+            segment_seq = read.sequence[i:j]
+            new_sequence += segment_seq
+            new_labels.extend([label] * len(segment_seq))
+            
+            # Duplicate if selected
+            if label in to_duplicate:
+                n_copies = random.randint(1, 3)
+                for _ in range(n_copies):
+                    new_sequence += segment_seq
+                    new_labels.extend([label] * len(segment_seq))
+            
+            i = j
+        
+        # Compute label_regions from modified labels
+        label_regions = self._invalid_regions_from_labels(new_labels, exclude={"ERROR"})
+        
+        return SimulatedRead(
+            sequence=new_sequence,
+            labels=new_labels,
+            label_regions=label_regions,
+            metadata={
+                **read.metadata,
+                'error_type': 'segment_duplication',
+                'duplicated_segments': list(to_duplicate)
+            }
+        )
+    
+    def generate_truncation(self, read: SimulatedRead) -> SimulatedRead:
+        """Truncate read at random position."""
+        min_length = max(50, len(read.sequence) // 4)
+        max_length = len(read.sequence) - 20
+        
+        if min_length >= max_length:
+            return read
+
+        truncate_pos = random.randint(min_length, max_length)
+
+        # Decide 5' or 3' truncation
+        if random.random() < 0.5:
+            # 5' truncation
+            new_sequence = read.sequence[truncate_pos:]
+            new_labels = read.labels[truncate_pos:]
+            truncation_type = "5_prime"
+        else:
+            # 3' truncation
+            new_sequence = read.sequence[:truncate_pos]
+            new_labels = read.labels[:truncate_pos]
+            truncation_type = "3_prime"
+        
+        # Compute label_regions from modified labels
+        label_regions = self._invalid_regions_from_labels(new_labels, exclude={"ERROR"})
+        
+        return SimulatedRead(
+            sequence=new_sequence,
+            labels=new_labels,
+            label_regions=label_regions,
+            metadata={
+                **read.metadata,
+                'error_type': 'truncation',
+                'truncation_type': truncation_type,
+                'original_length': len(read.sequence),
+                'truncated_length': len(new_sequence)
+            }
+        )
+    
+    def generate_chimeric(self, read: SimulatedRead, other_read: Optional[SimulatedRead] = None) -> SimulatedRead:
+        """Create chimeric read from two reads."""
+        if other_read is None:
+            # Create a synthetic "other" read by scrambling current read
+            other_read = self.generate_scrambled(read)
+        
+        # Find breakpoint in both reads
+        break1 = random.randint(len(read.sequence) // 4, 3 * len(read.sequence) // 4)
+        break2 = random.randint(len(other_read.sequence) // 4, 3 * len(other_read.sequence) // 4)
+        
+        # Combine parts
+        new_sequence = read.sequence[:break1] + other_read.sequence[break2:]
+        new_labels = read.labels[:break1] + other_read.labels[break2:]
+        
+        # Compute label_regions from modified labels
+        label_regions = self._invalid_regions_from_labels(new_labels, exclude={"ERROR"})
+        
+        return SimulatedRead(
+            sequence=new_sequence,
+            labels=new_labels,
+            label_regions=label_regions,
+            metadata={
+                **read.metadata,
+                'error_type': 'chimeric',
+                'break_position_1': break1,
+                'break_position_2': break2
+            }
+        )
+    
+    def generate_scrambled(self, read: SimulatedRead) -> SimulatedRead:
+        """Scramble segment order."""
+        # Extract segments
+        segments = []
+        current_segment = []
+        current_label = None
+        
+        for i, label in enumerate(read.labels):
+            if label != current_label:
+                if current_segment:
+                    segments.append((current_label, ''.join(current_segment)))
+                current_segment = [read.sequence[i]]
+                current_label = label
+            else:
+                current_segment.append(read.sequence[i])
+        
+        if current_segment:
+            segments.append((current_label, ''.join(current_segment)))
+        
+        if len(segments) <= 1:
+            return read
+        
+        # Shuffle segments
+        original_order = [seg[0] for seg in segments]
+        random.shuffle(segments)
+        shuffled_order = [seg[0] for seg in segments]
+        
+        # Reconstruct read
+        new_sequence = ""
+        new_labels = []
+        for label, seq in segments:
+            new_sequence += seq
+            new_labels.extend([label] * len(seq))
+        
+        # Compute label_regions from modified labels
+        label_regions = self._invalid_regions_from_labels(new_labels, exclude={"ERROR"})
+        
+        return SimulatedRead(
+            sequence=new_sequence,
+            labels=new_labels,
+            label_regions=label_regions,
+            metadata={
+                **read.metadata,
+                'error_type': 'scrambled',
+                'original_order': original_order,
+                'shuffled_order': shuffled_order
+            }
+        )
+    
+    def generate_invalid_read(self, read: SimulatedRead, error_type: Optional[str] = None) -> SimulatedRead:
+        """
+        Generate an invalid read with specified or random error type.
+        
+        Args:
+            read: Valid input read
+            error_type: Specific error type or None for random selection
+            
         Returns:
-            Dictionary mapping read index to error type
+            Invalid read with error
         """
-        categories = {}
-        for i, read in enumerate(reads):
-            if read.metadata and 'error_type' in read.metadata:
-                categories[i] = read.metadata['error_type']
-            else:
-                categories[i] = 'valid'
-        return categories
-    
-    def _count_error_types(self, reads: List[SimulatedRead]) -> Dict[str, int]:
-        """
-        Count the number of reads for each error type.
-        
-        Returns:
-            Dictionary mapping error type to count
-        """
-        counts = {'valid': 0}
-        for error_type in self.error_probabilities.keys():
-            counts[error_type] = 0
-        
-        for read in reads:
-            if read.metadata and 'error_type' in read.metadata:
-                error_type = read.metadata['error_type']
-                if error_type in counts:
-                    counts[error_type] += 1
-                else:
-                    counts[error_type] = 1
-            else:
-                counts['valid'] += 1
-        
-        # Remove zero counts
-        return {k: v for k, v in counts.items() if v > 0}
-    
-    # Helpers
-    def _pychoice(self, items):
-        """Return one random element from a list, preserving dicts."""
-        if not items:
-            return None
-        choice = random.choice(items)
-        return choice.copy() if isinstance(choice, dict) else choice
-
-    @staticmethod
-    def _clone_metadata(read: SimulatedRead, **updates) -> Dict[str, Any]:
-        """Copy metadata and apply updates."""
-        meta = dict(read.metadata) if read.metadata else {}
-        # Ensure every metadata dict has an explicit invalid flag
-        if "is_invalid" not in meta:
-            meta["is_invalid"] = False
-        meta.update(updates)
-        # If this cloning is for an invalid read, mark accordingly
-        if "error_type" in updates or updates.get("is_invalid", False):
-            meta["is_invalid"] = True
-        return meta
-
-    @staticmethod
-    def _reassemble(read: SimulatedRead, segments: List[Dict]) -> tuple[str, list[str], dict]:
-        """Rebuild sequence, labels, and regions from given segment definitions."""
-        seq, labels, regions, pos = "", [], {}, 0
-        for seg in segments:
-            s, e = seg["start"], seg["end"]
-            seg_seq = read.sequence[s:e]
-            seg_labels = read.labels[s:e]
-            seq += seg_seq
-            labels.extend(seg_labels)
-            regions.setdefault(seg["type"], []).append((pos, pos + len(seg_seq)))
-            pos += len(seg_seq)
-        return seq, labels, regions
-
-    # ------------------------------------------------------------------ #
-    # Main API
-    # ------------------------------------------------------------------ #
-    def generate_invalid_read(self, valid_read: SimulatedRead,
-                              error_type: Optional[str] = None) -> SimulatedRead:
-        """Generate an invalid read from a valid one."""
         if error_type is None:
-            # Weighted choice uses numpy since random.choice lacks probability argument
+            # Select error type based on probabilities
             error_type = np.random.choice(
                 list(self.error_probabilities.keys()),
                 p=list(self.error_probabilities.values())
             )
 
-        handlers = {
-            "segment_loss": self._apply_segment_loss,
-            "segment_duplication": self._apply_segment_duplication,
-            "truncation": self._apply_truncation,
-            "chimeric": self._apply_chimeric,
-            "scrambled": self._apply_scrambled,
-        }
-        return handlers.get(error_type, lambda r: r)(valid_read)
-
-    def generate_batch(
-        self,
-        valid_reads: List[SimulatedRead],
-        invalid_ratio: Optional[float] = None,
-        invalid_fraction: Optional[float] = None
-    ) -> List[SimulatedRead]:
-        """Generate a batch of invalid reads from valid ones."""
-        if not valid_reads:
-            return []
-
-        # Normalize argument naming for backward compatibility
-        if invalid_fraction is not None:
-            invalid_ratio = invalid_fraction
-        if invalid_ratio is None:
-            invalid_ratio = 0.1
-
-        # Always produce at least one invalid read if ratio > 0
-        n_invalid = max(1, int(len(valid_reads) * invalid_ratio)) if invalid_ratio > 0 else 0
-        if n_invalid == 0:
-            return valid_reads
-
-        # Use a set for efficient membership check (robust for single-element arrays)
-        choice = np.random.choice(len(valid_reads), n_invalid, replace=False)
-        indices = set(np.atleast_1d(choice).tolist())
-
-        return [
-            self.generate_invalid_read(r) if i in indices else r
-            for i, r in enumerate(valid_reads)
-        ]
+        if error_type == "segment_loss":
+            return self.generate_segment_loss(read)
+        elif error_type == "segment_duplication":
+            return self.generate_segment_duplication(read)
+        elif error_type == "truncation":
+            return self.generate_truncation(read)
+        elif error_type == "chimeric":
+            return self.generate_chimeric(read)
+        elif error_type == "scrambled":
+            return self.generate_scrambled(read)
+        else:
+            logger.warning(f"Unknown error type: {error_type}, returning original read")
+            return read
     
-    def generate_and_save_batch(
-        self,
-        valid_reads: List[SimulatedRead],
-        output_path: Path,
-        invalid_ratio: float = 0.1,
-        format: str = 'pickle',
-        compress: bool = True,
-        create_preview: bool = True
-    ) -> Dict[str, Any]:
+    def generate_batch(self, reads: List[SimulatedRead], invalid_fraction: float = 0.2) -> List[SimulatedRead]:
         """
-        Generate invalid reads and save them directly.
+        Generate batch of reads with specified fraction of invalid reads.
         
         Args:
-            valid_reads: List of valid SimulatedRead objects
-            output_path: Output file path
-            invalid_ratio: Fraction of reads to make invalid
-            format: Output format
-            compress: Whether to compress
-            create_preview: Whether to create preview
+            reads: List of valid reads
+            invalid_fraction: Fraction of reads to make invalid
             
         Returns:
-            Dictionary with generation and save statistics
+            Mixed list of valid and invalid reads
         """
-        # Generate batch with invalid reads
-        batch = self.generate_batch(valid_reads, invalid_ratio)
+        n_invalid = int(len(reads) * invalid_fraction)
+        invalid_indices = set(random.sample(range(len(reads)), n_invalid))
         
-        # Save the batch
-        stats = self.save_batch(batch, output_path, format, compress, create_preview)
-        stats['invalid_ratio_requested'] = invalid_ratio
+        result = []
+        for i, read in enumerate(reads):
+            if i in invalid_indices:
+                result.append(self.generate_invalid_read(read))
+            else:
+                result.append(read)
         
-        return stats
-
-    # ------------------------------------------------------------------ #
-    # Individual corruption strategies (unchanged from original)
-    # ------------------------------------------------------------------ #
-    def _apply_segment_loss(self, read: SimulatedRead) -> SimulatedRead:
-        """Remove a random segment (e.g., missing barcode or UMI)."""
-        segments = self._extract_segments(read)
-        removable = [s for s in segments
-                     if "ADAPTER" not in s["type"] and "INSERT" not in s["type"]]
-        if not removable:
-            return read
-
-        to_remove = self._pychoice(removable)
-        if not isinstance(to_remove, dict):
-            return read
-
-        new_seq = read.sequence[:to_remove["start"]] + read.sequence[to_remove["end"]:]
-        new_labels = read.labels[:to_remove["start"]] + read.labels[to_remove["end"]:]
-        removed_len = to_remove["end"] - to_remove["start"]
-
-        new_regions = {}
-        for label, regions in read.label_regions.items():
-            if label == to_remove["type"]:
-                continue
-            adjusted = []
-            for start, end in regions:
-                if end <= to_remove["start"]:
-                    adjusted.append((start, end))
-                elif start >= to_remove["end"]:
-                    adjusted.append((start - removed_len, end - removed_len))
-                elif start < to_remove["start"] and end > to_remove["end"]:
-                    adjusted.extend([
-                        (start, to_remove["start"]),
-                        (to_remove["start"], end - removed_len)
-                    ])
-            if adjusted:
-                new_regions[label] = adjusted
-
-        meta = self._clone_metadata(read,
-                                    error_type="segment_loss",
-                                    removed_segment=to_remove["type"])
-        return SimulatedRead(new_seq, new_labels, new_regions, meta)
-
-    def _apply_segment_duplication(self, read: SimulatedRead) -> SimulatedRead:
-        """Duplicate a random segment (PCR-like artifact)."""
-        segments = self._extract_segments(read)
-        duplicatable = [s for s in segments if s["type"] in ["UMI", "BARCODE", "ACC", "CBC", "i7", "i5"]] \
-                       or [s for s in segments if s["type"] != "INSERT"]
-        if not duplicatable:
-            return read
-
-        to_dup = self._pychoice(duplicatable)
-        seg_seq = read.sequence[to_dup["start"]:to_dup["end"]]
-        seg_labels = read.labels[to_dup["start"]:to_dup["end"]]
-        dup_len = to_dup["end"] - to_dup["start"]
-
-        new_seq = read.sequence[:to_dup["end"]] + seg_seq + read.sequence[to_dup["end"]:]
-        new_labels = read.labels[:to_dup["end"]] + seg_labels + read.labels[to_dup["end"]:]
-
-        new_regions = {}
-        for label, regions in read.label_regions.items():
-            adjusted = []
-            for start, end in regions:
-                if label == to_dup["type"] and start == to_dup["start"]:
-                    adjusted.extend([(start, end), (end, end + dup_len)])
-                elif start >= to_dup["end"]:
-                    adjusted.append((start + dup_len, end + dup_len))
-                else:
-                    adjusted.append((start, end))
-            if adjusted:
-                new_regions[label] = adjusted
-
-        meta = self._clone_metadata(read,
-                                    error_type="segment_duplication",
-                                    duplicated_segment=to_dup["type"])
-        return SimulatedRead(new_seq, new_labels, new_regions, meta)
-
-    def _apply_truncation(self, read: SimulatedRead) -> SimulatedRead:
-        """Truncate the read to simulate incomplete sequencing."""
-        min_len = max(10, len(read.sequence) // 2)
-        max_len = int(len(read.sequence) * 0.9)
-        cut = random.randint(min_len, max_len) if min_len < max_len else min_len
-        meta = self._clone_metadata(read, error_type="truncation", truncation_point=cut)
-        new_regions = self._update_regions_for_truncation(read.label_regions, cut)
-        return SimulatedRead(read.sequence[:cut], read.labels[:cut], new_regions, meta)
-
-    def _apply_chimeric(self, read: SimulatedRead,
-                        other_read: Optional[SimulatedRead] = None) -> SimulatedRead:
-        """Scramble middle segments while keeping adapters intact."""
-        segments = self._extract_segments(read)
-        if len(segments) < 4:
-            return read
-        middle = segments[1:-1]
-        random.shuffle(middle)
-        ordered = [segments[0]] + middle + [segments[-1]]
-        seq, labels, regs = self._reassemble(read, ordered)
-        meta = self._clone_metadata(read, error_type="chimeric")
-        return SimulatedRead(seq, labels, regs, meta)
-
-    def _apply_scrambled(self, read: SimulatedRead) -> SimulatedRead:
-        """Completely randomize segment order."""
-        segments = self._extract_segments(read)
-        if len(segments) <= 1:
-            return read
-        random.shuffle(segments)
-        seq, labels, regs = self._reassemble(read, segments)
-        meta = self._clone_metadata(read, error_type="scrambled")
-        return SimulatedRead(seq, labels, regs, meta)
-
-    # ------------------------------------------------------------------ #
-    # Segment utilities
-    # ------------------------------------------------------------------ #
-    def _extract_segments(self, read: SimulatedRead) -> List[Dict]:
-        """Extract segment boundaries and labels."""
-        if not read.labels:
-            return []
-        segments, start, current = [], 0, read.labels[0]
-        for i, label in enumerate(read.labels[1:], 1):
-            if label != current:
-                segments.append({"type": current, "start": start, "end": i})
-                current, start = label, i
-        segments.append({"type": current, "start": start, "end": len(read.labels)})
-        return segments
-
-    @staticmethod
-    def _update_regions_for_truncation(regions: Dict, cut_point: int) -> Dict:
-        """Trim region definitions after truncation."""
-        out = {}
-        for label, lst in regions.items():
-            kept = [(s, min(e, cut_point)) for s, e in lst if s < cut_point]
-            if kept:
-                out[label] = kept
-        return out
+        # Shuffle to mix valid and invalid
+        random.shuffle(result)
+        return result

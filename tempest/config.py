@@ -2,9 +2,7 @@
 """
 Unified configuration module for Tempest.
 
-This module consolidates all configuration classes, including the comprehensive
-EnsembleConfig and BMAConfig from the inference module, providing a single
-source of truth for configuration management.
+This module consolidates and sets dataclass objects.
 """
 
 import yaml
@@ -97,12 +95,23 @@ class SimulationConfig:
 
     # invalid read generation up front instead of during hybrid training
     invalid_fraction: float = 0.0
+    invalid_params: Optional[Dict[str, float]] = None
     
     @classmethod
     def from_dict(cls, config: dict):
-        # Handle nested PWM config
-        if 'pwm' in config and isinstance(config['pwm'], dict):
-            config['pwm'] = PWMConfig.from_dict(config['pwm'])
+        # deal with tricky nested params
+        # this is nested inside of simulation -> pwm -> params
+        # unnest as PWMConfig dataclass
+        if "pwm" in config and isinstance(config["pwm"], dict):
+            config["pwm"] = PWMConfig.from_dict(config["pwm"])
+        
+        # IMPORTANT: when called from TempestConfig.from_dict, we receive the simulation 
+        # section directly, not the full config. So invalid_params is directly in config.
+        if "invalid_params" in config and isinstance(config["invalid_params"], dict):
+            # Ensure all values are floats
+            config["invalid_params"] = {k: float(v) for k, v in config["invalid_params"].items()}
+            logger.debug(f"Loaded invalid_params: {config['invalid_params']}")
+
         return cls(**{k: v for k, v in config.items() if k in cls.__annotations__})
 
 
@@ -220,89 +229,50 @@ class EnsembleConfig:
     # BMA configuration (nested)
     bma_config: Optional[BMAConfig] = None
     
-    # Weighted average configuration (from YAML)
+    # Alternative voting methods
     weighted_average_config: Optional[Dict[str, Any]] = None
     
-    # Legacy weighted average fields (for backward compatibility)
-    weighted_optimization: str = 'fixed'
-    fixed_weights: Optional[Dict[str, float]] = None
+    # Model type distribution
+    hybrid_ratio: float = 0.5  # Fraction of hybrid models
+    
+    # Architecture variation
+    variation_type: str = 'both'  # 'architecture', 'initialization', 'both'
+    architecture_variations: Optional[Dict[str, Any]] = None
+    random_seeds: Optional[List[int]] = None
     
     # Prediction aggregation
     prediction_aggregation: Optional[Dict[str, Any]] = None
-    prediction_method: str = 'probability_averaging'  # Legacy field
-    confidence_weighting: bool = True  # Legacy field
-    apply_temperature_scaling: bool = False  # Legacy field
     
-    # Calibration settings
+    # Calibration
     calibration: Optional[Dict[str, Any]] = None
-    calibration_enabled: bool = True  # Legacy field
-    calibration_method: str = 'isotonic'  # Legacy field
-    use_separate_calibration_set: bool = True  # Legacy field
-    calibration_split: float = 0.2  # Legacy field
     
-    # Diversity settings
-    diversity: Optional[Dict[str, Any]] = None
-    enforce_diversity: bool = True  # Legacy field
-    diversity_metric: str = 'disagreement'  # Legacy field
-    min_diversity_threshold: float = 0.1  # Legacy field
+    # Diversity enforcement
+    enforce_diversity: bool = False
+    diversity_metric: str = 'disagreement'
+    min_diversity_threshold: float = 0.1
     
-    # Model variation settings (for ensemble diversity)
-    vary_architecture: bool = True
-    vary_initialization: bool = True
-    vary_training: bool = False
-    
-    # Uncertainty settings
-    uncertainty: Optional[Dict[str, Any]] = None
-    compute_epistemic: bool = True  # Legacy field
-    compute_aleatoric: bool = True  # Legacy field
-    confidence_intervals: bool = True  # Legacy field
-    interval_alpha: float = 0.05  # Legacy field
-    
-    # Evaluation settings
+    # Evaluation
     evaluation: Optional[Dict[str, Any]] = None
     
-    # Output settings
-    output_dir: str = './ensemble_results'
+    # Uncertainty quantification
+    compute_epistemic: bool = True
+    compute_aleatoric: bool = True
+    confidence_intervals: bool = True
+    interval_alpha: float = 0.95
+    
+    # Save configuration
+    save_all_models: bool = True
+    save_ensemble_metadata: bool = True
+    checkpoint_frequency: int = 5
     
     @classmethod
     def from_dict(cls, config: dict):
-        """Create EnsembleConfig from dictionary, handling nested BMAConfig."""
-        # Create a copy to avoid modifying original
-        config = config.copy()
+        """Create EnsembleConfig from dictionary, handling nested structures."""
+        # Extract BMA config if present
+        if 'bma_config' in config and config['bma_config']:
+            config['bma_config'] = BMAConfig.from_dict(config['bma_config'])
         
-        # Handle nested BMA config
-        if 'bma_config' in config and config['bma_config'] is not None:
-            if isinstance(config['bma_config'], dict):
-                config['bma_config'] = BMAConfig.from_dict(config['bma_config'])
-        
-        # Handle legacy fields from nested structures
-        if 'weighted_average_config' in config and config['weighted_average_config']:
-            wac = config['weighted_average_config']
-            if 'optimization' in wac:
-                config['weighted_optimization'] = wac['optimization']
-            if 'fixed_weights' in wac:
-                config['fixed_weights'] = wac['fixed_weights']
-        
-        if 'prediction_aggregation' in config and config['prediction_aggregation']:
-            pa = config['prediction_aggregation']
-            if 'method' in pa:
-                config['prediction_method'] = pa['method']
-            if 'confidence_weighting' in pa:
-                config['confidence_weighting'] = pa['confidence_weighting']
-            if 'apply_temperature_scaling' in pa:
-                config['apply_temperature_scaling'] = pa['apply_temperature_scaling']
-        
-        if 'calibration' in config and config['calibration']:
-            cal = config['calibration']
-            if 'enabled' in cal:
-                config['calibration_enabled'] = cal['enabled']
-            if 'method' in cal:
-                config['calibration_method'] = cal['method']
-            if 'use_separate_calibration_set' in cal:
-                config['use_separate_calibration_set'] = cal['use_separate_calibration_set']
-            if 'calibration_split' in cal:
-                config['calibration_split'] = cal['calibration_split']
-        
+        # Handle flattened diversity parameters
         if 'diversity' in config and config['diversity']:
             div = config['diversity']
             if 'enforce_diversity' in div:

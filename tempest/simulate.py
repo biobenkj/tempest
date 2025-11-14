@@ -385,7 +385,7 @@ def run_simulation(
                         r.metadata = {}
                     r.metadata.setdefault("is_invalid", False)
                 
-                corrupted = invalid_gen.generate_batch(reads, invalid_ratio=invalid_ratio)
+                corrupted = invalid_gen.generate_batch(reads, invalid_ratio)
                 logger.info(f"{dataset_name.capitalize()} set: {len(corrupted)} total reads")
                 
                 if dataset_name == "train":
