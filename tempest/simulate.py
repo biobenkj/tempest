@@ -141,21 +141,28 @@ def _save_reads_pickle(reads: List[SimulatedRead], output_file: Path, compress: 
         # Sequence preview with metadata
         f.write("\n# SEQUENCE PREVIEW\n")
         f.write("#" + "=" * 70 + "\n")
-        f.write("# Format: sequence<TAB>labels<TAB>is_invalid\n")
-        f.write("# Followed by JSON metadata for each read\n")
+        f.write("# Format:\n")
+        f.write("# Read {N} | Invalid: {Y/N}\n")
+        f.write("# Sequence: {sequence}\n")
+        f.write("# Labels: {space-separated labels}\n")
+        f.write("# Metadata: {JSON object}\n")
         f.write("#" + "-" * 70 + "\n\n")
         
         for i, read in enumerate(reads[:n_preview], 1):
-            f.write(f"# Read {i}\n")
-            
-            # Basic info: sequence, labels, invalid flag
-            labels_str = ' '.join(read.labels)
+            # Determine invalid status
             is_invalid = 'N'
-            
             if hasattr(read, 'metadata') and read.metadata:
                 is_invalid = 'Y' if read.metadata.get('is_invalid', False) else 'N'
             
-            f.write(f"{read.sequence}\t{labels_str}\t{is_invalid}\n")
+            # Write header with read number and invalid status
+            f.write(f"# Read {i} | Invalid: {is_invalid}\n")
+            
+            # Write sequence on its own line
+            f.write(f"# Sequence: {read.sequence}\n")
+            
+            # Write labels on their own line
+            labels_str = ' '.join(read.labels)
+            f.write(f"# Labels: {labels_str}\n")
             
             # Write comprehensive metadata
             if hasattr(read, 'metadata') and read.metadata:
@@ -203,6 +210,19 @@ def _save_reads_pickle(reads: List[SimulatedRead], output_file: Path, compress: 
             f.write("\n")  # Blank line between reads
     
     logger.info(f"Created comprehensive preview file: {preview_file}")
+    
+    # Also create a simple TSV file for easy parsing
+    tsv_file = output_file.parent / f"{output_file.stem}_simple.tsv"
+    with open(tsv_file, 'w') as f:
+        f.write("sequence\tlabels\tis_invalid\n")
+        for read in reads[:n_preview]:
+            labels_str = ' '.join(read.labels)
+            is_invalid = False
+            if hasattr(read, 'metadata') and read.metadata:
+                is_invalid = read.metadata.get('is_invalid', False)
+            f.write(f"{read.sequence}\t{labels_str}\t{is_invalid}\n")
+    
+    logger.info(f"Created simple TSV preview: {tsv_file}")
     
     return {
         'save_time': save_time,
@@ -735,16 +755,27 @@ def generate_command(
             results_table.add_row("Output file", str(result['output_file']))
             results_table.add_row("Total sequences", f"{result['n_sequences']:,}")
         
-        if 'save_stats' in result:
-            if isinstance(result['save_stats'], dict):
-                for name, stats in result['save_stats'].items():
-                    results_table.add_row(f"{name.title()} save time", f"{stats['save_time']:.2f}s")
-                    results_table.add_row(f"{name.title()} file size", f"{stats['file_size_mb']:.1f} MB")
-                    if 'n_invalid' in stats and stats['n_invalid'] > 0:
-                        results_table.add_row(f"{name.title()} invalid", f"{stats['n_invalid']:,}")
+        if 'save_stats' in result and result['save_stats']:
+            stats = result['save_stats']
+            # Check if this is split mode (dict of dicts) or single mode (single dict)
+            if 'train' in stats or 'val' in stats:
+                # Split mode: stats is {'train': {...}, 'val': {...}}
+                for name, subset_stats in stats.items():
+                    if isinstance(subset_stats, dict):
+                        results_table.add_row(f"{name.title()} save time", f"{subset_stats['save_time']:.2f}s")
+                        results_table.add_row(f"{name.title()} file size", f"{subset_stats['file_size_mb']:.1f} MB")
+                        if 'n_invalid' in subset_stats and subset_stats['n_invalid'] > 0:
+                            results_table.add_row(f"{name.title()} invalid", f"{subset_stats['n_invalid']:,}")
+                        if 'n_with_errors' in subset_stats and subset_stats['n_with_errors'] > 0:
+                            results_table.add_row(f"{name.title()} with errors", f"{subset_stats['n_with_errors']:,}")
             else:
-                results_table.add_row("Save time", f"{result['save_stats']['save_time']:.2f}s")
-                results_table.add_row("File size", f"{result['save_stats']['file_size_mb']:.1f} MB")
+                # Single dataset mode: stats is a single dict
+                results_table.add_row("Save time", f"{stats['save_time']:.2f}s")
+                results_table.add_row("File size", f"{stats['file_size_mb']:.1f} MB")
+                if 'n_invalid' in stats and stats['n_invalid'] > 0:
+                    results_table.add_row("Invalid sequences", f"{stats['n_invalid']:,}")
+                if 'n_with_errors' in stats and stats['n_with_errors'] > 0:
+                    results_table.add_row("Sequences with errors", f"{stats['n_with_errors']:,}")
         
         console.print("\n")
         console.print(results_table)

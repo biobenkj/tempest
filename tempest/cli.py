@@ -241,6 +241,8 @@ def init(
         project_dir / "logs",
         project_dir / "plots",
         project_dir / "whitelist",
+        project_dir / "refs",
+        project_dir / "tmp"
     ]
     
     with status("Creating directories..."):
