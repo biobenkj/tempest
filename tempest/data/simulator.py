@@ -776,38 +776,39 @@ class TranscriptPool:
         return sequence
     
     def sample_fragment(self, random_state: np.random.RandomState) -> str:
-        """Sample a fragment from a random transcript."""
         if not self.filtered_entries:
             return self._generate_random_fallback(random_state)
-        
-        # Select random transcript
+
         entry = random_state.choice(self.filtered_entries)
-        
-        # Get the full sequence
         transcript = self._read_sequence(entry)
-        
-        # Generate fragment
-        if not transcript or not isinstance(transcript, str):
-            return self._generate_random_sequence(
-                self.config.get("fragment_min", 200),
-                random_state
-            )
+
+        # generate fragment
         fragment_min = self.config.get("fragment_min", 200)
         fragment_max = self.config.get("fragment_max", 1000)
         max_possible = min(len(transcript), fragment_max)
-        
+
         if max_possible < fragment_min:
-            fragment = transcript[:fragment_min]
+            fragment = transcript
+            fragment_len = len(fragment)
+            start_pos = 0
         else:
             fragment_len = random_state.randint(fragment_min, max_possible + 1)
             max_start = len(transcript) - fragment_len
             start_pos = random_state.randint(0, max_start + 1) if max_start > 0 else 0
-            fragment = transcript[start_pos : start_pos + fragment_len]
-        
-        # Reverse complement with probability
+
+        fragment = transcript[start_pos:start_pos + fragment_len]
+
+        rc_flag = False
         if random_state.random() < self.config.get("reverse_complement_prob", 0.5):
             fragment = reverse_complement(fragment)
-        
+            rc_flag = True
+
+        # now metadata is valid
+        self.last_sampled_entry = entry
+        self.last_fragment_start = start_pos
+        self.last_fragment_end = start_pos + fragment_len
+        self.last_fragment_rc = rc_flag
+
         return fragment
     
     def sample_batch(self, batch_size: int, random_state: np.random.RandomState,
@@ -850,6 +851,8 @@ class TranscriptPool:
             
             if max_possible < fragment_min:
                 fragment = transcript
+                fragment_len = len(fragment)
+                start_pos = 0
             else:
                 fragment_len = random_state.randint(fragment_min, max_possible + 1)
                 max_start = len(transcript) - fragment_len
@@ -1425,9 +1428,6 @@ class SequenceSimulator:
         self.polya_generator = self._initialize_polya_generator()
         self.error_simulator = self._initialize_error_simulator()
 
-        # Load direct whitelists (backward compatibility)
-        self.whitelists = self._load_whitelists()
-
         # Get sequence architecture
         self.sequence_order = self.sim_config.get("sequence_order", [])
         self.sequence_configs = self.sim_config.get("sequences", {})
@@ -1509,49 +1509,6 @@ class SequenceSimulator:
             )
 
         return None
-
-    def _load_whitelists(self) -> Dict[str, List[str]]:
-        """Load whitelists from configuration (backward compatibility)."""
-        # Warning for maintenance
-        logger.warning(
-            "Legacy whitelist loader active - consider consolidating with WhitelistManager."
-        )
-        
-        # Valid IUPAC codes that can be resolved to actual bases
-        valid_iupac = set('ACGTNRYSWKMBDHV')
-        
-        whitelists = {}
-        whitelist_files = self.sim_config.get("whitelist_files", {})
-
-        for segment, filepath in whitelist_files.items():
-            if Path(filepath).exists():
-                sequences = []
-                with open(filepath, "r") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line or line.startswith("#"):
-                            continue
-                        
-                        # Handle tab-separated format (ID<TAB>SEQUENCE)
-                        if '\t' in line:
-                            parts = line.split('\t')
-                            if len(parts) >= 2:
-                                seq = parts[1].strip().upper()
-                            else:
-                                continue
-                        else:
-                            # Simple format with just sequences
-                            seq = line.upper()
-                        
-                        # Validate that sequence contains only valid IUPAC codes
-                        if seq and all(base in valid_iupac for base in seq):
-                            sequences.append(seq)
-                
-                if sequences:
-                    whitelists[segment] = sequences
-                    logger.info(f"Loaded {len(sequences)} sequences for {segment}")
-
-        return whitelists
 
     def _initialize_transcript_pool(self) -> Optional[TranscriptPool]:
         """Initialize transcript pool if configured."""
@@ -1806,18 +1763,6 @@ class SequenceSimulator:
         # whitelist manager
         if self.whitelist_manager.has_whitelist(segment_name):
             seq = self.whitelist_manager.sample(segment_name, self.random_state)
-            seq = self._resolve_iupac_codes(seq)
-            qual = 35.0 if include_quality else None
-            meta = {
-                "sequence": seq,
-                "length": len(seq),
-                "source": "whitelist"
-            }
-            return seq, qual, "whitelist", meta
-
-        # whitelists legacy
-        if segment_name in self.whitelists:
-            seq = self.random_state.choice(self.whitelists[segment_name])
             seq = self._resolve_iupac_codes(seq)
             qual = 35.0 if include_quality else None
             meta = {
@@ -2225,22 +2170,36 @@ class SequenceSimulator:
         output_path = Path(output_path)
         stats = {}
         start_time = time.time()
+
+        # capture metadata
+        simulator_metadata = {
+            "config": self.config,
+            "sim_config": self.sim_config,
+            "timestamp": time.time(),
+            "sequence_order": self.sequence_order,
+        }
         
         if format == 'pickle':
+            # Ensure metadata is fully detached from internal objects
+            for r in reads:
+                r.metadata = dict(r.metadata)
             # Adjust filename for compression
             if compress and not output_path.suffix == '.gz':
                 if output_path.suffix == '.pkl':
                     output_path = output_path.with_suffix('.pkl.gz')
                 else:
                     output_path = output_path.with_suffix(output_path.suffix + '.gz')
-            
             # Save pickle file
             if compress:
                 with gzip.open(output_path, 'wb') as f:
-                    pickle.dump(reads, f, protocol=pickle.HIGHEST_PROTOCOL)
+                    pickle.dump({"reads": reads,
+                                 "metadata": simulator_metadata},
+                                 f, protocol=pickle.HIGHEST_PROTOCOL)
             else:
                 with open(output_path, 'wb') as f:
-                    pickle.dump(reads, f, protocol=pickle.HIGHEST_PROTOCOL)
+                    pickle.dump({"reads": reads,
+                                 "metadata": simulator_metadata},
+                                 f, protocol=pickle.HIGHEST_PROTOCOL)
             
             # Create preview file if requested
             if create_preview:
@@ -2275,10 +2234,12 @@ class SequenceSimulator:
                 if not str(output_path).endswith('.gz'):
                     output_path = output_path.with_suffix(output_path.suffix + '.gz')
                 with gzip.open(output_path, 'wt') as f:
-                    json.dump(data, f)
+                    json.dump({"reads": data,
+                               "metadata": simulator_metadata},
+                               f)
             else:
                 with open(output_path, 'w') as f:
-                    json.dump(data, f, indent=2)
+                    json.dump({"reads": data, "metadata": simulator_metadata}, f, indent=2)
             stats['format'] = 'json'
             stats['compressed'] = compress
         
@@ -2309,6 +2270,12 @@ class SequenceSimulator:
             f.write(f"# Total sequences in dataset: {len(reads)}\n")
             f.write(f"# Format: sequence<TAB>labels\n")
             f.write("#" + "="*70 + "\n\n")
+            f.write("# Simulator metadata:\n")
+            f.write(json.dumps({
+                "sequence_order": self.sequence_order,
+                "config_keys": list(self.config.keys()),
+                }, indent=2))
+            f.write("\n\n")
             
             for i, read in enumerate(reads[:n_preview], 1):
                 f.write(f"# Read {i}\n")
@@ -2317,7 +2284,15 @@ class SequenceSimulator:
                 
                 # Add metadata if present
                 if read.metadata:
-                    f.write(f"# Metadata: {json.dumps(read.metadata)}\n")
+                    meta_out = {
+                        "segment_sources": read.metadata.get("segment_sources"),
+                        "segment_lengths": read.metadata.get("segment_lengths"),
+                        "transcript_info": read.metadata.get("transcript_info"),
+                        "has_errors": read.metadata.get("has_errors"),
+                        "diversity_boost": read.metadata.get("diversity_boost"),
+                        "is_invalid": read.metadata.get("is_invalid"),
+                    }
+                    f.write(f"# Metadata: {json.dumps(meta_out, indent=2, default=str)}\n")
                 
                 # Add label regions summary
                 if read.label_regions:
@@ -2356,7 +2331,8 @@ class SequenceSimulator:
             List of SimulatedRead objects
         """
         input_path = Path(input_path)
-        
+        wrapped = False
+
         # Auto-detect format
         if format is None:
             if '.pkl' in str(input_path) or '.pickle' in str(input_path):
@@ -2369,10 +2345,24 @@ class SequenceSimulator:
         if format == 'pickle':
             if '.gz' in input_path.suffixes or str(input_path).endswith('.gz'):
                 with gzip.open(input_path, 'rb') as f:
-                    reads = pickle.load(f)
+                    obj = pickle.load(f)
+                    if isinstance(obj, dict) and "reads" in obj:
+                        reads = obj["reads"]
+                        wrapped = True
+                        file_metadata = obj.get("metadata", {})
+                    else:
+                        reads = obj
+                        file_metadata = {}
             else:
                 with open(input_path, 'rb') as f:
-                    reads = pickle.load(f)
+                    obj = pickle.load(f)
+                    if isinstance(obj, dict) and "reads" in obj:
+                        reads = obj["reads"]
+                        wrapped = True
+                        file_metadata = obj.get("metadata", {})
+                    else:
+                        reads = obj
+                        file_metadata = {}
                     
         elif format in ('text', 'tsv'):
             reads = []
@@ -2401,10 +2391,24 @@ class SequenceSimulator:
         elif format == 'json':
             if '.gz' in input_path.suffixes or str(input_path).endswith('.gz'):
                 with gzip.open(input_path, 'rt') as f:
-                    data = json.load(f)
+                    obj = json.load(f)
+                    if isinstance(obj, dict) and "reads" in obj:
+                        data = obj["reads"]
+                        wrapped = True
+                        file_metadata = obj.get("metadata", {})
+                    else:
+                        data = obj
+                        file_metadata = {}
             else:
                 with open(input_path, 'r') as f:
-                    data = json.load(f)
+                    obj = json.load(f)
+                    if isinstance(obj, dict) and "reads" in obj:
+                        data = obj["reads"]
+                        wrapped = True
+                        file_metadata = obj.get("metadata", {})
+                    else:
+                        data = obj
+                        file_metadata = {}
             
             # Normalize tuple regions (JSON converts tuples to lists)
             fixed = []
