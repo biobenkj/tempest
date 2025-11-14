@@ -77,6 +77,15 @@ simulation:
     i5: "/varidata/research/projects/shen/tools/benkj/tempest/whitelist/udi_i5.txt"
     CBC: "/varidata/research/projects/shen/tools/benkj/tempest/whitelist/cbc.txt"
   
+  # Whitelist reverse complement configuration
+  # Set to true for segments that should be reverse complemented
+  # Common setup: i7 is typically RC'd in Illumina sequencing, i5 and CBC are forward
+  # Adjust based on your specific sequencing chemistry
+  whitelist_rc:
+    i7: true      # Reverse complement i7 indices
+    i5: false     # Keep i5 indices forward (change to true if your chemistry requires RC)
+    CBC: false    # Keep cell barcodes forward
+  
   # PWM configuration for ACC - USING PROBABILISTIC APPROACH
   pwm_files:
     ACC: "/varidata/research/projects/shen/tools/benkj/tempest/whitelist/acc_pwm.txt"
@@ -140,7 +149,8 @@ simulation:
     fragment_mode: true
     fragment_min: 200
     fragment_max: 1000
-    trim_polya: true
+    trim_polya: true  # Remove polyA tails from transcripts before fragment sampling
+                      # When enabled, metadata will include original_length, trimmed_length, and polya_trimmed
     reverse_complement_prob: 0.5  # Probability for individual fragments
     decompress_to_tmp: true
     tmpdir: "./tmp"

@@ -628,10 +628,23 @@ class TranscriptPool:
             raise
     
     def _read_sequence(self, entry: FastaIndexEntry) -> str:
-        """Read a transcript safely (never returns None)."""
+        """
+        Read a transcript safely (never returns None).
+        
+        Also updates instance variables for tracking polyA trimming:
+        - self._last_read_original_length: Length before trimming
+        - self._last_read_trimmed_bases: Number of bases trimmed
+        """
+        # Initialize tracking variables
+        self._last_read_original_length = entry.length
+        self._last_read_trimmed_bases = 0
 
         cached = self.cache.get(entry.name)
         if cached is not None:
+            # For cached sequences, we don't know trimming info
+            # Set original length to current length (conservative estimate)
+            self._last_read_original_length = len(cached)
+            self._last_read_trimmed_bases = 0
             return cached
 
         try:
@@ -643,6 +656,7 @@ class TranscriptPool:
             if not sequence or not isinstance(sequence, str):
                 raise ValueError("Transcript read returned None or invalid type")
 
+            # Validate sequence (validation now handles polyA trimming)
             if not self._validate_sequence(sequence, entry):
                 logger.warning(f"Sequence validation FAILED for {entry.name}")
                 self.stats['validation_errors'] += 1
@@ -666,9 +680,12 @@ class TranscriptPool:
             raise ValueError("Gzipped reader not initialized")
         
         sequence = self.gzip_reader.read_sequence(entry.name)
+        self._last_read_original_length = len(sequence) if sequence else 0
+        self._last_read_trimmed_bases = 0
         
         if sequence and self.config.get("trim_polya", False):
-            sequence = self._trim_polya(sequence)
+            sequence, trimmed_bases = self._trim_polya(sequence)
+            self._last_read_trimmed_bases = trimmed_bases
         
         return sequence
     
@@ -701,9 +718,14 @@ class TranscriptPool:
             if len(cleaned_sequence) != len(sequence):
                 logger.debug(f"Replaced {len(sequence) - len(cleaned_sequence)} invalid bases with N")
             
+            # Track original length and trimming
+            self._last_read_original_length = len(cleaned_sequence)
+            self._last_read_trimmed_bases = 0
+            
             # Trim polyA if configured
             if self.config.get("trim_polya", False):
-                cleaned_sequence = self._trim_polya(cleaned_sequence)
+                cleaned_sequence, trimmed_bases = self._trim_polya(cleaned_sequence)
+                self._last_read_trimmed_bases = trimmed_bases
             
             return cleaned_sequence
             
@@ -716,26 +738,40 @@ class TranscriptPool:
         """
         Validate that a sequence matches its index entry.
         
+        Note: When polyA trimming is enabled, length validation is skipped
+        as the sequence will be shorter than the index entry length.
+        
         Args:
-            sequence: The sequence string
-            entry: The index entry
+            sequence: The sequence string (possibly after polyA trimming)
+            entry: The index entry (with original length)
             
         Returns:
             True if valid, False otherwise
         """
-        # Check length
-        if len(sequence) != entry.length:
-            logger.warning(
-                f"Length mismatch for {entry.name}: "
-                f"index says {entry.length}, got {len(sequence)}"
-            )
-            return False
+        # Check length only if polyA trimming is disabled
+        # With polyA trimming, sequence may be shorter than entry.length
+        if not self.config.get("trim_polya", False):
+            if len(sequence) != entry.length:
+                logger.warning(
+                    f"Length mismatch for {entry.name}: "
+                    f"index says {entry.length}, got {len(sequence)}"
+                )
+                return False
+        else:
+            # With polyA trimming, just check it's not longer than expected
+            if len(sequence) > entry.length:
+                logger.warning(
+                    f"Trimmed sequence longer than original for {entry.name}: "
+                    f"index says {entry.length}, got {len(sequence)}"
+                )
+                return False
         
         # Check for excessive Ns or invalid characters
-        n_count = sequence.count('N')
-        if n_count / len(sequence) > 0.5:
-            logger.warning(f"Sequence {entry.name} is >50% Ns")
-            return False
+        if len(sequence) > 0:  # Avoid division by zero
+            n_count = sequence.count('N')
+            if n_count / len(sequence) > 0.5:
+                logger.warning(f"Sequence {entry.name} is >50% Ns")
+                return False
         
         # Check for valid bases
         valid_bases = set('ACGTN')
@@ -748,7 +784,7 @@ class TranscriptPool:
         
         return True
     
-    def _trim_polya(self, sequence: str, min_polya_length: int = 10, max_lookback: int = 2000) -> str:
+    def _trim_polya(self, sequence: str, min_polya_length: int = 10, max_lookback: int = 2000) -> Tuple[str, int]:
         """
         Trim polyA tail from sequence.
         
@@ -758,7 +794,7 @@ class TranscriptPool:
             max_lookback: Maximum bases to scan from end (prevents pathological cases)
         
         Returns:
-            Sequence with polyA tail trimmed
+            Tuple of (trimmed_sequence, number_of_bases_trimmed)
         """
         # Count trailing As (with allowance for Ns), but limit lookback
         a_count = 0
@@ -771,17 +807,33 @@ class TranscriptPool:
         
         # Trim if polyA is long enough
         if a_count >= min_polya_length:
-            return sequence[:-a_count]
+            return sequence[:-a_count], a_count
         
-        return sequence
+        return sequence, 0
     
     def sample_fragment(self, random_state: np.random.RandomState) -> str:
+        """
+        Sample a fragment from a transcript with proper metadata tracking.
+        
+        Returns the fragment sequence and updates instance variables:
+        - last_sampled_entry: The transcript entry
+        - last_fragment_start: Start position in transcript (post-trimming)
+        - last_fragment_end: End position in transcript (post-trimming)
+        - last_fragment_rc: Whether fragment was reverse complemented
+        - last_transcript_original_length: Original transcript length (before polyA trimming)
+        - last_transcript_trimmed_length: Transcript length after polyA trimming
+        - last_polya_trimmed: Number of bases trimmed from polyA tail
+        """
         if not self.filtered_entries:
             return self._generate_random_fallback(random_state)
 
         entry = random_state.choice(self.filtered_entries)
         transcript = self._read_sequence(entry)
-
+        
+        # Capture trimming information from the read
+        original_length = getattr(self, '_last_read_original_length', entry.length)
+        trimmed_bases = getattr(self, '_last_read_trimmed_bases', 0)
+        
         # generate fragment
         fragment_min = self.config.get("fragment_min", 200)
         fragment_max = self.config.get("fragment_max", 1000)
@@ -803,11 +855,14 @@ class TranscriptPool:
             fragment = reverse_complement(fragment)
             rc_flag = True
 
-        # now metadata is valid
+        # Store metadata - now with trimming information
         self.last_sampled_entry = entry
         self.last_fragment_start = start_pos
         self.last_fragment_end = start_pos + fragment_len
         self.last_fragment_rc = rc_flag
+        self.last_transcript_original_length = original_length
+        self.last_transcript_trimmed_length = len(transcript)
+        self.last_polya_trimmed = trimmed_bases
 
         return fragment
     
@@ -1237,13 +1292,17 @@ class WhitelistManager:
         """Check if a segment has a whitelist."""
         return segment in self.whitelists
 
-    def sample(self, segment: str, random_state: np.random.RandomState) -> Optional[str]:
+    def sample(self,
+               segment: str,
+               random_state: np.random.RandomState,
+               rc: bool = False) -> Optional[str]:
         """
         Sample a sequence from a whitelist.
 
         Args:
             segment: Segment name
             random_state: Random state for reproducibility
+            rc: Whether to reverse complement the sampled sequence
 
         Returns:
             Sampled sequence or None if no whitelist
@@ -1253,6 +1312,9 @@ class WhitelistManager:
 
         seq = random_state.choice(self.whitelists[segment])
         self.usage_stats[segment]["used"] += 1
+
+        if rc:
+            return reverse_complement(seq)
         return seq
 
     def get_stats(self) -> Dict:
@@ -1543,6 +1605,7 @@ class SequenceSimulator:
         diversity_boost: Optional[float] = None,
         include_quality: bool = False,
         inject_errors: bool = True,
+        rc = False
     ) -> SimulatedRead:
         """
         Generate a single simulated read with full metadata.
@@ -1599,7 +1662,9 @@ class SequenceSimulator:
             ):
                 transcript_info = {
                     "id": seg_meta["transcript_id"],
-                    "length": seg_meta["transcript_length"],
+                    "length": seg_meta.get("transcript_length"),  # Length after polyA trimming
+                    "original_length": seg_meta.get("transcript_original_length"),  # Length before polyA trimming
+                    "polya_trimmed": seg_meta.get("polya_trimmed", 0),  # Bases trimmed from polyA tail
                     "fragment_start": seg_meta["fragment_start"],
                     "fragment_end": seg_meta["fragment_end"],
                     "reverse_complemented": seg_meta["reverse_complemented"],
@@ -1746,15 +1811,20 @@ class SequenceSimulator:
                 tx_entry = getattr(self.transcript_pool, "last_sampled_entry", None)
                 fragment_start = getattr(self.transcript_pool, "last_fragment_start", None)
                 fragment_end = getattr(self.transcript_pool, "last_fragment_end", None)
+                tx_original_length = getattr(self.transcript_pool, "last_transcript_original_length", None)
+                tx_trimmed_length = getattr(self.transcript_pool, "last_transcript_trimmed_length", None)
+                polya_trimmed = getattr(self.transcript_pool, "last_polya_trimmed", 0)
 
                 meta = {
                     "sequence": seq,
                     "length": len(seq),
                     "source": "transcript_pool",
                     "transcript_id": tx_entry.name if tx_entry else None,
-                    "transcript_length": tx_entry.length if tx_entry else None,
-                    "fragment_start": fragment_start,
-                    "fragment_end": fragment_end,
+                    "transcript_length": tx_trimmed_length,  # Length after polyA trimming (used for fragment sampling)
+                    "transcript_original_length": tx_original_length,  # Original length before polyA trimming
+                    "polya_trimmed": polya_trimmed,  # Number of bases trimmed from polyA tail
+                    "fragment_start": fragment_start,  # Position in trimmed transcript
+                    "fragment_end": fragment_end,  # Position in trimmed transcript
                     "reverse_complemented": getattr(self.transcript_pool, "last_fragment_rc", False)
                 }
 
@@ -1762,13 +1832,24 @@ class SequenceSimulator:
 
         # whitelist manager
         if self.whitelist_manager.has_whitelist(segment_name):
-            seq = self.whitelist_manager.sample(segment_name, self.random_state)
+            # Check if this segment should be reverse complemented
+            # First check segment-specific config, then fall back to default
+            whitelist_rc_config = self.sim_config.get("whitelist_rc", {})
+            if isinstance(whitelist_rc_config, dict):
+                # Per-segment RC flags
+                rc = whitelist_rc_config.get(segment_name, False)
+            else:
+                # Global flag (backward compatibility)
+                rc = bool(whitelist_rc_config)
+            
+            seq = self.whitelist_manager.sample(segment_name, self.random_state, rc=rc)
             seq = self._resolve_iupac_codes(seq)
             qual = 35.0 if include_quality else None
             meta = {
                 "sequence": seq,
                 "length": len(seq),
-                "source": "whitelist"
+                "source": "whitelist",
+                "reverse_complemented": rc
             }
             return seq, qual, "whitelist", meta
 
@@ -2223,7 +2304,7 @@ class SequenceSimulator:
             if create_preview:
                 base = self._base_for_preview(output_path)
                 preview_path = output_path.parent / f"{base}_preview.txt"
-                self._create_preview_file(reads, preview_path)
+                self._create_preview_file(reads, preview_path, simulator_metadata)
                 stats['preview_file'] = str(preview_path)
             
             stats['format'] = 'pickle'
@@ -2273,16 +2354,27 @@ class SequenceSimulator:
         
         return stats
     
-    def _create_preview_file(self, reads: List[SimulatedRead], preview_path: Path):
+    def _create_preview_file(
+        self, 
+        reads: List[SimulatedRead], 
+        preview_path: Path,
+        simulator_metadata: Optional[Dict[str, Any]] = None
+    ):
         """
         Create an enhanced text preview file with comprehensive metadata.
         
         This enhanced version preserves:
+        - File-level simulator metadata (config, versions, etc.)
         - Complete dataset statistics (valid/invalid counts)
         - Simulator configuration metadata
         - Read-level metadata for all sequences
         - Error type distribution for invalid reads
         - Label distribution statistics
+        
+        Args:
+            reads: List of SimulatedRead objects
+            preview_path: Path to write the preview file
+            simulator_metadata: Optional dictionary of file-level metadata
         """
         with open(preview_path, 'w') as f:
             # ============= HEADER SECTION =============
@@ -2290,6 +2382,70 @@ class SequenceSimulator:
             f.write(f"# Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"# Generator: {self.__class__.__name__}\n")
             f.write("#" + "=" * 70 + "\n\n")
+            
+            # ============= FILE-LEVEL METADATA =============
+            if simulator_metadata:
+                f.write("# FILE-LEVEL METADATA\n")
+                f.write("#" + "-" * 70 + "\n")
+                
+                # Sequence order
+                if 'sequence_order' in simulator_metadata:
+                    f.write(f"# Sequence order: {' -> '.join(simulator_metadata['sequence_order'])}\n")
+                
+                # Generator info
+                if 'generator_class' in simulator_metadata:
+                    f.write(f"# Generator class: {simulator_metadata['generator_class']}\n")
+                if 'generator_version' in simulator_metadata:
+                    f.write(f"# Generator version: {simulator_metadata['generator_version']}\n")
+                
+                # Timestamp
+                if 'timestamp' in simulator_metadata:
+                    from datetime import datetime
+                    ts = datetime.fromtimestamp(simulator_metadata['timestamp'])
+                    f.write(f"# File created: {ts.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                
+                # Simulation summary
+                if 'simulation_summary' in simulator_metadata:
+                    summary = simulator_metadata['simulation_summary']
+                    f.write(f"\n# Simulation Summary:\n")
+                    for key, value in summary.items():
+                        f.write(f"#   {key}: {value:,}\n")
+                
+                # ACC generator config
+                if 'acc_generator_config' in simulator_metadata:
+                    acc_cfg = simulator_metadata['acc_generator_config']
+                    f.write(f"\n# ACC Generator:\n")
+                    f.write(f"#   Type: {acc_cfg.get('type', 'N/A')}\n")
+                    if acc_cfg.get('temperature') is not None:
+                        f.write(f"#   Temperature: {acc_cfg['temperature']}\n")
+                    if acc_cfg.get('min_entropy') is not None:
+                        f.write(f"#   Min entropy: {acc_cfg['min_entropy']}\n")
+                    if acc_cfg.get('diversity_boost') is not None:
+                        f.write(f"#   Diversity boost: {acc_cfg['diversity_boost']}\n")
+                
+                # Key config parameters
+                if 'sim_config' in simulator_metadata:
+                    sim_config = simulator_metadata['sim_config']
+                    f.write(f"\n# Simulation Configuration:\n")
+                    
+                    # Helper for flexible access
+                    def get_value(obj, key, default=None):
+                        if isinstance(obj, dict):
+                            return obj.get(key, default)
+                        return getattr(obj, key, default)
+                    
+                    if (seed := get_value(sim_config, 'random_seed')) is not None:
+                        f.write(f"#   Random seed: {seed}\n")
+                    if (split := get_value(sim_config, 'train_split')) is not None:
+                        f.write(f"#   Train split: {split}\n")
+                    if (invalid_frac := get_value(sim_config, 'invalid_fraction', 0)) > 0:
+                        f.write(f"#   Invalid fraction: {invalid_frac:.3f}\n")
+                    if (error_prob := get_value(sim_config, 'error_injection_prob', 0)) > 0:
+                        f.write(f"#   Error injection probability: {error_prob:.3f}\n")
+                    if (rc_prob := get_value(sim_config, 'full_read_reverse_complement_prob', 0)) > 0:
+                        f.write(f"#   Reverse complement probability: {rc_prob:.3f}\n")
+                
+                f.write("\n")
             
             # ============= DATASET STATISTICS =============
             f.write("# DATASET STATISTICS\n")
@@ -2398,7 +2554,22 @@ class SequenceSimulator:
             # ============= SEQUENCE PREVIEW =============
             f.write("\n# SEQUENCE PREVIEW\n")
             f.write("#" + "=" * 70 + "\n")
-            f.write("# Format: sequence<TAB>labels<TAB>is_invalid<TAB>metadata_json\n")
+            f.write("# Format:\n")
+            f.write("# Read N\n")
+            f.write("# sequence<TAB>labels<TAB>is_invalid\n")
+            f.write("# Metadata:\n")
+            f.write("# {\n")
+            f.write('#   "segment_order": [...],\n')
+            f.write('#   "segment_sources": {...},\n')
+            f.write('#   "segment_lengths": {...},\n')
+            f.write('#   "segment_sequences": {...},\n')
+            f.write('#   "segment_meta": {...},\n')
+            f.write('#   "transcript_info": {...},\n')
+            f.write('#   "has_errors": bool,\n')
+            f.write('#   "diversity_boost": float,\n')
+            f.write('#   "is_invalid": bool,\n')
+            f.write('#   "label_regions": {...}\n')
+            f.write("# }\n")
             f.write("#" + "-" * 70 + "\n\n")
             
             # Helper function to safely encode objects for JSON
@@ -2428,53 +2599,58 @@ class SequenceSimulator:
             
             # Write sequences with metadata
             for i, read in enumerate(reads[:n_preview], 1):
+                # Header for each read
+                f.write(f"# Read {i}\n")
+                
                 # Basic sequence and labels
                 labels_str = ' '.join(read.labels)
                 
                 # Metadata handling
                 is_invalid = 'N'
-                metadata_dict = {}
                 
                 if hasattr(read, 'metadata') and read.metadata:
                     is_invalid = 'Y' if read.metadata.get('is_invalid', False) else 'N'
+                
+                # Write sequence and labels line
+                f.write(f"{read.sequence}\t{labels_str}\t{is_invalid}\n")
+                
+                # Write comprehensive metadata in readable format
+                if hasattr(read, 'metadata') and read.metadata:
+                    f.write("# Metadata:\n")
                     
-                    # Include all metadata except redundant fields
-                    metadata_dict = {
-                        k: safe_json_encode(v) 
-                        for k, v in read.metadata.items() 
-                        if k not in ['sequence', 'labels']
-                    }
+                    # Format metadata with proper indentation
+                    metadata_display = {}
+                    
+                    # Core metadata fields in desired order
+                    for key in ['segment_order', 'segment_sources', 'segment_lengths', 
+                                'segment_sequences', 'segment_meta', 'transcript_info',
+                                'has_errors', 'diversity_boost', 'is_invalid']:
+                        if key in read.metadata:
+                            metadata_display[key] = safe_json_encode(read.metadata[key])
+                    
+                    # Add any additional metadata fields not in the core set
+                    for key, value in read.metadata.items():
+                        if key not in metadata_display:
+                            metadata_display[key] = safe_json_encode(value)
+                    
+                    # Add label regions
+                    if hasattr(read, 'label_regions') and read.label_regions:
+                        region_summary = {}
+                        for label, regions in read.label_regions.items():
+                            region_summary[label] = [[start, end] for start, end in regions]
+                        metadata_display['label_regions'] = region_summary
+                    
+                    # Write formatted JSON
+                    try:
+                        formatted_json = json.dumps(metadata_display, indent=2)
+                        # Add # prefix to each line for proper commenting
+                        for line in formatted_json.split('\n'):
+                            f.write(f"# {line}\n")
+                    except Exception as e:
+                        f.write(f"# Error formatting metadata: {str(e)}\n")
                 
-                # Add label regions if present
-                if hasattr(read, 'label_regions') and read.label_regions:
-                    region_summary = {}
-                    for label, regions in read.label_regions.items():
-                        region_summary[label] = [[start, end] for start, end in regions]
-                    metadata_dict['regions'] = region_summary
-                
-                # Compact JSON representation
-                try:
-                    metadata_json = json.dumps(metadata_dict, separators=(',', ':'))
-                except:
-                    metadata_json = '{}'
-                
-                # Write the sequence line
-                f.write(f"{read.sequence}\t{labels_str}\t{is_invalid}\t{metadata_json}\n")
-                
-                # Add human-readable annotation for first few sequences and any invalid reads
-                if i <= 5 or (is_invalid == 'Y' and i <= 20):
-                    if is_invalid == 'Y' and 'error_type' in metadata_dict:
-                        error_type = metadata_dict['error_type']
-                        error_desc = f"# -> Error: {error_type}"
-                        
-                        if error_type == 'segment_loss' and 'removed_segment' in metadata_dict:
-                            error_desc += f" (removed: {metadata_dict['removed_segment']})"
-                        elif error_type == 'segment_duplication' and 'duplicated_segment' in metadata_dict:
-                            error_desc += f" (duplicated: {metadata_dict['duplicated_segment']})"
-                        elif error_type == 'truncation' and 'truncation_point' in metadata_dict:
-                            error_desc += f" (at position: {metadata_dict['truncation_point']})"
-                        
-                        f.write(error_desc + "\n")
+                # Add spacing between reads
+                f.write("\n")
             
             # Footer
             if len(reads) > n_preview:
