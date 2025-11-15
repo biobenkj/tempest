@@ -6,14 +6,22 @@ Provides subcommands for simulation, training, evaluation, visualization,
 demultiplexing, and ensemble model combination using the Typer framework.
 """
 import os
+import sys
 import warnings
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
+# Set default environment variables BEFORE any imports
+# This ensures subcommands see these values when they import
+if "TEMPEST_LOG_LEVEL" not in os.environ:
+    os.environ["TEMPEST_LOG_LEVEL"] = "INFO"
+if "TF_CPP_MIN_LOG_LEVEL" not in os.environ:
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
 warnings.filterwarnings('ignore', category=UserWarning, module='tensorflow')
+
 from tempest.utils.logging_utils import setup_rich_logging, console, status
-setup_rich_logging("INFO")
+setup_rich_logging(os.getenv("TEMPEST_LOG_LEVEL", "INFO"))
 
 import typer
-import sys
 from pathlib import Path
 from typing import Optional
 from textwrap import dedent
@@ -35,7 +43,7 @@ app = typer.Typer(
     no_args_is_help=True
 )
 
-# Import sub-applications
+# Import sub-applications AFTER setting default environment
 from tempest.simulate import simulate_app
 from tempest.evaluate import evaluate_app
 from tempest.combine import combine_app
@@ -64,23 +72,24 @@ app.add_typer(demux_app, name="demux", help="Demultiplex FASTQ files with sample
 def setup_logging(level: str = "INFO", log_file: Optional[str] = None):
     """
     Configure logging for Tempest CLI with Rich integration.
-
+    
+    This function reconfigures logging to use the specified level,
+    ensuring that global options like --debug propagate to all modules.
     """
-
-    # Ensure the global RichHandler baseline exists
+    numeric_level = getattr(logging, level.upper(), logging.INFO)
+    
+    # Reconfigure Rich logging (handles both initial setup and updates)
     setup_rich_logging(level)
 
-    numeric_level = getattr(logging, level.upper(), logging.INFO)
-    root_logger = logging.getLogger()
-    root_logger.setLevel(numeric_level)
-
-    # Update level for all existing RichHandlers
-    for handler in root_logger.handlers:
-        if isinstance(handler, RichHandler):
-            handler.setLevel(numeric_level)
-            handler.console = console  # unify with Typer's Console
+    # Reconfigure all tempest module loggers to use the new level
+    # This ensures subcommands that initialized loggers at import time get updated
+    for logger_name in list(logging.Logger.manager.loggerDict.keys()):
+        if logger_name.startswith('tempest'):
+            logger_obj = logging.getLogger(logger_name)
+            logger_obj.setLevel(numeric_level)
 
     # Add a file handler if requested (only once)
+    root_logger = logging.getLogger()
     if log_file and not any(
         isinstance(h, logging.FileHandler) and h.baseFilename == str(log_file)
         for h in root_logger.handlers
@@ -135,18 +144,20 @@ def main_callback(
     # Resolve final log level
     resolved_level = "DEBUG" if debug else log_level.upper()
 
-    # Make this globally visible to all imported modules (e.g., tempest.simulate)
+    # Update environment variable so any late imports see the correct level
     os.environ["TEMPEST_LOG_LEVEL"] = resolved_level
+    
+    if debug:
+        os.environ["TEMPEST_DEBUG"] = "1"
 
-    # Initialize logging with Rich
+    # Reconfigure logging with user-specified level
+    # This updates all existing loggers that were initialized with default settings
     setup_logging(
         level=resolved_level,
         log_file=str(log_file) if log_file else None,
     )
     
     if debug:
-        logging.getLogger().setLevel(logging.DEBUG)
-        os.environ["TEMPEST_DEBUG"] = "1"
         console.print(f"[bold yellow]Debug mode active[/bold yellow] (TEMPEST_LOG_LEVEL={resolved_level})")
 
 

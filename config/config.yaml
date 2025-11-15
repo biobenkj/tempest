@@ -226,6 +226,22 @@ hybrid:
   discriminator_epochs: 10 # Phase 2: Adversarial with invalid reads
   pseudolabel_epochs: 10   # Phase 3: Pseudo-labeling with unlabeled data
   
+  # Phase-specific data paths (NEW FEATURE)
+  # If not specified, uses default train/val data for all phases
+  phase_data:
+    warmup:
+      train_data: null  # Set to path like "data/simulated/warmup/train.pkl.gz" or leave null to use default
+      val_data: null    # Set to path like "data/simulated/warmup/val.pkl.gz" or leave null to use default
+    
+    discriminator:
+      train_data: null  # Set to path like "data/simulated/adversarial_p2/train.pkl.gz" or leave null to use default
+      val_data: null    # Set to path like "data/simulated/adversarial_p2/val.pkl.gz" or leave null to use default
+    
+    pseudolabel:
+      train_data: null  # Set to path like "data/simulated/pseudolabel/train.pkl.gz" or leave null to use default
+      val_data: null    # Set to path like "data/simulated/pseudolabel/val.pkl.gz" or leave null to use default
+      unlabeled_data: null  # Optional unlabeled data for this phase specifically
+  
   # Invalid read generation for robustness
   invalid_generation:
     enabled: true

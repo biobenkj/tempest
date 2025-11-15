@@ -7,6 +7,8 @@ Combines:
   3. Pseudo-label self-training for unlabeled reads
 
 Part of: tempest/training/
+
+ENHANCED: Now supports phase-specific datasets for each training phase.
 """
 
 import numpy as np
@@ -162,7 +164,7 @@ class PseudoLabelGenerator:
 
 
 # ------------------------------------------------------------------------------------
-# Hybrid Trainer
+# Hybrid Trainer with Phase-Specific Data Support
 # ------------------------------------------------------------------------------------
 class HybridTrainer:
     """
@@ -170,6 +172,8 @@ class HybridTrainer:
       1. Warm-up (supervised)
       2. Adversarial/discriminator robustness
       3. Pseudo-label self-training
+    
+    ENHANCED: Supports phase-specific datasets for each training phase.
     """
 
     def __init__(self, config: TempestConfig, output_dir: Optional[Path] = None, verbose: bool = False):
@@ -204,42 +208,142 @@ class HybridTrainer:
             print_model_summary(model)
         return model
 
+    # --------------------- Data Loading with Phase Support ---------------------
+    def _load_phase_data(self, phase_name: str, phase_data: Optional[Dict], 
+                         default_train, default_val) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """
+        Load data for a specific training phase.
+        
+        Args:
+            phase_name: Name of the phase ('warmup', 'adversarial', 'pseudolabel')
+            phase_data: Dictionary containing phase-specific data
+            default_train: Default training data to use if phase-specific not provided
+            default_val: Default validation data to use if phase-specific not provided
+        
+        Returns:
+            Tuple of (train_data, val_data) for the phase
+        """
+        # Check if phase-specific data exists
+        if phase_data and phase_name in phase_data:
+            logger.info(f"Loading phase-specific data for {phase_name} phase")
+            
+            # Get phase-specific training data
+            if 'train' in phase_data[phase_name]:
+                logger.info(f"  Using phase-specific training data for {phase_name}")
+                X_train, y_train = self._prepare_data(phase_data[phase_name]['train'])
+            else:
+                logger.info(f"  Using default training data for {phase_name}")
+                X_train, y_train = default_train if default_train[0] is not None else (None, None)
+            
+            # Get phase-specific validation data
+            if 'val' in phase_data[phase_name]:
+                logger.info(f"  Using phase-specific validation data for {phase_name}")
+                X_val, y_val = self._prepare_data(phase_data[phase_name]['val'])
+            else:
+                logger.info(f"  Using default validation data for {phase_name}")
+                X_val, y_val = default_val if default_val[0] is not None else (None, None)
+            
+            return (X_train, y_train), (X_val, y_val)
+        else:
+            # Use default data
+            logger.info(f"Using default data for {phase_name} phase")
+            return default_train, default_val
+
     # --------------------- Training Loop ---------------------
-    def train(self, train_data, val_data=None, unlabeled_path=None, **kwargs) -> Dict[str, Any]:
+    def train(self, train_data, val_data=None, unlabeled_path=None, phase_data=None, **kwargs) -> Dict[str, Any]:
+        """
+        Train the hybrid model with three phases.
+        
+        Args:
+            train_data: Default training data (used if no phase-specific data provided)
+            val_data: Default validation data (used if no phase-specific data provided)
+            unlabeled_path: Path to unlabeled data for pseudo-labeling
+            phase_data: Dictionary with phase-specific datasets:
+                {
+                    'warmup': {'train': data, 'val': data},
+                    'adversarial': {'train': data, 'val': data},
+                    'pseudolabel': {'train': data, 'val': data, 'unlabeled_path': path}
+                }
+            **kwargs: Additional training arguments
+        
+        Returns:
+            Dictionary with training results and metrics
+        """
         logger.info("=" * 80)
         logger.info("HYBRID TRAINING STARTED")
         logger.info("=" * 80)
+        
+        # Check if phase_data is provided from config
+        if phase_data is None and self.hybrid_config and hasattr(self.hybrid_config, 'phase_data'):
+            phase_data = self.hybrid_config.phase_data
+            if phase_data:
+                logger.info("Using phase-specific data from config")
 
-        X_train, y_train = self._prepare_data(train_data)
-        X_val, y_val = (self._prepare_data(val_data) if val_data else (None, None))
+        # Prepare default data (used when phase-specific not provided)
+        default_train = self._prepare_data(train_data) if train_data else (None, None)
+        default_val = self._prepare_data(val_data) if val_data else (None, None)
+        
+        logger.info(f"Default data prepared - Train: {default_train[0].shape if default_train[0] is not None else 'None'}, "
+                   f"Val: {default_val[0].shape if default_val[0] is not None else 'None'}")
 
         # Phase 1: Warm-up
-        logger.info("=== Phase 1: Warm-up ===")
+        logger.info("=" * 80)
+        logger.info("PHASE 1: WARM-UP")
+        logger.info("=" * 80)
+        warmup_train, warmup_val = self._load_phase_data('warmup', phase_data, default_train, default_val)
         self.base_model = self.build_model()
-        hist_warmup = self._warmup_training(X_train, y_train, X_val, y_val)
+        hist_warmup = self._warmup_training(warmup_train, warmup_val)
 
         # Phase 2: Adversarial
         hist_adv = {}
         if self.hybrid_config.enabled and self.hybrid_config.discriminator_epochs > 0:
-            logger.info("=== Phase 2: Adversarial ===")
-            hist_adv = self._adversarial_training(X_train, y_train, X_val, y_val)
+            logger.info("=" * 80)
+            logger.info("PHASE 2: ADVERSARIAL TRAINING")
+            logger.info("=" * 80)
+            adv_train, adv_val = self._load_phase_data('adversarial', phase_data, default_train, default_val)
+            hist_adv = self._adversarial_training(adv_train, adv_val)
 
         # Phase 3: Pseudo-label
         hist_pseudo = {}
-        if unlabeled_path and self.hybrid_config.enabled:
-            logger.info("=== Phase 3: Pseudo-label ===")
-            hist_pseudo = self._pseudo_label_training(unlabeled_path, X_train, y_train, X_val, y_val)
+        if self.hybrid_config.enabled:
+            logger.info("=" * 80)
+            logger.info("PHASE 3: PSEUDO-LABEL TRAINING")
+            logger.info("=" * 80)
+            
+            # Get phase-specific data for pseudo-label phase
+            pseudo_train, pseudo_val = self._load_phase_data('pseudolabel', phase_data, default_train, default_val)
+            
+            # Check for phase-specific unlabeled data
+            phase_unlabeled = None
+            if phase_data and 'pseudolabel' in phase_data and 'unlabeled_path' in phase_data['pseudolabel']:
+                phase_unlabeled = phase_data['pseudolabel']['unlabeled_path']
+                logger.info(f"Using phase-specific unlabeled data: {phase_unlabeled}")
+            elif unlabeled_path:
+                phase_unlabeled = unlabeled_path
+                logger.info(f"Using default unlabeled data: {phase_unlabeled}")
+            
+            if phase_unlabeled:
+                hist_pseudo = self._pseudo_label_training(phase_unlabeled, pseudo_train, pseudo_val)
+            else:
+                logger.warning("No unlabeled data provided for pseudo-label phase - skipping")
 
-        # Final eval
+        # Final evaluation on validation set
         val_loss, val_acc = (None, None)
-        if X_val is not None:
-            val_loss, val_acc = self.base_model.evaluate(X_val, y_val, verbose=0)
-            logger.info(f"Validation loss={val_loss:.4f} accuracy={val_acc:.4f}")
+        if default_val[0] is not None:
+            logger.info("=" * 80)
+            logger.info("FINAL EVALUATION")
+            logger.info("=" * 80)
+            val_loss, val_acc = self.base_model.evaluate(default_val[0], default_val[1], verbose=1)
+            logger.info(f"Final validation loss={val_loss:.4f} accuracy={val_acc:.4f}")
 
-        # Save
+        # Save final model
         final_model_path = self.output_dir / "model_hybrid_final.h5"
         self.base_model.save(str(final_model_path))
         logger.info(f"Saved hybrid model: {final_model_path}")
+        
+        logger.info("=" * 80)
+        logger.info("HYBRID TRAINING COMPLETE")
+        logger.info("=" * 80)
 
         return {
             "model_path": str(final_model_path),
@@ -249,36 +353,84 @@ class HybridTrainer:
         }
 
     # --------------------- Phase Routines ---------------------
-    def _warmup_training(self, X, y, Xv=None, yv=None) -> Dict:
+    def _warmup_training(self, train_data_tuple: Tuple, val_data_tuple: Tuple) -> Dict:
+        """Execute warmup phase training."""
         epochs = self.phase_schedule["warmup"]
-        hist = self.base_model.fit(X, y, validation_data=(Xv, yv) if Xv is not None else None,
-                                   epochs=epochs, batch_size=self.config.training.batch_size, verbose=1)
+        X, y = train_data_tuple
+        Xv, yv = val_data_tuple
+        
+        logger.info(f"Warmup training for {epochs} epochs")
+        logger.info(f"  Training samples: {X.shape[0] if X is not None else 0}")
+        logger.info(f"  Validation samples: {Xv.shape[0] if Xv is not None else 0}")
+        
+        hist = self.base_model.fit(
+            X, y, 
+            validation_data=(Xv, yv) if Xv is not None else None,
+            epochs=epochs, 
+            batch_size=self.config.training.batch_size, 
+            verbose=1
+        )
         return hist.history
 
-    def _adversarial_training(self, X, y, Xv=None, yv=None) -> Dict:
+    def _adversarial_training(self, train_data_tuple: Tuple, val_data_tuple: Tuple) -> Dict:
+        """Execute adversarial phase training."""
         epochs = self.phase_schedule["discriminator"]
+        X, y = train_data_tuple
+        Xv, yv = val_data_tuple
+        
+        logger.info(f"Adversarial training for {epochs} epochs")
+        logger.info(f"  Training samples: {X.shape[0] if X is not None else 0}")
+        logger.info(f"  Validation samples: {Xv.shape[0] if Xv is not None else 0}")
+        
         self.discriminator = ArchitectureDiscriminator(self.model_config.num_labels)
-        # Example: generate fake/invalid reads if available
-        if InvalidReadGenerator:
+        
+        # Generate invalid reads if InvalidReadGenerator available
+        if InvalidReadGenerator and X is not None:
+            logger.info("  Generating invalid reads for discriminator training")
             invalid_reads = InvalidReadGenerator().generate(X.shape[0])
-            invalid_preds = self.base_model.predict(invalid_reads)
-            valid_preds = self.base_model.predict(X)
+            invalid_preds = self.base_model.predict(invalid_reads, verbose=0)
+            valid_preds = self.base_model.predict(X, verbose=0)
             self.discriminator.train(valid_preds, invalid_preds, epochs=max(1, epochs // 2))
-        hist = self.base_model.fit(X, y, validation_data=(Xv, yv) if Xv is not None else None,
-                                   epochs=epochs, batch_size=self.config.training.batch_size, verbose=1)
+        
+        hist = self.base_model.fit(
+            X, y, 
+            validation_data=(Xv, yv) if Xv is not None else None,
+            epochs=epochs, 
+            batch_size=self.config.training.batch_size, 
+            verbose=1
+        )
         return hist.history
 
-    def _pseudo_label_training(self, unlabeled_path, X, y, Xv=None, yv=None) -> Dict:
+    def _pseudo_label_training(self, unlabeled_path: str, 
+                               train_data_tuple: Tuple, val_data_tuple: Tuple) -> Dict:
+        """Execute pseudo-label phase training."""
         epochs = self.phase_schedule["pseudo_label"]
+        X, y = train_data_tuple
+        Xv, yv = val_data_tuple
+        
+        logger.info(f"Pseudo-label training for {epochs} epochs")
+        logger.info(f"  Training samples: {X.shape[0] if X is not None else 0}")
+        logger.info(f"  Validation samples: {Xv.shape[0] if Xv is not None else 0}")
+        logger.info(f"  Unlabeled data path: {unlabeled_path}")
+        
         self.pseudo_generator = PseudoLabelGenerator(self.base_model, self.config)
         pseudo_reads = self.pseudo_generator.generate_from_path(unlabeled_path)
-        # (stub) would merge pseudo data here
-        hist = self.base_model.fit(X, y, validation_data=(Xv, yv) if Xv is not None else None,
-                                   epochs=epochs, batch_size=self.config.training.batch_size, verbose=1)
+        logger.info(f"  Generated {len(pseudo_reads)} pseudo-labeled reads")
+        
+        # In a full implementation, would merge pseudo_reads with X, y here
+        # For now, just continuing training with original data
+        hist = self.base_model.fit(
+            X, y, 
+            validation_data=(Xv, yv) if Xv is not None else None,
+            epochs=epochs, 
+            batch_size=self.config.training.batch_size, 
+            verbose=1
+        )
         return hist.history
 
     # --------------------- Helpers ---------------------
     def _prepare_data(self, data) -> Tuple[np.ndarray, np.ndarray]:
+        """Prepare data for training."""
         if data is None:
             return None, None
         if isinstance(data, (list, tuple)) and len(data) == 2:
@@ -288,6 +440,7 @@ class HybridTrainer:
         raise ValueError("Unsupported data format for training input")
 
     def _process_dict_data(self, data: List[Dict]) -> Tuple[np.ndarray, np.ndarray]:
+        """Process dictionary-format data (common for pickle files)."""
         seqs, labs = [], []
         for d in data:
             s, l = d["sequence"], d.get("labels", [])
@@ -299,6 +452,7 @@ class HybridTrainer:
         return X, y
 
     def _sequence_to_numeric(self, seq: str) -> List[int]:
+        """Convert sequence to numeric representation."""
         mapping = {"A": 1, "C": 2, "G": 3, "T": 4, "N": 0}
         return [mapping.get(b.upper(), 0) for b in seq]
 
@@ -331,8 +485,13 @@ def run_hybrid_training(config: TempestConfig, output_dir: Optional[Path] = None
     train_data = kwargs.get("train_data")
     val_data = kwargs.get("val_data")
     unlabeled = kwargs.get("unlabeled_path")
+    phase_data = kwargs.get("phase_data")  # NEW: phase-specific data
     verbose = kwargs.get("verbose", False)
+    
     trainer = HybridTrainer(config, output_dir=output_dir, verbose=verbose)
-    if train_data is None:
-        raise ValueError("No training data provided")
-    return trainer.train(train_data, val_data, unlabeled_path=unlabeled, **kwargs)
+    
+    if train_data is None and phase_data is None:
+        raise ValueError("No training data provided (need either train_data or phase_data)")
+    
+    return trainer.train(train_data, val_data, unlabeled_path=unlabeled, 
+                        phase_data=phase_data, **kwargs)

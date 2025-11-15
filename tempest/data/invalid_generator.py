@@ -42,7 +42,15 @@ class InvalidReadGenerator:
         self.error_probabilities = self._init_error_probabilities(config)
         logger.info(f"Initialized InvalidReadGenerator with error probabilities: "
                     f"{self.error_probabilities}")
-        self.mark_architectural_errors = config.get('mark_architectural_errors', True) if config else True
+        
+        # Handle both dict and dataclass config objects
+        if config is None:
+            self.mark_architectural_errors = True
+        elif isinstance(config, dict):
+            self.mark_architectural_errors = config.get('mark_architectural_errors', True)
+        else:
+            # config is a dataclass (SimulationConfig)
+            self.mark_architectural_errors = getattr(config, 'mark_architectural_errors', True)
 
     @staticmethod
     def _default_probabilities() -> Dict[str, float]:

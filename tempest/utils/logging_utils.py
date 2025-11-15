@@ -19,12 +19,26 @@ def status(msg: str):
     return console.status(f"[cyan]{msg}[/cyan]", spinner="dots")
 
 def setup_rich_logging(level: str = "INFO") -> None:
-    """Initialize RichHandler-based logging if not already active."""
+    """
+    Initialize or reconfigure RichHandler-based logging.
+    
+    If a RichHandler already exists, updates its level and the root logger level.
+    If no RichHandler exists, creates one with the specified level.
+    """
     root_logger = logging.getLogger()
-
-    # Only configure if not already using RichHandler
-    if not any(isinstance(h, RichHandler) for h in root_logger.handlers):
-        numeric_level = getattr(logging, level.upper(), logging.INFO)
+    numeric_level = getattr(logging, level.upper(), logging.INFO)
+    
+    # Find existing RichHandlers
+    existing_rich_handlers = [h for h in root_logger.handlers if isinstance(h, RichHandler)]
+    
+    if existing_rich_handlers:
+        # Update existing handler(s) level
+        root_logger.setLevel(numeric_level)
+        for handler in existing_rich_handlers:
+            handler.setLevel(numeric_level)
+        root_logger.debug("Rich logging reconfigured to level %s", level)
+    else:
+        # Initialize new RichHandler
         logging.basicConfig(
             level=numeric_level,
             format="%(message)s",

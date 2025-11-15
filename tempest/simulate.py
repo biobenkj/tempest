@@ -791,120 +791,378 @@ def generate_command(
 
 # Additional stats and analysis functions
 def analyze_acc_segment_detailed(
-    reads: List[SimulatedRead],
+    reads: List,  # List[SimulatedRead]
     acc_generator=None,
     show_sequences: int = 10
-) -> Dict[str, Any]:
-    """Analyze ACC segment statistics from reads."""
+) -> Dict:
+    """
+    Perform detailed analysis of ACC segments across simulated reads.
+    
+    Args:
+        reads: List of SimulatedRead objects
+        acc_generator: Optional ProbabilisticPWMGenerator for PWM scoring
+        show_sequences: Number of example sequences to display
+        
+    Returns:
+        Dictionary with comprehensive ACC statistics
+    """
     acc_sequences = []
-    acc_lengths = []
+    acc_positions = []
     
     for read in reads:
-        if hasattr(read, 'label_regions') and 'ACC' in read.label_regions:
-            for start, end in read.label_regions['ACC']:
+        if "ACC" in read.label_regions:
+            for start, end in read.label_regions["ACC"]:
                 acc_seq = read.sequence[start:end]
                 acc_sequences.append(acc_seq)
-                acc_lengths.append(len(acc_seq))
+                acc_positions.append((start, end))
     
     if not acc_sequences:
-        return {'found': False}
+        return {"error": "No ACC sequences found"}
     
-    # Calculate statistics
-    unique_accs = set(acc_sequences)
-    stats = {
-        'found': True,
-        'total': len(acc_sequences),
-        'unique': len(unique_accs),
-        'diversity': len(unique_accs) / len(acc_sequences) if acc_sequences else 0,
-        'lengths': {
-            'mean': np.mean(acc_lengths),
-            'std': np.std(acc_lengths),
-            'min': min(acc_lengths),
-            'max': max(acc_lengths)
+    n_acc = len(acc_sequences)
+    unique_acc = len(set(acc_sequences))
+    uniqueness_ratio = unique_acc / n_acc
+    
+    acc_lengths = [len(seq) for seq in acc_sequences]
+    most_common_length = max(set(acc_lengths), key=acc_lengths.count)
+    
+    position_freqs = _calculate_position_frequencies(acc_sequences)
+    position_entropies = _calculate_position_entropies(position_freqs)
+    gc_contents = [_calculate_gc_content(seq) for seq in acc_sequences]
+    pairwise_distances = _calculate_pairwise_distances(acc_sequences[:200])
+    
+    seq_counts = {}
+    for seq in acc_sequences:
+        seq_counts[seq] = seq_counts.get(seq, 0) + 1
+    most_common_seqs = sorted(seq_counts.items(), key=lambda x: x[1], reverse=True)[:show_sequences]
+    
+    results = {
+        "total_acc_sequences": n_acc,
+        "unique_sequences": unique_acc,
+        "uniqueness_ratio": uniqueness_ratio,
+        "length_stats": {
+            "mean": np.mean(acc_lengths),
+            "std": np.std(acc_lengths),
+            "min": np.min(acc_lengths),
+            "max": np.max(acc_lengths),
+            "mode": most_common_length,
         },
-        'examples': acc_sequences[:show_sequences]
+        "gc_content": {
+            "mean": np.mean(gc_contents),
+            "std": np.std(gc_contents),
+            "min": np.min(gc_contents),
+            "max": np.max(gc_contents),
+        },
+        "position_frequencies": position_freqs,
+        "position_entropies": position_entropies,
+        "entropy_stats": {
+            "mean": np.mean(position_entropies),
+            "std": np.std(position_entropies),
+            "min": np.min(position_entropies),
+            "max": np.max(position_entropies),
+        },
+        "pairwise_distance": {
+            "mean": np.mean(pairwise_distances) if pairwise_distances else 0,
+            "std": np.std(pairwise_distances) if pairwise_distances else 0,
+        },
+        "most_common_sequences": most_common_seqs,
+        "example_sequences": acc_sequences[:show_sequences],
     }
     
-    # PWM scoring if available
-    if acc_generator and hasattr(acc_generator, 'score_sequence'):
-        scores = []
-        for seq in acc_sequences[:100]:  # Score first 100
-            try:
-                score = acc_generator.score_sequence(seq)
-                scores.append(score)
-            except:
-                pass
-        
-        if scores:
-            stats['pwm_scores'] = {
-                'mean': np.mean(scores),
-                'std': np.std(scores),
-                'min': min(scores),
-                'max': max(scores)
+    # PWM-based analysis if generator available
+    if acc_generator is not None:
+        pwm_len = len(acc_generator.pwm)
+        # Filter sequences to correct PWM length
+        acc_sequences_for_pwm = [
+            seq for seq in acc_sequences if len(seq) == pwm_len
+        ]
+        if not acc_sequences_for_pwm:
+            raise ValueError(
+                f"No ACC sequences match PWM length {pwm_len}; "
+                "PWM analysis cannot proceed."
+            )
+        try:
+            pwm_scores = []
+            log_likelihoods = []
+            geometric_means = []
+            
+            for seq in acc_sequences_for_pwm:
+                score_dict = acc_generator.score_sequence_probabilistic(seq)
+                pwm_scores.append(score_dict["mean_probability"])
+                log_likelihoods.append(score_dict["log_likelihood"])
+                geometric_means.append(score_dict["geometric_mean"])
+            
+            results["pwm_analysis"] = {
+                "mean_probability": {
+                    "mean": np.mean(pwm_scores),
+                    "std": np.std(pwm_scores),
+                    "min": np.min(pwm_scores),
+                    "max": np.max(pwm_scores),
+                },
+                "log_likelihood": {
+                    "mean": np.mean(log_likelihoods),
+                    "std": np.std(log_likelihoods),
+                },
+                "geometric_mean": {
+                    "mean": np.mean(geometric_means),
+                    "std": np.std(geometric_means),
+                },
             }
+            
+            # Calculate divergence from PWM expectations
+            expected_freqs = acc_generator.pwm
+            observed_freqs = position_freqs
+            
+            kl_divergences = []
+            for pos in range(min(len(expected_freqs), len(observed_freqs))):
+                kl_div = _calculate_kl_divergence(observed_freqs[pos], expected_freqs[pos])
+                kl_divergences.append(kl_div)
+            
+            results["pwm_divergence"] = {
+                "kl_divergence_per_position": kl_divergences,
+                "mean_kl_divergence": np.mean(kl_divergences),
+                "max_kl_divergence": np.max(kl_divergences),
+            }
+            
+        except Exception as e:
+            logger.warning(f"PWM analysis failed: {e}")
     
-    return stats
+    return results
 
 
-def display_acc_statistics(stats: Dict[str, Any], verbose: bool = False):
-    """Display ACC segment statistics."""
-    if not stats.get('found', False):
-        console.print("[yellow]No ACC segments found in dataset[/yellow]")
+def _calculate_position_frequencies(sequences: List[str]) -> np.ndarray:
+    """Calculate base frequencies at each position."""
+    if not sequences:
+        return np.array([])
+    
+    length = len(sequences[0])
+    freqs = np.zeros((length, 4))
+    base_to_idx = {"A": 0, "C": 1, "G": 2, "T": 3}
+    
+    for seq in sequences:
+        for pos, base in enumerate(seq.upper()):
+            if pos < length and base in base_to_idx:
+                freqs[pos, base_to_idx[base]] += 1
+    
+    row_sums = freqs.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1
+    freqs = freqs / row_sums
+    
+    return freqs
+
+
+def _calculate_position_entropies(position_freqs: np.ndarray) -> List[float]:
+    """Calculate Shannon entropy at each position (normalized 0-1)."""
+    entropies = []
+    for pos_freq in position_freqs:
+        entropy = -np.sum(pos_freq * np.log(pos_freq + 1e-10))
+        normalized_entropy = entropy / np.log(4)
+        entropies.append(normalized_entropy)
+    return entropies
+
+
+def _calculate_gc_content(sequence: str) -> float:
+    """Calculate GC content of a sequence."""
+    gc_count = sequence.upper().count("G") + sequence.upper().count("C")
+    return gc_count / len(sequence) if len(sequence) > 0 else 0.0
+
+
+def _calculate_pairwise_distances(sequences: List[str]) -> List[float]:
+    """Calculate hamming distances between all pairs of sequences."""
+    distances = []
+    n = len(sequences)
+    
+    if n < 2:
+        return distances
+    
+    length = len(sequences[0])
+    
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = sum(a != b for a, b in zip(sequences[i], sequences[j])) / length
+            distances.append(dist)
+    
+    return distances
+
+
+def _calculate_kl_divergence(p: np.ndarray, q: np.ndarray) -> float:
+    """Calculate KL divergence KL(P||Q)."""
+    epsilon = 1e-10
+    p = p + epsilon
+    q = q + epsilon
+    p = p / p.sum()
+    q = q / q.sum()
+    return np.sum(p * np.log(p / q))
+
+
+def display_acc_statistics(stats: Dict, verbose: bool = False):
+    """Display ACC statistics in a formatted way."""
+    if "error" in stats:
+        console.print(f"[red]Error: {stats['error']}[/red]")
         return
     
-    # Basic statistics
-    console.print(f"[cyan]Total ACC sequences:[/cyan] {stats['total']:,}")
-    console.print(f"[cyan]Unique ACC sequences:[/cyan] {stats['unique']:,}")
-    console.print(f"[cyan]Diversity ratio:[/cyan] {stats['diversity']:.3f}")
+    # Summary panel
+    summary_lines = [
+        f"Total ACC sequences: {stats['total_acc_sequences']:,}",
+        f"Unique sequences: {stats['unique_sequences']:,}",
+        f"Uniqueness ratio: {stats['uniqueness_ratio']:.4f}",
+        "",
+        f"Length: {stats['length_stats']['mean']:.1f} ± {stats['length_stats']['std']:.2f} bp",
+        f"  Range: {stats['length_stats']['min']} - {stats['length_stats']['max']} bp",
+        "",
+        f"GC content: {stats['gc_content']['mean']:.3f} ± {stats['gc_content']['std']:.3f}",
+        f"  Range: {stats['gc_content']['min']:.3f} - {stats['gc_content']['max']:.3f}",
+    ]
     
-    # Length distribution
-    console.print(f"\n[cyan]ACC Length Distribution:[/cyan]")
-    console.print(f"  Mean: {stats['lengths']['mean']:.1f} bp")
-    console.print(f"  Std:  {stats['lengths']['std']:.1f} bp")
-    console.print(f"  Min:  {stats['lengths']['min']} bp")
-    console.print(f"  Max:  {stats['lengths']['max']} bp")
+    console.print(Panel(
+        "\n".join(summary_lines),
+        title="[bold cyan]ACC Segment Summary[/bold cyan]",
+        border_style="cyan"
+    ))
     
-    # PWM scores if available
-    if 'pwm_scores' in stats:
-        console.print(f"\n[cyan]PWM Score Distribution:[/cyan]")
-        console.print(f"  Mean: {stats['pwm_scores']['mean']:.2f}")
-        console.print(f"  Std:  {stats['pwm_scores']['std']:.2f}")
-        console.print(f"  Min:  {stats['pwm_scores']['min']:.2f}")
-        console.print(f"  Max:  {stats['pwm_scores']['max']:.2f}")
+    # Diversity metrics
+    console.print("\n[bold cyan]Diversity Metrics:[/bold cyan]")
+    diversity_table = Table(box=box.SIMPLE)
+    diversity_table.add_column("Metric", style="cyan")
+    diversity_table.add_column("Value", style="green")
     
-    # Example sequences
-    if verbose and 'examples' in stats:
-        console.print(f"\n[cyan]Example ACC Sequences:[/cyan]")
-        for i, seq in enumerate(stats['examples'], 1):
-            console.print(f"  {i:2d}. {seq}")
+    diversity_table.add_row("Mean position entropy", f"{stats['entropy_stats']['mean']:.4f}")
+    diversity_table.add_row("Entropy range", f"{stats['entropy_stats']['min']:.4f} - {stats['entropy_stats']['max']:.4f}")
+    diversity_table.add_row("Mean pairwise distance", f"{stats['pairwise_distance']['mean']:.4f}")
+    
+    console.print(diversity_table)
+    
+    # Position-wise base frequencies
+    if verbose and "position_frequencies" in stats:
+        console.print("\n[bold cyan]Position-wise Base Frequencies:[/bold cyan]")
+        
+        freq_table = Table(box=box.ROUNDED)
+        freq_table.add_column("Position", style="cyan")
+        freq_table.add_column("A", style="yellow")
+        freq_table.add_column("C", style="yellow")
+        freq_table.add_column("G", style="yellow")
+        freq_table.add_column("T", style="yellow")
+        freq_table.add_column("Entropy", style="green")
+        
+        freqs = stats["position_frequencies"]
+        entropies = stats["position_entropies"]
+        
+        for pos in range(len(freqs)):
+            freq_table.add_row(
+                str(pos),
+                f"{freqs[pos][0]:.3f}",
+                f"{freqs[pos][1]:.3f}",
+                f"{freqs[pos][2]:.3f}",
+                f"{freqs[pos][3]:.3f}",
+                f"{entropies[pos]:.3f}",
+            )
+        
+        console.print(freq_table)
+    
+    # PWM analysis
+    if "pwm_analysis" in stats:
+        console.print("\n[bold cyan]PWM Scoring Analysis:[/bold cyan]")
+        
+        pwm_table = Table(box=box.SIMPLE)
+        pwm_table.add_column("Metric", style="cyan")
+        pwm_table.add_column("Mean", style="green")
+        pwm_table.add_column("Std", style="yellow")
+        pwm_table.add_column("Range", style="magenta")
+        
+        pwm_analysis = stats["pwm_analysis"]
+        
+        pwm_table.add_row(
+            "Mean probability",
+            f"{pwm_analysis['mean_probability']['mean']:.4f}",
+            f"{pwm_analysis['mean_probability']['std']:.4f}",
+            f"{pwm_analysis['mean_probability']['min']:.4f} - {pwm_analysis['mean_probability']['max']:.4f}"
+        )
+        pwm_table.add_row(
+            "Log-likelihood",
+            f"{pwm_analysis['log_likelihood']['mean']:.2f}",
+            f"{pwm_analysis['log_likelihood']['std']:.2f}",
+            "-"
+        )
+        pwm_table.add_row(
+            "Geometric mean",
+            f"{pwm_analysis['geometric_mean']['mean']:.4f}",
+            f"{pwm_analysis['geometric_mean']['std']:.4f}",
+            "-"
+        )
+        
+        console.print(pwm_table)
+        
+        # KL divergence
+        if "pwm_divergence" in stats:
+            console.print(f"\n[cyan]PWM Divergence:[/cyan]")
+            console.print(f"  Mean KL divergence: {stats['pwm_divergence']['mean_kl_divergence']:.4f}")
+            console.print(f"  Max KL divergence: {stats['pwm_divergence']['max_kl_divergence']:.4f}")
+            
+            if verbose:
+                console.print("\n  Per-position KL divergence:")
+                kl_divs = stats['pwm_divergence']['kl_divergence_per_position']
+                for pos, kl in enumerate(kl_divs):
+                    console.print(f"    Position {pos}: {kl:.4f}")
+    
+    # Most common sequences
+    if "most_common_sequences" in stats:
+        console.print("\n[bold cyan]Most Common ACC Sequences:[/bold cyan]")
+        
+        seq_table = Table(box=box.ROUNDED)
+        seq_table.add_column("Rank", style="cyan")
+        seq_table.add_column("Sequence", style="yellow")
+        seq_table.add_column("Count", style="green")
+        seq_table.add_column("Frequency", style="magenta")
+        
+        total = stats["total_acc_sequences"]
+        for i, (seq, count) in enumerate(stats["most_common_sequences"][:10], 1):
+            seq_table.add_row(
+                str(i),
+                seq,
+                str(count),
+                f"{count/total:.4f}"
+            )
+        
+        console.print(seq_table)
 
 
 @simulate_app.command("stats")
 def stats_command(
     input_file: Path = typer.Argument(
         ...,
-        help="Input file (pickle or text format)"),
+        help="Input file containing generated sequences",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True
+    ),
     format: Optional[str] = typer.Option(
         None,
         "--format", "-f",
-        help="Input format: pickle|text (auto-detect if not specified)"),
+        help="File format (auto-detected if not specified)"
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose", "-v",
-        help="Show detailed statistics"),
+        help="Show detailed statistics per segment"
+    ),
     acc_only: bool = typer.Option(
         False,
         "--acc-only",
-        help="Only analyze ACC segments"),
+        help="Show only ACC segment analysis"
+    ),
     config: Optional[Path] = typer.Option(
         None,
         "--config", "-c",
-        help="Config file for PWM scoring")
+        help="Config file to load ACC generator for PWM analysis"
+    )
 ):
     """
-    Analyze statistics of generated sequences.
+    Analyze statistics of generated sequences with detailed ACC analysis.
     
-    Provides comprehensive analysis including sequence length distribution,
+    This command analyzes a file of generated sequences and provides
+    statistics about sequence lengths, segment distributions, label
+    frequencies, and detailed ACC segment analysis including position-wise
     base frequencies, entropy, diversity metrics, and PWM divergence.
     
     Examples:

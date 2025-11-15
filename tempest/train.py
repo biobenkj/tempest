@@ -142,7 +142,7 @@ def standard_command(
         ) as progress:
             progress.add_task("Loading...", total=None)
             train_dataset = load_data(train_data)
-        console.print(f"[green][/green] Loaded {len(train_dataset)} training sequences")
+        console.print(f"[green]✓[/green] Loaded {len(train_dataset)} training sequences")
     
     if val_data:
         console.print(f"[cyan]Loading validation data:[/cyan] {val_data}")
@@ -153,7 +153,7 @@ def standard_command(
         ) as progress:
             progress.add_task("Loading...", total=None)
             val_dataset = load_data(val_data)
-        console.print(f"[green][/green] Loaded {len(val_dataset)} validation sequences")
+        console.print(f"[green]✓[/green] Loaded {len(val_dataset)} validation sequences")
     
     # Build training arguments
     train_args = {
@@ -183,7 +183,7 @@ def standard_command(
         
         console.print(table)
     
-    console.print("\n[bold green] Training complete![/bold green]")
+    console.print("\n[bold green]✓ Training complete![/bold green]")
     if output_dir:
         console.print(f"[dim]Model saved to: {output_dir}[/dim]")
 
@@ -202,17 +202,53 @@ def hybrid_command(
     train_data: Optional[Path] = typer.Option(
         None,
         "--train-data",
-        help="Path to training data (pickle or text format)"
+        help="Path to default training data (used for all phases unless phase-specific data provided)"
     ),
     val_data: Optional[Path] = typer.Option(
         None,
         "--val-data",
-        help="Path to validation data (pickle or text format)"
+        help="Path to default validation data (used for all phases unless phase-specific data provided)"
     ),
     unlabeled_data: Optional[Path] = typer.Option(
         None,
         "--unlabeled-data",
         help="Path to unlabeled data for semi-supervised hybrid training"
+    ),
+    # Phase-specific data options
+    warmup_train: Optional[Path] = typer.Option(
+        None,
+        "--warmup-train",
+        help="Training data for warmup phase (Phase 1)"
+    ),
+    warmup_val: Optional[Path] = typer.Option(
+        None,
+        "--warmup-val",
+        help="Validation data for warmup phase (Phase 1)"
+    ),
+    adversarial_train: Optional[Path] = typer.Option(
+        None,
+        "--adversarial-train",
+        help="Training data for adversarial phase (Phase 2)"
+    ),
+    adversarial_val: Optional[Path] = typer.Option(
+        None,
+        "--adversarial-val",
+        help="Validation data for adversarial phase (Phase 2)"
+    ),
+    pseudolabel_train: Optional[Path] = typer.Option(
+        None,
+        "--pseudolabel-train",
+        help="Training data for pseudo-label phase (Phase 3)"
+    ),
+    pseudolabel_val: Optional[Path] = typer.Option(
+        None,
+        "--pseudolabel-val",
+        help="Validation data for pseudo-label phase (Phase 3)"
+    ),
+    pseudolabel_unlabeled: Optional[Path] = typer.Option(
+        None,
+        "--pseudolabel-unlabeled",
+        help="Unlabeled data for pseudo-label phase (Phase 3)"
     ),
     output_dir: Optional[Path] = typer.Option(
         None,
@@ -234,17 +270,6 @@ def hybrid_command(
         "--learning-rate", "--lr",
         help="Learning rate (overrides config)"
     ),
-    constraint_weight: float = typer.Option(
-        1.0,
-        "--constraint-weight",
-        help="Weight for length constraint loss",
-        min=0.0
-    ),
-    constraint_type: str = typer.Option(
-        "soft",
-        "--constraint-type",
-        help="Type of constraints: 'soft' or 'hard'"
-    ),
     use_gpu: bool = typer.Option(
         True,
         "--gpu/--cpu",
@@ -257,39 +282,51 @@ def hybrid_command(
     )
 ):
     """
-    Train a hybrid Tempest model with length constraints.
+    Train a hybrid Tempest model with three-phase training strategy.
     
-    The hybrid approach combines standard CRF training with
-    length constraint enforcement for improved accuracy on
-    structured sequences.
+    The hybrid training approach includes:
+    1. Warmup phase: Standard supervised training
+    2. Adversarial phase: Discriminator-based robustness training
+    3. Pseudo-label phase: Self-training with unlabeled data
+    
+    You can specify different datasets for each phase using --warmup-train,
+    --adversarial-train, --pseudolabel-train, etc. If not specified, uses
+    the default --train-data for all phases.
     
     [bold cyan]Examples:[/bold cyan]
     
-    Train hybrid model with soft constraints:
+    Basic hybrid training with single dataset:
     ```
-    tempest train hybrid --config config.yaml --train-data train.pkl.gz
+    tempest train hybrid --config config.yaml --train-data train.pkl.gz --val-data val.pkl.gz
     ```
     
-    Train with stronger constraint enforcement:
+    Hybrid training with phase-specific datasets:
     ```
-    tempest train hybrid --config config.yaml --train-data train.pkl.gz --constraint-weight 2.0
+    tempest train hybrid --config config.yaml \\
+        --warmup-train data/simulated/warmup/train.pkl.gz \\
+        --warmup-val data/simulated/warmup/val.pkl.gz \\
+        --adversarial-train data/simulated/adversarial_p2/train.pkl.gz \\
+        --adversarial-val data/simulated/adversarial_p2/val.pkl.gz \\
+        --pseudolabel-unlabeled data/unlabeled/reads.pkl.gz
+    ```
+    
+    Hybrid training with mixed approach (some phases use default, others use specific):
+    ```
+    tempest train hybrid --config config.yaml \\
+        --train-data data/default/train.pkl.gz \\
+        --val-data data/default/val.pkl.gz \\
+        --adversarial-train data/simulated/adversarial_p2/train.pkl.gz \\
+        --adversarial-val data/simulated/adversarial_p2/val.pkl.gz
     ```
     """
     console.print("\n[bold blue]═" * 80 + "[/bold blue]")
-    console.print(" " * 30 + "[bold cyan]TEMPEST TRAINER[/bold cyan]")
+    console.print(" " * 30 + "[bold cyan]TEMPEST HYBRID TRAINER[/bold cyan]")
     console.print("[bold blue]═" * 80 + "[/bold blue]\n")
-    console.print("[yellow]Training Mode:[/yellow] Hybrid (with length constraints)")
-    console.print(f"[yellow]Constraint Type:[/yellow] {constraint_type}")
-    console.print(f"[yellow]Constraint Weight:[/yellow] {constraint_weight}")
+    console.print("[yellow]Training Mode:[/yellow] Hybrid (3-phase)")
     
-    # Load configuration using TempestConfig
+    # Load configuration
     config_obj = load_config(config)
     
-    # Ensure hybrid block exists
-    if not hasattr(config_obj, "hybrid") or config_obj.hybrid is None:
-        from types import SimpleNamespace
-        config_obj.hybrid = SimpleNamespace()
-
     # Override config with CLI arguments if provided
     if epochs is not None and config_obj.training:
         config_obj.training.epochs = epochs
@@ -298,62 +335,186 @@ def hybrid_command(
     if learning_rate is not None and config_obj.training:
         config_obj.training.learning_rate = learning_rate
     
-    # Load training data if specified
-    train_dataset = None
-    val_dataset = None
+    # Display phase configuration
+    if config_obj.hybrid:
+        console.print(f"[yellow]Phase 1 (Warmup):[/yellow] {config_obj.hybrid.warmup_epochs} epochs")
+        console.print(f"[yellow]Phase 2 (Adversarial):[/yellow] {config_obj.hybrid.discriminator_epochs} epochs")
+        console.print(f"[yellow]Phase 3 (Pseudo-label):[/yellow] {config_obj.hybrid.pseudolabel_epochs} epochs")
+    
+    # Load default training data
+    default_train_dataset = None
+    default_val_dataset = None
     
     if train_data:
-        console.print(f"[cyan]Loading training data:[/cyan] {train_data}")
+        console.print(f"\n[cyan]Loading default training data:[/cyan] {train_data}")
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             console=console
         ) as progress:
             progress.add_task("Loading...", total=None)
-            train_dataset = load_data(train_data)
-        console.print(f"[green][/green] Loaded {len(train_dataset)} training sequences")
+            default_train_dataset = load_data(train_data)
+        console.print(f"[green]✓[/green] Loaded {len(default_train_dataset)} sequences")
     
     if val_data:
-        console.print(f"[cyan]Loading validation data:[/cyan] {val_data}")
+        console.print(f"[cyan]Loading default validation data:[/cyan] {val_data}")
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             console=console
         ) as progress:
             progress.add_task("Loading...", total=None)
-            val_dataset = load_data(val_data)
-        console.print(f"[green][/green] Loaded {len(val_dataset)} validation sequences")
+            default_val_dataset = load_data(val_data)
+        console.print(f"[green]✓[/green] Loaded {len(default_val_dataset)} sequences")
+    
+    # Load phase-specific data
+    phase_data = {}
+    
+    # Warmup phase
+    if warmup_train or warmup_val:
+        console.print("\n[bold cyan]Phase 1: Warmup Data[/bold cyan]")
+        phase_data['warmup'] = {}
+        
+        if warmup_train:
+            console.print(f"[cyan]Loading warmup training data:[/cyan] {warmup_train}")
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console
+            ) as progress:
+                progress.add_task("Loading...", total=None)
+                phase_data['warmup']['train'] = load_data(warmup_train)
+            console.print(f"[green]✓[/green] Loaded {len(phase_data['warmup']['train'])} sequences")
+        
+        if warmup_val:
+            console.print(f"[cyan]Loading warmup validation data:[/cyan] {warmup_val}")
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console
+            ) as progress:
+                progress.add_task("Loading...", total=None)
+                phase_data['warmup']['val'] = load_data(warmup_val)
+            console.print(f"[green]✓[/green] Loaded {len(phase_data['warmup']['val'])} sequences")
+    
+    # Adversarial phase
+    if adversarial_train or adversarial_val:
+        console.print("\n[bold cyan]Phase 2: Adversarial Data[/bold cyan]")
+        phase_data['adversarial'] = {}
+        
+        if adversarial_train:
+            console.print(f"[cyan]Loading adversarial training data:[/cyan] {adversarial_train}")
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console
+            ) as progress:
+                progress.add_task("Loading...", total=None)
+                phase_data['adversarial']['train'] = load_data(adversarial_train)
+            console.print(f"[green]✓[/green] Loaded {len(phase_data['adversarial']['train'])} sequences")
+        
+        if adversarial_val:
+            console.print(f"[cyan]Loading adversarial validation data:[/cyan] {adversarial_val}")
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console
+            ) as progress:
+                progress.add_task("Loading...", total=None)
+                phase_data['adversarial']['val'] = load_data(adversarial_val)
+            console.print(f"[green]✓[/green] Loaded {len(phase_data['adversarial']['val'])} sequences")
+    
+    # Pseudo-label phase
+    if pseudolabel_train or pseudolabel_val or pseudolabel_unlabeled:
+        console.print("\n[bold cyan]Phase 3: Pseudo-label Data[/bold cyan]")
+        phase_data['pseudolabel'] = {}
+        
+        if pseudolabel_train:
+            console.print(f"[cyan]Loading pseudo-label training data:[/cyan] {pseudolabel_train}")
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console
+            ) as progress:
+                progress.add_task("Loading...", total=None)
+                phase_data['pseudolabel']['train'] = load_data(pseudolabel_train)
+            console.print(f"[green]✓[/green] Loaded {len(phase_data['pseudolabel']['train'])} sequences")
+        
+        if pseudolabel_val:
+            console.print(f"[cyan]Loading pseudo-label validation data:[/cyan] {pseudolabel_val}")
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console
+            ) as progress:
+                progress.add_task("Loading...", total=None)
+                phase_data['pseudolabel']['val'] = load_data(pseudolabel_val)
+            console.print(f"[green]✓[/green] Loaded {len(phase_data['pseudolabel']['val'])} sequences")
+        
+        if pseudolabel_unlabeled:
+            console.print(f"[cyan]Loading pseudo-label unlabeled data:[/cyan] {pseudolabel_unlabeled}")
+            # Note: unlabeled data path stored as string for lazy loading
+            phase_data['pseudolabel']['unlabeled_path'] = str(pseudolabel_unlabeled)
+            console.print(f"[green]✓[/green] Path stored (will be loaded during training)")
     
     # Build training arguments
     train_args = {
-        'train_data': train_dataset,
-        'val_data': val_dataset,
-        'constraint_weight': constraint_weight,
-        'constraint_type': constraint_type,
+        'train_data': default_train_dataset,
+        'val_data': default_val_dataset,
+        'unlabeled_path': str(unlabeled_data) if unlabeled_data else None,
+        'phase_data': phase_data if phase_data else None,
         'use_gpu': use_gpu,
         'verbose': verbose,
     }
-    if unlabeled_data:
-        train_args["unlabeled_path"] = unlabeled_data
-
+    
     # Dispatch via unified main entrypoint
     result = tempest_main("train", config, output=output_dir, subcommand="hybrid", **train_args)
     
     # Display results
-    if result and 'metrics' in result:
-        table = Table(title="Training Results", show_header=True, header_style="bold magenta")
-        table.add_column("Metric", style="cyan")
-        table.add_column("Value", style="green")
+    if result and 'history' in result:
+        console.print("\n[bold magenta]Training History by Phase:[/bold magenta]\n")
         
-        for metric, value in result['metrics'].items():
-            if isinstance(value, float):
-                table.add_row(metric, f"{value:.4f}")
-            else:
-                table.add_row(metric, str(value))
-        
-        console.print(table)
+        # Create summary table
+        for phase_name, phase_hist in result['history'].items():
+            if not phase_hist:
+                continue
+                
+            table = Table(title=f"{phase_name.title()} Phase", show_header=True, header_style="bold cyan")
+            table.add_column("Epoch", style="dim")
+            table.add_column("Train Loss", style="yellow")
+            table.add_column("Train Acc", style="yellow")
+            table.add_column("Val Loss", style="green")
+            table.add_column("Val Acc", style="green")
+            
+            # Show first, middle, and last epochs
+            epochs_to_show = []
+            if 'loss' in phase_hist and len(phase_hist['loss']) > 0:
+                n_epochs = len(phase_hist['loss'])
+                if n_epochs <= 5:
+                    epochs_to_show = list(range(n_epochs))
+                else:
+                    epochs_to_show = [0, n_epochs//2, n_epochs-1]
+                
+                for epoch_idx in epochs_to_show:
+                    train_loss = phase_hist.get('loss', [None])[epoch_idx]
+                    train_acc = phase_hist.get('accuracy', [None])[epoch_idx]
+                    val_loss = phase_hist.get('val_loss', [None])[epoch_idx] if 'val_loss' in phase_hist else None
+                    val_acc = phase_hist.get('val_accuracy', [None])[epoch_idx] if 'val_accuracy' in phase_hist else None
+                    
+                    table.add_row(
+                        str(epoch_idx + 1),
+                        f"{train_loss:.4f}" if train_loss is not None else "N/A",
+                        f"{train_acc:.4f}" if train_acc is not None else "N/A",
+                        f"{val_loss:.4f}" if val_loss is not None else "N/A",
+                        f"{val_acc:.4f}" if val_acc is not None else "N/A"
+                    )
+            
+            console.print(table)
     
-    console.print("\n[bold green] Hybrid training complete![/bold green]")
+    if result and 'final_val_accuracy' in result and result['final_val_accuracy'] is not None:
+        console.print(f"\n[bold green]Final Validation Accuracy: {result['final_val_accuracy']:.4f}[/bold green]")
+    
+    console.print(f"\n[bold green]✓ Hybrid training complete![/bold green]")
     if output_dir:
         console.print(f"[dim]Model saved to: {output_dir}[/dim]")
 
@@ -384,34 +545,35 @@ def ensemble_command(
         "--unlabeled-data",
         help="Path to unlabeled data for hybrid models in ensemble"
     ),
-    output_dir: Optional[Path] = typer.Option(
-        None,
-        "--output-dir", "-o",
-        help="Output directory for trained models"
-    ),
     num_models: int = typer.Option(
         5,
         "--num-models", "-n",
-        help="Number of models in ensemble",
-        min=2,
-        max=20
-    ),
-    hybrid_ratio: float = typer.Option(
-        0.0,
-        "--hybrid-ratio",
-        help="Fraction of models that should be hybrid (0.0-1.0)",
-        min=0.0,
-        max=1.0
+        help="Number of models in ensemble"
     ),
     model_types: Optional[str] = typer.Option(
         None,
         "--model-types",
         help="Comma-separated list of model types (e.g., 'standard,hybrid,standard,hybrid,standard')"
     ),
+    hybrid_ratio: float = typer.Option(
+        0.4,
+        "--hybrid-ratio",
+        help="Ratio of hybrid models in ensemble (0.0 to 1.0)"
+    ),
+    variation_type: str = typer.Option(
+        "both",
+        "--variation-type",
+        help="Type of model variation: 'architecture', 'initialization', or 'both'"
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir", "-o",
+        help="Output directory for trained ensemble"
+    ),
     epochs: Optional[int] = typer.Option(
         None,
         "--epochs", "-e",
-        help="Number of training epochs per model (overrides config)"
+        help="Number of training epochs (overrides config)"
     ),
     batch_size: Optional[int] = typer.Option(
         None,
@@ -423,11 +585,6 @@ def ensemble_command(
         "--learning-rate", "--lr",
         help="Learning rate (overrides config)"
     ),
-    variation_type: str = typer.Option(
-        "both",
-        "--variation-type",
-        help="Type of variation: 'architecture', 'initialization', or 'both'"
-    ),
     use_gpu: bool = typer.Option(
         True,
         "--gpu/--cpu",
@@ -436,7 +593,7 @@ def ensemble_command(
     parallel: bool = typer.Option(
         False,
         "--parallel",
-        help="Train models in parallel (requires multiple GPUs)"
+        help="Train models in parallel (experimental)"
     ),
     verbose: bool = typer.Option(
         False,
@@ -445,29 +602,20 @@ def ensemble_command(
     )
 ):
     """
-    Train an ensemble of Tempest models with optional mixing of standard and hybrid models.
+    Train an ensemble of Tempest models with Bayesian Model Averaging.
     
-    The ensemble can consist of:
-    - All standard models (default)
-    - All hybrid models (set --hybrid-ratio 1.0)
-    - Mixed standard and hybrid (set --hybrid-ratio between 0 and 1)
-    
-    Hybrid models will use unlabeled data if provided via --unlabeled-data.
+    The ensemble combines multiple models (standard and/or hybrid) with
+    architectural variations and different initializations for improved
+    robustness and uncertainty quantification.
     
     [bold cyan]Examples:[/bold cyan]
     
-    Train standard-only ensemble:
+    Train 5-model ensemble with default 40% hybrid ratio:
     ```
     tempest train ensemble --config config.yaml --train-data train.pkl.gz --num-models 5
     ```
     
-    Train mixed ensemble (40% hybrid, 60% standard):
-    ```
-    tempest train ensemble --config config.yaml --train-data train.pkl.gz \\
-        --num-models 5 --hybrid-ratio 0.4 --unlabeled-data unlabeled.fastq
-    ```
-    
-    Train with explicit model types:
+    Train ensemble with specific model types:
     ```
     tempest train ensemble --config config.yaml --train-data train.pkl.gz \\
         --num-models 5 --model-types "standard,hybrid,standard,hybrid,standard"
@@ -506,7 +654,7 @@ def ensemble_command(
     if unlabeled_data and num_hybrid > 0:
         console.print(f"[yellow]Unlabeled Data:[/yellow] {unlabeled_data} (for hybrid models)")
     elif num_hybrid > 0 and not unlabeled_data:
-        console.print("[yellow] Warning:[/yellow] Hybrid models requested but no unlabeled data provided")
+        console.print("[yellow]⚠ Warning:[/yellow] Hybrid models requested but no unlabeled data provided")
     
     # Load configuration using TempestConfig
     config_obj = load_config(config)
@@ -539,7 +687,7 @@ def ensemble_command(
         ) as progress:
             progress.add_task("Loading...", total=None)
             train_dataset = load_data(train_data)
-        console.print(f"[green][/green] Loaded {len(train_dataset)} training sequences")
+        console.print(f"[green]✓[/green] Loaded {len(train_dataset)} training sequences")
     
     if val_data:
         console.print(f"[cyan]Loading validation data:[/cyan] {val_data}")
@@ -550,7 +698,7 @@ def ensemble_command(
         ) as progress:
             progress.add_task("Loading...", total=None)
             val_dataset = load_data(val_data)
-        console.print(f"[green][/green] Loaded {len(val_dataset)} validation sequences")
+        console.print(f"[green]✓[/green] Loaded {len(val_dataset)} validation sequences")
     
     # Build training arguments
     train_args = {
@@ -596,7 +744,7 @@ def ensemble_command(
             
             console.print("\n", weights_table)
     
-    console.print(f"\n[bold green] Ensemble training complete![/bold green]")
+    console.print(f"\n[bold green]✓ Ensemble training complete![/bold green]")
     console.print(f"[green]Trained {num_models} models ({num_standard} standard, {num_hybrid} hybrid)[/green]")
     if output_dir:
         console.print(f"[dim]Models saved to: {output_dir}[/dim]")
@@ -694,6 +842,6 @@ def resume_command(
         
         console.print(table)
     
-    console.print("\n[bold green] Training resumed and complete![/bold green]")
+    console.print("\n[bold green]✓ Training resumed and complete![/bold green]")
     if output_dir:
         console.print(f"[dim]Model saved to: {output_dir}[/dim]")
