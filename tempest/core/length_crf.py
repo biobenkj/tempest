@@ -86,6 +86,8 @@ class ModelWithLengthConstrainedCRF(tf.keras.Model):
         self.constraint_ramp_epochs = constraint_ramp_epochs
         self.label_binarizer = label_binarizer
         self.sparse_target = sparse_target
+        self.span_through_errors = {'ERROR_SUB', 'ERROR_INS'}
+        self.exclude_errors = {'ERROR_BOUNDARY', 'ERROR_LOSS', 'ERROR_ORDER', 'ERROR_DUP'}
 
         # Epoch counter for ramping
         self.current_epoch = tf.Variable(0, dtype=tf.int32, trainable=False)
@@ -149,6 +151,29 @@ class ModelWithLengthConstrainedCRF(tf.keras.Model):
         self.min_lengths = tf.constant(min_lengths, dtype=tf.float32)
         self.max_lengths = tf.constant(max_lengths, dtype=tf.float32)
         self.has_constraint = tf.constant(has_constraint, dtype=tf.float32)
+    
+    @tf.function
+    def _resolve_benign_errors(self, viterbi_sequence):
+        """Replace ERROR_SUB and ERROR_INS with preceding valid label."""
+        
+        # Get error indices
+        error_sub_idx = self.label_to_idx.get('ERROR_SUB', -1)
+        error_ins_idx = self.label_to_idx.get('ERROR_INS', -1)
+        
+        # Create mask for positions to resolve
+        is_benign_error = tf.logical_or(
+            tf.equal(viterbi_sequence, error_sub_idx),
+            tf.equal(viterbi_sequence, error_ins_idx)
+        )
+        
+        # Forward fill using iterative replacement (handles consecutive errors)
+        resolved = viterbi_sequence
+        for _ in range(5):  # Handle up to 5 consecutive errors
+            shifted = tf.pad(resolved[:, :-1], [[0,0], [1,0]], 
+                           constant_values=resolved[:, 0])
+            resolved = tf.where(is_benign_error, shifted, resolved)
+        
+        return resolved
 
     def call(self, inputs, training=False):
         """Forward pass through base model."""
@@ -249,9 +274,12 @@ class ModelWithLengthConstrainedCRF(tf.keras.Model):
         batch_size = tf.shape(viterbi_sequence)[0]
         seq_len = tf.shape(viterbi_sequence)[1]
 
-        # No constraints → zero penalties
+        # No constraints == zero penalties
         if not self.length_constraints:
             return tf.zeros(batch_size, dtype=tf.float32)
+        
+        # RESOLVE benign errors before computing segment lengths
+        viterbi_sequence = self._resolve_benign_errors(viterbi_sequence)
 
         # Create mask for valid positions
         positions = tf.range(seq_len, dtype=tf.int32)[tf.newaxis, :]  # [1, seq_len]

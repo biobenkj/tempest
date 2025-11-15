@@ -1326,12 +1326,6 @@ class ErrorSimulator:
     """Simulates sequencing errors in reads."""
 
     def __init__(self, config: Dict):
-        """
-        Initialize error simulator.
-
-        Args:
-            config: Error simulation configuration
-        """
         self.config = config
         self.substitution_rate = config.get("substitution_rate", 0.001)
         self.insertion_rate = config.get("insertion_rate", 0.0001)
@@ -1345,21 +1339,9 @@ class ErrorSimulator:
         quality_scores: Optional[np.ndarray],
         random_state: np.random.RandomState,
     ) -> Tuple[List[str], List[str], Optional[np.ndarray]]:
-        """
-        Introduce errors into a sequence.
-
-        Args:
-            sequence: Original sequence (as list)
-            labels: Original labels (as list)
-            quality_scores: Optional quality scores
-            random_state: Random state for reproducibility
-
-        Returns:
-            Tuple of (modified_sequence, modified_labels, modified_quality_scores)
-        """
-        if not any(
-            [self.substitution_rate, self.insertion_rate, self.deletion_rate]
-        ):
+        """Introduce errors with specific error type labels."""
+        
+        if not any([self.substitution_rate, self.insertion_rate, self.deletion_rate]):
             return sequence, labels, quality_scores
 
         new_seq = []
@@ -1370,7 +1352,6 @@ class ErrorSimulator:
         while i < len(sequence):
             # Calculate error probability
             if self.quality_dependent and quality_scores is not None:
-                # Quality-dependent error rate
                 qual = quality_scores[i]
                 error_prob = 10 ** (-qual / 10)  # Phred scale
             else:
@@ -1382,50 +1363,44 @@ class ErrorSimulator:
 
             if random_state.random() < error_prob:
                 # Decide on error type
-                rates = np.array(
-                    [
-                        self.substitution_rate,
-                        self.insertion_rate,
-                        self.deletion_rate,
-                    ],
-                    dtype=float,
-                )
+                rates = np.array([
+                    self.substitution_rate,
+                    self.insertion_rate,
+                    self.deletion_rate,
+                ], dtype=float)
                 total = rates.sum()
-                # Invariant: at least one rate must be > 0 due to guard at start of method
-                assert total > 0, "Error rates sum should be > 0 due to earlier guard"
+                assert total > 0, "Error rates sum should be > 0"
 
                 probs = rates / total
-                error_type = random_state.choice(
-                    ["sub", "ins", "del"], p=probs
-                )
+                error_type = random_state.choice(["sub", "ins", "del"], p=probs)
 
                 if error_type == "sub":
-                    # Substitution
+                    # SUBSTITUTION - label as ERROR_SUB
                     original = sequence[i]
                     bases = ["A", "C", "G", "T"]
                     bases.remove(original if original in bases else "A")
                     new_seq.append(random_state.choice(bases))
-                    new_labels.append("ERROR")
+                    new_labels.append("ERROR_SUB")
                     if new_qual is not None:
-                        new_qual.append(quality_scores[i] * 0.5)  # Reduce quality
+                        new_qual.append(quality_scores[i] * 0.5)
                     i += 1
 
                 elif error_type == "ins":
-                    # Insertion: add extra base without consuming input
-                    # Keep current base
+                    # INSERTION - label as ERROR_INS
+                    # Keep current base with original label
                     new_seq.append(sequence[i])
                     new_labels.append(labels[i])
                     if new_qual is not None:
                         new_qual.append(quality_scores[i])
-                    # Add the inserted base after it
+                    # Add inserted base with ERROR_INS label
                     new_seq.append(random_state.choice(["A", "C", "G", "T"]))
-                    new_labels.append("ERROR")
+                    new_labels.append("ERROR_INS")
                     if new_qual is not None:
-                        new_qual.append(20)  # Low quality for insertion
+                        new_qual.append(20)
                     i += 1
 
                 else:  # deletion
-                    # Skip this position
+                    # DELETION - skip position (no label needed)
                     i += 1
             else:
                 # No error
@@ -1999,33 +1974,104 @@ class SequenceSimulator:
     def _regions_from_labels(
         self, 
         labels: List[str], 
-        exclude: Optional[set] = None
+        exclude: Optional[set] = None,
+        span_through: Optional[set] = None
     ) -> Dict[str, List[Tuple[int, int]]]:
         """
-        Recompute compressed segments from labels after error editing.
-        Excludes ephemeral labels such as "ERROR".
-        
+        Recompute compressed segments with smart error handling.
+    
+        This function performs two key operations:
+        1. GHOST RESOLUTION: Replace benign error labels (span_through) with their 
+        preceding valid label to maintain segment continuity
+        2. RUN-LENGTH ENCODING: Compress consecutive identical labels into 
+        (start, end) coordinate tuples
+    
         Args:
-            labels: List of per-base labels
-            exclude: Set of labels to exclude (e.g., {"ERROR"})
-            
+            labels: List of per-base labels for the entire sequence
+            exclude: Labels to skip completely (architectural errors like ERROR_BOUNDARY)
+                    These won't appear in the output regions
+            span_through: Labels to treat as transparent (benign errors like ERROR_SUB)
+                        These get replaced with their context before encoding
+        
         Returns:
             Dictionary mapping label names to list of (start, end) tuples
+            Example: {'UMI': [(0, 8), (50, 58)], 'ACC': [(8, 14)]}
+    
+        Example:
+            labels = ['UMI', 'UMI', 'ERROR_SUB', 'UMI', 'ACC', 'ACC', 'ERROR_BOUNDARY']
+            span_through = {'ERROR_SUB'}
+            exclude = {'ERROR_BOUNDARY'}
+        
+            After ghosting: ['UMI', 'UMI', 'UMI', 'UMI', 'ACC', 'ACC', 'ERROR_BOUNDARY']
+            After RLE:      {'UMI': [(0, 4)], 'ACC': [(4, 6)]}
         """
+        # Set defaults for error handling
         exclude = exclude or set()
-        out = {}
-        i, n = 0, len(labels)
-        while i < n:
-            lab = labels[i]
-            if lab in exclude:
-                i += 1
+        span_through = span_through or {'ERROR_SUB', 'ERROR_INS'}
+    
+        # =========================================================================
+        # PHASE 1: GHOST RESOLUTION
+        # Replace span_through error labels with their preceding valid label
+        # This maintains segment continuity despite sequencing errors
+        # =========================================================================
+        resolved_labels = []
+        last_valid_label = None
+    
+        for label in labels:
+            if label in span_through:
+                # This is a benign error - "ghost" it by using the previous valid label
+                # If we haven't seen a valid label yet, keep the error label as-is
+                ghosted_label = last_valid_label if last_valid_label is not None else label
+                resolved_labels.append(ghosted_label)
+            else:
+                # This is a structural label or architectural error
+                # Update our tracking of the last valid label (unless it's excluded)
+                if label not in exclude:
+                    last_valid_label = label
+                resolved_labels.append(label)
+    
+        # =========================================================================
+        # PHASE 2: RUN-LENGTH ENCODING
+        # Compress consecutive identical labels into coordinate ranges
+        # =========================================================================
+    
+        # Output dictionary: label_name -> list of (start, end) coordinate pairs
+        label_regions = {}
+    
+        # Tracking variables for the scan
+        current_position = 0
+        total_length = len(resolved_labels)
+    
+        # Scan through the resolved label sequence
+        while current_position < total_length:
+            current_label = resolved_labels[current_position]
+        
+            # Skip labels that should be excluded or are still error labels
+            # (error labels would only remain if they appeared at the start before any valid label)
+            if current_label in exclude or current_label is None or current_label in span_through:
+                current_position += 1
                 continue
-            j = i + 1
-            while j < n and labels[j] == lab:
-                j += 1
-            out.setdefault(lab, []).append((i, j))
-            i = j
-        return out
+        
+            # Found a valid segment start - now find where this run ends
+            # A "run" is a contiguous stretch of identical labels
+            segment_start = current_position
+            segment_end = current_position + 1
+        
+            # Extend segment_end while the label matches current_label
+            while segment_end < total_length and resolved_labels[segment_end] == current_label:
+                segment_end += 1
+        
+            # Record this segment's coordinates [segment_start, segment_end)
+            # Note: segment_end is exclusive (Python slice convention)
+            # Example: segment_start=0, segment_end=8 means positions 0,1,2,3,4,5,6,7
+            if current_label not in label_regions:
+                label_regions[current_label] = []
+            label_regions[current_label].append((segment_start, segment_end))
+        
+            # Move to the next potential segment (start of next different label)
+            current_position = segment_end
+    
+        return label_regions
 
     def generate_batch(
         self,

@@ -19,7 +19,11 @@ logger = logging.getLogger(__name__)
 class ModelConfig:
     """Model architecture configuration."""
     max_seq_len: int = 500
-    num_labels: int = 5
+    # Label vocabulary (18 total):
+    # - Structural segments (11): p7, i7, RP2, UMI, ACC, cDNA, polyA, CBC, RP1, i5, p5
+    # - Sequencing errors (2): ERROR_SUB, ERROR_INS
+    # - Architectural errors (5): ERROR_BOUNDARY, ERROR_DUP, ERROR_LOSS, ERROR_ORDER, ERROR_UNKNOWN
+    num_labels: int = 18
     embedding_dim: int = 64
     lstm_units: int = 128
     lstm_layers: int = 2
@@ -96,6 +100,7 @@ class SimulationConfig:
     # invalid read generation up front instead of during hybrid training
     invalid_fraction: float = 0.0
     invalid_params: Optional[Dict[str, float]] = None
+    mark_architectural_errors: bool = True
     
     @classmethod
     def from_dict(cls, config: dict):

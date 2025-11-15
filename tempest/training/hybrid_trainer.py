@@ -303,9 +303,24 @@ class HybridTrainer:
         return [mapping.get(b.upper(), 0) for b in seq]
 
     def _labels_to_numeric(self, labels: List[str]) -> List[int]:
-        lbl_map = {'p7': 0, 'i7': 1, 'RP2': 2, 'UMI': 3, 'ACC': 4,
-                   'cDNA': 5, 'polyA': 6, 'CBC': 7, 'RP1': 8, 'i5': 9, 'p5': 10}
-        return [lbl_map.get(l, 0) for l in labels]
+        """Convert labels to indices with full error vocabulary."""
+        label_mapping = {
+            # Structural segments
+            'p7': 0, 'i7': 1, 'RP2': 2, 'UMI': 3, 'ACC': 4,
+            'cDNA': 5, 'polyA': 6, 'CBC': 7, 'RP1': 8, 'i5': 9, 'p5': 10,
+            
+            # Sequencing errors
+            'ERROR_SUB': 11,      # Substitution
+            'ERROR_INS': 12,      # Insertion
+            
+            # Architectural errors (optional)
+            'ERROR_BOUNDARY': 13,  # Truncation boundary
+            'ERROR_ORDER': 14,     # Scrambled segment
+            'ERROR_DUP': 15,       # Duplicated segment
+            'ERROR_LOSS': 16,      # Missing segment
+            'ERROR_UNKNOWN': 17,   # Unclassified
+        }
+        return [label_mapping.get(label, 0) for label in labels]
 
 
 # ------------------------------------------------------------------------------------

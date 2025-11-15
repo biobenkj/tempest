@@ -32,7 +32,8 @@ simulation:
     truncation_prob: 0.35
     chimeric_prob: 0.25
     scrambled_prob: 0.1
-
+  mark_architectural_errors: true
+  
   # Additional test/validation splits
   n_train: 40000
   n_val: 5000

@@ -42,6 +42,7 @@ class InvalidReadGenerator:
         self.error_probabilities = self._init_error_probabilities(config)
         logger.info(f"Initialized InvalidReadGenerator with error probabilities: "
                     f"{self.error_probabilities}")
+        self.mark_architectural_errors = config.get('mark_architectural_errors', True) if config else True
 
     @staticmethod
     def _default_probabilities() -> Dict[str, float]:
@@ -57,8 +58,6 @@ class InvalidReadGenerator:
     def _init_error_probabilities(self, config) -> Dict[str, float]:
         """
         Extract error probabilities from configuration.
-        
-        FIXED: Now properly handles SimulationConfig objects passed directly.
         """
         def extract(obj):
             """Extract dict from various object types."""
@@ -140,33 +139,104 @@ class InvalidReadGenerator:
     def _invalid_regions_from_labels(
         self, 
         labels: List[str], 
-        exclude: Optional[set] = None
+        exclude: Optional[set] = None,
+        span_through: Optional[set] = None
     ) -> Dict[str, List[Tuple[int, int]]]:
         """
-        Recompute compressed segments from labels after error editing.
-        Excludes ephemeral labels such as "ERROR".
-        
+        Recompute compressed segments with smart error handling.
+    
+        This function performs two key operations:
+        1. GHOST RESOLUTION: Replace benign error labels (span_through) with their 
+        preceding valid label to maintain segment continuity
+        2. RUN-LENGTH ENCODING: Compress consecutive identical labels into 
+        (start, end) coordinate tuples
+    
         Args:
-            labels: List of per-base labels
-            exclude: Set of labels to exclude (e.g., {"ERROR"})
-            
+            labels: List of per-base labels for the entire sequence
+            exclude: Labels to skip completely (architectural errors like ERROR_BOUNDARY)
+                    These won't appear in the output regions
+            span_through: Labels to treat as transparent (benign errors like ERROR_SUB)
+                        These get replaced with their context before encoding
+        
         Returns:
             Dictionary mapping label names to list of (start, end) tuples
+            Example: {'UMI': [(0, 8), (50, 58)], 'ACC': [(8, 14)]}
+    
+        Example:
+            labels = ['UMI', 'UMI', 'ERROR_SUB', 'UMI', 'ACC', 'ACC', 'ERROR_BOUNDARY']
+            span_through = {'ERROR_SUB'}
+            exclude = {'ERROR_BOUNDARY'}
+        
+            After ghosting: ['UMI', 'UMI', 'UMI', 'UMI', 'ACC', 'ACC', 'ERROR_BOUNDARY']
+            After RLE:      {'UMI': [(0, 4)], 'ACC': [(4, 6)]}
         """
+        # Set defaults for error handling
         exclude = exclude or set()
-        out = {}
-        i, n = 0, len(labels)
-        while i < n:
-            lab = labels[i]
-            if lab in exclude:
-                i += 1
+        span_through = span_through or {'ERROR_SUB', 'ERROR_INS'}
+    
+        # =========================================================================
+        # PHASE 1: GHOST RESOLUTION
+        # Replace span_through error labels with their preceding valid label
+        # This maintains segment continuity despite sequencing errors
+        # =========================================================================
+        resolved_labels = []
+        last_valid_label = None
+    
+        for label in labels:
+            if label in span_through:
+                # This is a benign error - "ghost" it by using the previous valid label
+                # If we haven't seen a valid label yet, keep the error label as-is
+                ghosted_label = last_valid_label if last_valid_label is not None else label
+                resolved_labels.append(ghosted_label)
+            else:
+                # This is a structural label or architectural error
+                # Update our tracking of the last valid label (unless it's excluded)
+                if label not in exclude:
+                    last_valid_label = label
+                resolved_labels.append(label)
+    
+        # =========================================================================
+        # PHASE 2: RUN-LENGTH ENCODING
+        # Compress consecutive identical labels into coordinate ranges
+        # =========================================================================
+    
+        # Output dictionary: label_name -> list of (start, end) coordinate pairs
+        label_regions = {}
+    
+        # Tracking variables for the scan
+        current_position = 0
+        total_length = len(resolved_labels)
+    
+        # Scan through the resolved label sequence
+        while current_position < total_length:
+            current_label = resolved_labels[current_position]
+        
+            # Skip labels that should be excluded or are still error labels
+            # (error labels would only remain if they appeared at the start before any valid label)
+            if current_label in exclude or current_label is None or current_label in span_through:
+                current_position += 1
                 continue
-            j = i + 1
-            while j < n and labels[j] == lab:
-                j += 1
-            out.setdefault(lab, []).append((i, j))
-            i = j
-        return out
+        
+            # Found a valid segment start - now find where this run ends
+            # A "run" is a contiguous stretch of identical labels
+            segment_start = current_position
+            segment_end = current_position + 1
+        
+            # Extend segment_end while the label matches current_label
+            while segment_end < total_length and resolved_labels[segment_end] == current_label:
+                segment_end += 1
+        
+            # Record this segment's coordinates [segment_start, segment_end)
+            # Note: segment_end is exclusive (Python slice convention)
+            # Example: segment_start=0, segment_end=8 means positions 0,1,2,3,4,5,6,7
+            if current_label not in label_regions:
+                label_regions[current_label] = []
+            label_regions[current_label].append((segment_start, segment_end))
+        
+            # Move to the next potential segment (start of next different label)
+            current_position = segment_end
+    
+        return label_regions
 
     # File I/O
     # don't actually think I need this anymore
@@ -319,55 +389,68 @@ class InvalidReadGenerator:
     
     # Error generation methods
     def generate_segment_loss(self, read: SimulatedRead) -> SimulatedRead:
-        """Remove random segments from read."""
-        # Select segments to remove (prefer variable segments)
-        removable = ["UMI", "ACC", "CBC", "i7", "i5", "cDNA", "polyA"]
-        available = [seg for seg in removable if seg in read.labels]
-        
+        """Remove a segment and optionally mark the boundary."""
+        available = [k for k in read.label_regions.keys() 
+                     if k in ['UMI', 'ACC', 'CBC']]
         if not available:
             return read
         
-        # Remove 1-3 segments
-        n_remove = min(random.randint(1, 3), len(available))
-        to_remove = set(random.sample(available, n_remove))
+        to_remove = random.choice(available)
+        regions = read.label_regions[to_remove]
         
-        new_sequence = ""
+        new_sequence = []
         new_labels = []
+        removed_ranges = []
         
-        # Iterate over segments properly
-        i = 0
-        n = len(read.labels)
-        while i < n:
-            label = read.labels[i]
-            # Find end of current segment
-            j = i
-            while j < n and read.labels[j] == label:
-                j += 1
-            
-            # Keep segment if not in removal list
-            if label not in to_remove:
-                segment_seq = read.sequence[i:j]
-                new_sequence += segment_seq
-                new_labels.extend([label] * len(segment_seq))
-            
-            i = j
+        for region_start, region_end in regions:
+            removed_ranges.append((region_start, region_end))
         
-        # Compute label_regions from modified labels
-        label_regions = self._invalid_regions_from_labels(new_labels, exclude={"ERROR"})
+        last_end = 0
+        for start, end in sorted(removed_ranges):
+            # Keep everything before this segment
+            new_sequence.append(read.sequence[last_end:start])
+            new_labels.extend(read.labels[last_end:start])
+            
+            # OPTIONALLY: Mark the deletion boundary
+            if self.mark_architectural_errors:
+                # Add a single ERROR_LOSS marker at the boundary
+                new_labels.append("ERROR_LOSS")
+                # Don't add to sequence (it's a marker, not a base)
+            
+            last_end = end
+        
+        # Add remainder
+        new_sequence.append(read.sequence[last_end:])
+        new_labels.extend(read.labels[last_end:])
+        
+        final_sequence = ''.join(new_sequence)
+        
+        # Recompute label_regions with error handling
+        label_regions = self._invalid_regions_from_labels(
+            new_labels, 
+            span_through={'ERROR_SUB', 'ERROR_INS'},  # ← CHANGED
+            exclude={'ERROR_LOSS', 'ERROR_BOUNDARY'}
+        )
         
         return SimulatedRead(
-            sequence=new_sequence,
+            sequence=final_sequence,
             labels=new_labels,
             label_regions=label_regions,
             metadata={
                 **read.metadata,
+                'is_invalid': True,
                 'error_type': 'segment_loss',
-                'removed_segments': list(to_remove)
+                'removed_segment': to_remove
             }
         )
     
     def generate_segment_duplication(self, read: SimulatedRead) -> SimulatedRead:
-        """Duplicate random segments (PCR artifacts)."""
+        """
+        Duplicate random segments (PCR artifacts).
+        
+        Optionally marks duplication boundaries with ERROR_DUP to help the model
+        learn that these are artifactual repeats rather than biological structure.
+        """
         duplicatable = ["UMI", "ACC", "CBC", "i7", "i5"]
         available = [seg for seg in duplicatable if seg in read.labels]
         
@@ -375,37 +458,59 @@ class InvalidReadGenerator:
             return read
         
         # Duplicate 1-2 segments
-        n_dup = min(random.randint(1, 2), len(available))
-        to_duplicate = set(random.sample(available, n_dup))
+        n_duplicated_segments = min(random.randint(1, 2), len(available))
+        segments_to_duplicate = set(random.sample(available, n_duplicated_segments))
         
         new_sequence = ""
         new_labels = []
         
         # Iterate over segments properly
-        i = 0
-        n = len(read.labels)
-        while i < n:
-            label = read.labels[i]
-            # Find end of current segment
-            j = i
-            while j < n and read.labels[j] == label:
-                j += 1
-            
-            segment_seq = read.sequence[i:j]
-            new_sequence += segment_seq
-            new_labels.extend([label] * len(segment_seq))
-            
-            # Duplicate if selected
-            if label in to_duplicate:
-                n_copies = random.randint(1, 3)
-                for _ in range(n_copies):
-                    new_sequence += segment_seq
-                    new_labels.extend([label] * len(segment_seq))
-            
-            i = j
+        current_position = 0
+        total_length = len(read.labels)
         
-        # Compute label_regions from modified labels
-        label_regions = self._invalid_regions_from_labels(new_labels, exclude={"ERROR"})
+        while current_position < total_length:
+            current_label = read.labels[current_position]
+            
+            # Find end of current segment (run-length encode on the fly)
+            segment_start = current_position
+            segment_end = current_position
+            while segment_end < total_length and read.labels[segment_end] == current_label:
+                segment_end += 1
+            
+            # Extract the segment sequence and labels
+            segment_sequence = read.sequence[segment_start:segment_end]
+            segment_length = len(segment_sequence)
+            
+            # Add original segment
+            new_sequence += segment_sequence
+            new_labels.extend([current_label] * segment_length)
+            
+            # Duplicate if this segment was selected
+            if current_label in segments_to_duplicate:
+                n_copies = random.randint(1, 3)
+                
+                for copy_num in range(n_copies):
+                    # Mark the duplication boundary (junction between original and copy)
+                    if self.mark_architectural_errors:
+                        # Insert ERROR_DUP marker at the start of each duplicated copy
+                        # This marks an unnatural boundary where the segment repeats
+                        new_labels.append("ERROR_DUP")
+                        # Note: No sequence base added - this is a positional marker
+                    
+                    # Add the duplicated segment
+                    new_sequence += segment_sequence
+                    new_labels.extend([current_label] * segment_length)
+            
+            # Move to next segment
+            current_position = segment_end
+        
+        # Compute label_regions with proper error handling
+        # ERROR_DUP markers are excluded (boundaries), benign errors span through
+        label_regions = self._invalid_regions_from_labels(
+            new_labels,
+            span_through={'ERROR_SUB', 'ERROR_INS'},
+            exclude={'ERROR_DUP', 'ERROR_BOUNDARY', 'ERROR_LOSS'}
+        )
         
         return SimulatedRead(
             sequence=new_sequence,
@@ -413,13 +518,15 @@ class InvalidReadGenerator:
             label_regions=label_regions,
             metadata={
                 **read.metadata,
+                'is_invalid': True,
                 'error_type': 'segment_duplication',
-                'duplicated_segments': list(to_duplicate)
+                'duplicated_segments': list(segments_to_duplicate),
+                'n_duplications': sum(1 for l in new_labels if l == 'ERROR_DUP')
             }
         )
     
     def generate_truncation(self, read: SimulatedRead) -> SimulatedRead:
-        """Truncate read at random position."""
+        """Truncate read and mark the break point."""
         min_length = max(50, len(read.sequence) // 4)
         max_length = len(read.sequence) - 20
         
@@ -428,20 +535,32 @@ class InvalidReadGenerator:
 
         truncate_pos = random.randint(min_length, max_length)
 
-        # Decide 5' or 3' truncation
         if random.random() < 0.5:
             # 5' truncation
             new_sequence = read.sequence[truncate_pos:]
             new_labels = read.labels[truncate_pos:]
+            
+            # Mark the 5' boundary
+            if self.mark_architectural_errors and new_labels:
+                new_labels[0] = "ERROR_BOUNDARY"
+            
             truncation_type = "5_prime"
         else:
             # 3' truncation
             new_sequence = read.sequence[:truncate_pos]
             new_labels = read.labels[:truncate_pos]
+            
+            # Mark the 3' boundary
+            if self.mark_architectural_errors and new_labels:
+                new_labels[-1] = "ERROR_BOUNDARY"
+            
             truncation_type = "3_prime"
         
-        # Compute label_regions from modified labels
-        label_regions = self._invalid_regions_from_labels(new_labels, exclude={"ERROR"})
+        label_regions = self._invalid_regions_from_labels(
+            new_labels,
+            span_through={'ERROR_SUB', 'ERROR_INS'},
+            exclude={'ERROR_BOUNDARY'}
+        )
         
         return SimulatedRead(
             sequence=new_sequence,
@@ -449,29 +568,59 @@ class InvalidReadGenerator:
             label_regions=label_regions,
             metadata={
                 **read.metadata,
+                'is_invalid': True,
                 'error_type': 'truncation',
-                'truncation_type': truncation_type,
-                'original_length': len(read.sequence),
-                'truncated_length': len(new_sequence)
+                'truncation_type': truncation_type
             }
         )
     
     def generate_chimeric(self, read: SimulatedRead, other_read: Optional[SimulatedRead] = None) -> SimulatedRead:
-        """Create chimeric read from two reads."""
+        """
+        Create chimeric read from two reads with marked junction point.
+        
+        Chimeric reads occur when two fragments from different molecules are joined,
+        commonly in library prep or PCR. The breakpoint is marked with ERROR_BOUNDARY
+        to help the model learn these unnatural junctions.
+        """
         if other_read is None:
             # Create a synthetic "other" read by scrambling current read
             other_read = self.generate_scrambled(read)
         
-        # Find breakpoint in both reads
-        break1 = random.randint(len(read.sequence) // 4, 3 * len(read.sequence) // 4)
-        break2 = random.randint(len(other_read.sequence) // 4, 3 * len(other_read.sequence) // 4)
+        # Find breakpoint in both reads (avoid very edges)
+        min_break_position = len(read.sequence) // 4
+        max_break_position = 3 * len(read.sequence) // 4
+        breakpoint_read1 = random.randint(min_break_position, max_break_position)
         
-        # Combine parts
-        new_sequence = read.sequence[:break1] + other_read.sequence[break2:]
-        new_labels = read.labels[:break1] + other_read.labels[break2:]
+        min_break_position_2 = len(other_read.sequence) // 4
+        max_break_position_2 = 3 * len(other_read.sequence) // 4
+        breakpoint_read2 = random.randint(min_break_position_2, max_break_position_2)
         
-        # Compute label_regions from modified labels
-        label_regions = self._invalid_regions_from_labels(new_labels, exclude={"ERROR"})
+        # Take 5' portion of first read
+        sequence_5prime = read.sequence[:breakpoint_read1]
+        labels_5prime = read.labels[:breakpoint_read1]
+        
+        # Take 3' portion of second read
+        sequence_3prime = other_read.sequence[breakpoint_read2:]
+        labels_3prime = other_read.labels[breakpoint_read2:]
+        
+        # Mark the chimeric junction if enabled
+        if self.mark_architectural_errors and labels_3prime:
+            # Mark the first base of the 3' portion as the junction point
+            # This indicates an unnatural splice between two molecules
+            labels_3prime = labels_3prime.copy()  # Avoid modifying original
+            labels_3prime[0] = "ERROR_BOUNDARY"
+        
+        # Combine the two parts
+        new_sequence = sequence_5prime + sequence_3prime
+        new_labels = labels_5prime + labels_3prime
+        
+        # Compute label_regions with proper error handling
+        # ERROR_BOUNDARY is excluded (marks unnatural junction)
+        label_regions = self._invalid_regions_from_labels(
+            new_labels,
+            span_through={'ERROR_SUB', 'ERROR_INS'},
+            exclude={'ERROR_BOUNDARY', 'ERROR_DUP', 'ERROR_LOSS'}
+        )
         
         return SimulatedRead(
             sequence=new_sequence,
@@ -479,14 +628,16 @@ class InvalidReadGenerator:
             label_regions=label_regions,
             metadata={
                 **read.metadata,
+                'is_invalid': True,
                 'error_type': 'chimeric',
-                'break_position_1': break1,
-                'break_position_2': break2
+                'breakpoint_read1': breakpoint_read1,
+                'breakpoint_read2': breakpoint_read2,
+                'chimeric_junction_marked': self.mark_architectural_errors
             }
         )
     
     def generate_scrambled(self, read: SimulatedRead) -> SimulatedRead:
-        """Scramble segment order."""
+        """Scramble segments and mark order errors."""
         # Extract segments
         segments = []
         current_segment = []
@@ -507,20 +658,35 @@ class InvalidReadGenerator:
         if len(segments) <= 1:
             return read
         
-        # Shuffle segments
+        # Shuffle
         original_order = [seg[0] for seg in segments]
         random.shuffle(segments)
         shuffled_order = [seg[0] for seg in segments]
         
-        # Reconstruct read
+        # Reconstruct with boundary markers
         new_sequence = ""
         new_labels = []
-        for label, seq in segments:
-            new_sequence += seq
-            new_labels.extend([label] * len(seq))
         
-        # Compute label_regions from modified labels
-        label_regions = self._invalid_regions_from_labels(new_labels, exclude={"ERROR"})
+        for i, (label, seq) in enumerate(segments):
+            # Mark segment boundaries that are out of order
+            if self.mark_architectural_errors and i > 0:
+                if shuffled_order[i] != original_order[i]:
+                    # This segment is out of order - mark first base
+                    new_sequence += seq
+                    new_labels.append("ERROR_ORDER")
+                    new_labels.extend([label] * (len(seq) - 1))
+                else:
+                    new_sequence += seq
+                    new_labels.extend([label] * len(seq))
+            else:
+                new_sequence += seq
+                new_labels.extend([label] * len(seq))
+        
+        label_regions = self._invalid_regions_from_labels(
+            new_labels,
+            span_through={'ERROR_SUB', 'ERROR_INS'},
+            exclude={'ERROR_ORDER'}
+        )
         
         return SimulatedRead(
             sequence=new_sequence,
@@ -528,6 +694,7 @@ class InvalidReadGenerator:
             label_regions=label_regions,
             metadata={
                 **read.metadata,
+                'is_invalid': True,
                 'error_type': 'scrambled',
                 'original_order': original_order,
                 'shuffled_order': shuffled_order
