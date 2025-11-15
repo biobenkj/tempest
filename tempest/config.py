@@ -377,11 +377,29 @@ class TempestConfig:
     pwm: Optional[PWMConfig] = None
     hybrid: Optional[HybridTrainingConfig] = None
     
+    # Label mapping (unified system for trainers, models, and decoders)
+    label_mapping: Optional[Dict[str, int]] = None
+    
     # Additional top-level configs from YAML
     evaluation: Optional[Dict[str, Any]] = None
     visualization: Optional[Dict[str, Any]] = None
     logging: Optional[Dict[str, Any]] = None
     output: Optional[Dict[str, Any]] = None
+    
+    def __post_init__(self):
+        """Initialize label mapping with default if not provided."""
+        if self.label_mapping is None:
+            # Default Tempest label mapping (18 labels)
+            self.label_mapping = {
+                # Structural segments (11)
+                'p7': 0, 'i7': 1, 'RP2': 2, 'UMI': 3, 'ACC': 4,
+                'cDNA': 5, 'polyA': 6, 'CBC': 7, 'RP1': 8, 'i5': 9, 'p5': 10,
+                # Sequencing errors (2)
+                'ERROR_SUB': 11, 'ERROR_INS': 12,
+                # Architectural errors (5)
+                'ERROR_BOUNDARY': 13, 'ERROR_ORDER': 14, 'ERROR_DUP': 15,
+                'ERROR_LOSS': 16, 'ERROR_UNKNOWN': 17
+            }
     
     @classmethod
     def from_yaml(cls, yaml_path: str):

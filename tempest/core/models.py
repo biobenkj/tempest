@@ -193,6 +193,7 @@ def build_model_with_length_constraints(
     length_constraints: Dict[str, Tuple[int, int]],
     constraint_weight: float = 5.0,
     label_binarizer=None,
+    label_mapping: Optional[Dict[str, int]] = None,
     max_seq_len: int = 512,
     constraint_ramp_epochs: int = 5,
     sparse_target: bool = False,
@@ -208,7 +209,9 @@ def build_model_with_length_constraints(
         base_model: The base model with CRF layer
         length_constraints: Dict mapping label_name -> (min_length, max_length)
         constraint_weight: Final penalty multiplier (λ in theory)
-        label_binarizer: sklearn LabelBinarizer for label mapping
+        label_binarizer: sklearn LabelBinarizer for label mapping (deprecated)
+        label_mapping: Dict mapping label_name -> label_index (preferred)
+                      e.g., {'p7': 0, 'i7': 1, ...}
         max_seq_len: Maximum sequence length (for XLA compilation)
         constraint_ramp_epochs: Number of epochs to ramp constraint from 0 to full
         sparse_target: If True, y is shape (batch, seq_len) with label indices
@@ -221,7 +224,32 @@ def build_model_with_length_constraints(
         from tempest.core.length_crf import ModelWithLengthConstrainedCRF
     except ImportError:
         # Fallback to relative import
-        from .length_crf import ModelWithLengthConstrainedCRF
+        try:
+            from .length_crf import ModelWithLengthConstrainedCRF
+        except ImportError:
+            logger.error("ModelWithLengthConstrainedCRF not available - cannot add constraints")
+            logger.warning("Returning base model without length constraints")
+            return base_model
+    
+    # Create label binarizer if needed
+    if label_binarizer is None:
+        # Create from label_mapping if provided
+        if label_mapping is None:
+            # Use default Tempest label mapping
+            label_mapping = {
+                'p7': 0, 'i7': 1, 'RP2': 2, 'UMI': 3, 'ACC': 4,
+                'cDNA': 5, 'polyA': 6, 'CBC': 7, 'RP1': 8, 'i5': 9, 'p5': 10,
+                'ERROR_SUB': 11, 'ERROR_INS': 12, 'ERROR_BOUNDARY': 13,
+                'ERROR_ORDER': 14, 'ERROR_DUP': 15, 'ERROR_LOSS': 16, 'ERROR_UNKNOWN': 17
+            }
+        
+        # Create simple label binarizer-like object
+        class SimpleLabelBinarizer:
+            def __init__(self, label_mapping):
+                self.label_to_idx = label_mapping
+                self.classes_ = sorted(label_mapping.keys(), key=lambda k: label_mapping[k])
+        
+        label_binarizer = SimpleLabelBinarizer(label_mapping)
     
     return ModelWithLengthConstrainedCRF(
         base_model=base_model,
@@ -261,6 +289,13 @@ def build_model_from_config(config) -> keras.Model:
     if cnn_kernels is None:
         cnn_kernels = getattr(model_config, 'cnn_kernel_size', [3, 5])
     
+    # Get other parameters with defaults
+    lstm_layers = getattr(model_config, 'lstm_layers', 1)
+    use_cnn = getattr(model_config, 'use_cnn', True)
+    use_bilstm = getattr(model_config, 'use_bilstm', True)
+    use_crf = getattr(model_config, 'use_crf', True)
+    use_attention = getattr(model_config, 'use_attention', False)
+    
     # Build base model
     base_model = build_cnn_bilstm_crf(
         vocab_size=getattr(model_config, 'vocab_size', 5),
@@ -268,21 +303,23 @@ def build_model_from_config(config) -> keras.Model:
         cnn_filters=cnn_filters,
         cnn_kernels=cnn_kernels,
         lstm_units=model_config.lstm_units,
-        lstm_layers=model_config.lstm_layers,
+        lstm_layers=lstm_layers,
         dropout=model_config.dropout,
         num_labels=model_config.num_labels,
         max_seq_len=model_config.max_seq_len,
-        use_cnn=model_config.use_cnn,
-        use_bilstm=model_config.use_bilstm,
-        use_crf=getattr(model_config, 'use_crf', True),
-        use_attention=getattr(model_config, 'use_attention', False),
+        use_cnn=use_cnn,
+        use_bilstm=use_bilstm,
+        use_crf=use_crf,
+        use_attention=use_attention,
         attention_units=getattr(model_config, 'attention_units', 64),
         length_constraints=length_constraints,
         constraint_weight=constraint_weight
     )
     
     # If length constraints and we need to wrap the model
-    if length_constraints and getattr(model_config, 'use_crf', True):
+    if length_constraints and use_crf:
+        # Get label_mapping from config (TempestConfig has it, ModelConfig doesn't)
+        label_mapping = getattr(config, 'label_mapping', None)
         label_binarizer = getattr(config, 'label_binarizer', None)
         constraint_ramp_epochs = getattr(model_config, 'constraint_ramp_epochs', 5)
         
@@ -291,6 +328,7 @@ def build_model_from_config(config) -> keras.Model:
             length_constraints=length_constraints,
             constraint_weight=constraint_weight,
             label_binarizer=label_binarizer,
+            label_mapping=label_mapping,
             max_seq_len=model_config.max_seq_len,
             constraint_ramp_epochs=constraint_ramp_epochs
         )
@@ -304,7 +342,8 @@ def build_model_from_config(config) -> keras.Model:
 def create_hybrid_model(
     base_model: keras.Model,
     length_constraints: Dict[str, Tuple[int, int]],
-    label_binarizer,
+    label_binarizer=None,
+    label_mapping: Optional[Dict[str, int]] = None,
     use_soft_constraints: bool = True,
     use_hard_constraints: bool = True,
     constraint_weight: float = 5.0,
@@ -316,7 +355,8 @@ def create_hybrid_model(
     Args:
         base_model: Base CNN-BiLSTM-CRF model
         length_constraints: Length constraints for specific labels
-        label_binarizer: Label encoder
+        label_binarizer: Label encoder (deprecated, use label_mapping)
+        label_mapping: Dict mapping label_name -> label_index (preferred)
         use_soft_constraints: Whether to add soft constraints (training)
         use_hard_constraints: Whether to use hard constraints (inference)
         constraint_weight: Weight for soft constraints
@@ -332,6 +372,7 @@ def create_hybrid_model(
             length_constraints=length_constraints,
             constraint_weight=constraint_weight,
             label_binarizer=label_binarizer,
+            label_mapping=label_mapping,
             constraint_ramp_epochs=constraint_ramp_epochs,
             sparse_target=True
         )
@@ -344,6 +385,10 @@ def create_hybrid_model(
     except ImportError:
         # Fallback to relative import
         from .hybrid_decoder import HybridConstraintDecoder
+    
+    # Get label_binarizer from wrapped model if needed
+    if hasattr(model, 'label_binarizer'):
+        label_binarizer = model.label_binarizer
     
     decoder = HybridConstraintDecoder(
         model=model,
@@ -382,10 +427,18 @@ def get_transition_matrix(model: keras.Model):
     """Extract transition matrix from CRF layer."""
     crf_layer = get_crf_layer(model)
     if crf_layer is not None:
-        if hasattr(crf_layer, 'transitions'):
-            return crf_layer.transitions.numpy()
-        elif hasattr(crf_layer, 'get_transition_params'):
+        # Try different methods to get transitions (different CRF implementations)
+        if hasattr(crf_layer, 'get_transition_params'):
+            # tf2crf CRF has this method
             return crf_layer.get_transition_params()
+        elif hasattr(crf_layer, 'transitions'):
+            # Direct access to transitions tensor
+            trans = crf_layer.transitions
+            return trans.numpy() if hasattr(trans, 'numpy') else trans
+        elif hasattr(crf_layer, 'trans'):
+            # Some implementations use 'trans'
+            trans = crf_layer.trans
+            return trans.numpy() if hasattr(trans, 'numpy') else trans
     return None
 
 

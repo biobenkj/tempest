@@ -107,16 +107,15 @@ def run_pipeline(
 
     # Dynamic lazy imports
     if command == "train":
-        # Training can have multiple variants
-        module = __import__("tempest.train", fromlist=["run_training", "run_ensemble_training"])
         if subcommand in ("hybrid", "hybrid_training"):
-            func = getattr(module, "run_hybrid_training", None)
+            from tempest.training.hybrid_trainer import run_hybrid_training as func
         elif subcommand in ("ensemble", "bma", "ensemble_training"):
-            func = getattr(module, "run_ensemble_training", None)
+            from tempest.training.ensemble import run_ensemble_training as func
         else:
-            func = getattr(module, "run_training", None)
+            from tempest.training.trainer import run_training as func
+
+    # ---- SIMULATE / VISUALIZE pass-through ----
     else:
-        # Default dispatch map
         dispatch_map = {
             "simulate": lambda: __import__("tempest.simulate", fromlist=["run_simulation"]).run_simulation,
             "visualize": lambda: __import__("tempest.visualize", fromlist=["run_visualization"]).run_visualization,
@@ -128,7 +127,6 @@ def run_pipeline(
     if func is None:
         raise ValueError(f"No valid function found for {command} {subcommand or ''}")
 
-    logger.debug(f"Dispatching to {func.__module__}.{func.__name__}")
     with status(f"Running {command}{' ' + subcommand if subcommand else ''}..."):
         result = func(config, output_dir=output_dir, **extra_args)
 

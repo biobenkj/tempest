@@ -33,7 +33,7 @@ simulation:
     chimeric_prob: 0.25
     scrambled_prob: 0.1
   mark_architectural_errors: true
-  
+
   # Additional test/validation splits
   n_train: 40000
   n_val: 5000
@@ -176,15 +176,15 @@ simulation:
 
 # Training Configuration
 training:
-  epochs: 50
+  epochs: 10
   batch_size: 32
   learning_rate: 0.001
   optimizer: "adam"
-  train_split: 0.8  # Add this since simulation references it
+  train_split: 0.8
   
   early_stopping:
     enabled: true
-    patience: 10
+    patience: 3
     min_delta: 0.0001
     monitor: "val_loss"
     restore_best: true
@@ -209,7 +209,7 @@ training:
     enabled: true
     type: "reduce_on_plateau"
     factor: 0.5
-    patience: 5
+    patience: 2
     min_lr: 0.00001
 
 # Hybrid Training Configuration

@@ -29,7 +29,6 @@ import yaml
 from rich.progress import Progress
 from rich.table import Table
 from rich.logging import RichHandler
-from tempest.main import main as tempest_main
 import logging
 
 __version__ = "0.3.0"
@@ -45,7 +44,7 @@ app = typer.Typer(
 
 # Import sub-applications AFTER setting default environment
 from tempest.simulate import simulate_app
-from tempest.train import train_app
+from tempest.train import train_app  # Import the train sub-application
 from tempest.evaluate import evaluate_app
 from tempest.combine import combine_app
 from tempest.demux import demux_app
@@ -53,7 +52,7 @@ from tempest.visualize import visualize_app
 
 # Register subcommands
 app.add_typer(simulate_app, name="simulate", help="Generate synthetic sequence data")
-app.add_typer(train_app, name = "train", help = "Train a tempest model")
+app.add_typer(train_app, name="train", help="Train Tempest models with various approaches")
 app.add_typer(evaluate_app, name="evaluate", help="Evaluate trained models")
 app.add_typer(visualize_app, name="visualize", help="Visualize predictions, training history, and data distributions")
 app.add_typer(combine_app, name="combine", help="Combine models using BMA/ensemble methods")
@@ -205,75 +204,89 @@ def info():
         console.print("[red]NumPy not installed[/red]")
 
     if memory:
-        console.print(f"[cyan]System Memory:[/cyan] {memory.total / (1024**3):.1f} GB")
-        console.print(f"[cyan]Available Memory:[/cyan] {memory.available / (1024**3):.1f} GB")
+        total_gb = memory.total / (1024**3)
+        available_gb = memory.available / (1024**3)
+        console.print(f"[cyan]Memory:[/cyan] {available_gb:.1f}GB available / {total_gb:.1f}GB total")
 
-    console.print("")
+    console.print("\n[bold cyan]Environment Variables[/bold cyan]")
+    console.print("=" * 60)
+    env_vars = {
+        'TEMPEST_LOG_LEVEL': os.getenv('TEMPEST_LOG_LEVEL', 'Not set'),
+        'TF_CPP_MIN_LOG_LEVEL': os.getenv('TF_CPP_MIN_LOG_LEVEL', 'Not set'),
+        'CUDA_VISIBLE_DEVICES': os.getenv('CUDA_VISIBLE_DEVICES', 'Not set')
+    }
+    for key, value in env_vars.items():
+        console.print(f"[cyan]{key}:[/cyan] {value}")
 
 
 @app.command()
 def init(
-    project_dir: Path = typer.Argument(
-        Path("."), 
-        help="Directory to initialize the Tempest project"
+    path: Path = typer.Argument(
+        ...,
+        help="Directory to initialize project in"
+    ),
+    name: Optional[str] = typer.Option(
+        None,
+        "--name",
+        help="Project name (defaults to directory name)"
     ),
     with_examples: bool = typer.Option(
-        False, 
-        "--with-examples", 
-        help="Include example configuration, data, and scripts"
-    ),
+        True,
+        "--examples/--no-examples",
+        help="Include example configuration and workflows"
+    )
 ):
     """
-    Initialize a new Tempest project directory.
+    Initialize a new Tempest project directory structure.
     
-    Creates a project structure with directories for configs, data, models,
-    results, logs, plots, and whitelists. If --with-examples is used, also
-    creates example configuration and workflow scripts.
+    Creates the necessary directories and configuration files for a Tempest project.
     """
-    console.print(f"\n[bold blue]Initializing Tempest project in {project_dir}[/bold blue]")
+    project_dir = Path(path).absolute()
+    project_name = name or project_dir.name
+    
+    console.print(f"\n[bold cyan]Initializing Tempest Project: {project_name}[/bold cyan]")
+    console.print(f"[dim]Location: {project_dir}[/dim]\n")
     
     # Create directory structure
-    dirs = [
-        project_dir / "configs",
-        project_dir / "data" / "raw",
-        project_dir / "data" / "processed",
-        project_dir / "data" / "simulated",
-        project_dir / "models",
-        project_dir / "results",
-        project_dir / "logs",
-        project_dir / "plots",
-        project_dir / "whitelist",
-        project_dir / "refs",
-        project_dir / "tmp"
+    directories = [
+        "configs",
+        "data/raw",
+        "data/processed",
+        "data/simulated",
+        "models",
+        "results",
+        "logs",
+        "plots",
+        "whitelist"
     ]
     
-    with status("Creating directories..."):
-        for d in dirs:
-            d.mkdir(parents=True, exist_ok=True)
-
-    console.log(f"[green]Created {len(dirs)} directories successfully[/green]")
+    with status("Creating project structure..."):
+        project_dir.mkdir(exist_ok=True)
+        for directory in directories:
+            (project_dir / directory).mkdir(parents=True, exist_ok=True)
     
-    # Create minimal default configuration
+    console.print("[green]Created project directories[/green]")
+    
     if with_examples:
-        # Example configuration based on standard 11-segment architecture
+        # Create example configuration
         example_config = {
             "model": {
-                "max_seq_len": 1500,
-                "num_labels": 9,  # 9 segments without RP1/RP2
-                "embedding_dim": 128,
-                "lstm_units": 256,
-                "lstm_layers": 2,
+                "architecture": "cnn_bilstm_crf",
+                "embedding_dim": 64,
+                "filters": [128, 256],
+                "kernel_sizes": [3, 5],
+                "lstm_units": 128,
                 "dropout": 0.3,
-                "use_cnn": True,
-                "use_bilstm": True,
+                "recurrent_dropout": 0.2,
+                "use_length_constraints": True,
+                "num_labels": 18,
+                "max_seq_len": 2000,
                 "batch_size": 32,
             },
-            "simulation": {
-                "num_sequences": 50000,
-                "train_split": 0.8,
-                "random_seed": 42,
-                "sequence_order": [
-                    "p7", "i7", "UMI", "ACC", "cDNA", "polyA", "CBC", "i5", "p5"
+            "architecture": {
+                "segments": [
+                    "p7", "i7", "RP2", "UMI", "ACC",
+                    "cDNA", "polyA", "CBC", "RP1", "i5", "p5"
                 ],
                 "sequences": {
                     "p7": "CAAGCAGAAGACGGCATACGAGAT",
@@ -358,17 +371,33 @@ def init(
                 --split \\
                 --num-sequences 10000
             
-            echo "Step 2: Train model"
+            echo "Step 2: Train standard model"
             tempest train standard \\
                 --config configs/config.yaml \\
                 --train-data data/processed/train.pkl.gz \\
                 --val-data data/processed/val.pkl.gz \\
-                --output-dir models \\
+                --output-dir models/standard \\
                 --epochs 20
             
-            echo "Step 3: Evaluate model"
+            echo "Step 3: Train hybrid model"
+            tempest train hybrid \\
+                --config configs/config.yaml \\
+                --train-data data/processed/train.pkl.gz \\
+                --val-data data/processed/val.pkl.gz \\
+                --output-dir models/hybrid \\
+                --epochs 20
+            
+            echo "Step 4: Train ensemble"
+            tempest train ensemble \\
+                --config configs/config.yaml \\
+                --train-data data/processed/train.pkl.gz \\
+                --val-data data/processed/val.pkl.gz \\
+                --output-dir models/ensemble \\
+                --num-models 5
+            
+            echo "Step 5: Evaluate model"
             tempest evaluate performance \\
-                --model models/best_model.h5 \\
+                --model models/standard/best_model.h5 \\
                 --test-data data/processed/val.pkl.gz \\
                 --output-dir results
             
@@ -381,19 +410,19 @@ def init(
         # Create example whitelist files
         i7_whitelist = project_dir / "whitelist" / "udi_i7.txt"
         i7_whitelist.write_text("ATTACTCG\nTCCGGAGA\nCGCTCATT\nGAGATTCC\n")
-        console.print("[green][/green] Created i7 whitelist")
+        console.print("[green]Created i7 whitelist[/green]")
         
         i5_whitelist = project_dir / "whitelist" / "udi_i5.txt"
         i5_whitelist.write_text("TATAGCCT\nATATGAGA\nAGAGGATA\nTCTACTCT\n")
-        console.print("[green][/green] Created i5 whitelist")
+        console.print("[green]Created i5 whitelist[/green]")
         
         cbc_whitelist = project_dir / "whitelist" / "cbc.txt"
         cbc_whitelist.write_text("AAAAAA\nAAAAAC\nAAAAAG\nAAAATA\n")
-        console.print("[green][/green] Created CBC whitelist")
+        console.print("[green]Created CBC whitelist[/green]")
         
         acc_pwm = project_dir / "whitelist" / "acc_pwm.txt"
         acc_pwm.write_text("# ACC PWM Matrix\nA: 0.9 0.1 0.1 0.3 0.3 0.25\nC: 0.03 0.8 0.8 0.2 0.2 0.25\nG: 0.03 0.05 0.05 0.3 0.2 0.25\nT: 0.04 0.05 0.05 0.2 0.3 0.25\n")
-        console.print("[green]Created ACC PWM file[/green] ")
+        console.print("[green]Created ACC PWM file[/green]")
     
     # Create README
     readme = project_dir / "README.md"
@@ -429,15 +458,29 @@ def init(
         
         3. **Train Model:**
            ```bash
+           # Standard model
            tempest train standard --config configs/config.yaml \\
                --train-data data/processed/train.pkl.gz \\
                --val-data data/processed/val.pkl.gz \\
-               --output-dir models
+               --output-dir models/standard
+           
+           # Hybrid model
+           tempest train hybrid --config configs/config.yaml \\
+               --train-data data/processed/train.pkl.gz \\
+               --val-data data/processed/val.pkl.gz \\
+               --output-dir models/hybrid
+           
+           # Ensemble
+           tempest train ensemble --config configs/config.yaml \\
+               --train-data data/processed/train.pkl.gz \\
+               --val-data data/processed/val.pkl.gz \\
+               --output-dir models/ensemble \\
+               --num-models 5
            ```
         
         4. **Evaluate:**
            ```bash
-           tempest evaluate performance --model models/best_model.h5 \\
+           tempest evaluate performance --model models/standard/best_model.h5 \\
                --test-data data/processed/val.pkl.gz
            ```
         
